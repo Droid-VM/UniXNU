@@ -104,7 +104,9 @@ if [ ! -d refer/libplatform/.git ]; then
   git clone --depth 1 --branch "$LIBPLATFORM_TAG" https://github.com/apple-oss-distributions/libplatform.git refer/libplatform
 fi
 export KERNEL_SDKROOT=$ROOT/.cache/fakeroot
-mkdir -p "$KERNEL_SDKROOT/usr/local/include/kernel" "$ROOT/build/xnu/obj/EXPORT_HDRS/libsa"
+# libsa exports no headers, but every kernel compile names its EXPORT_HDRS directory with -I; the out-of-tree
+# probes that replay a recorded compile (build-verified-root-probe.py) fail on -Wmissing-include-dirs without it.
+mkdir -p "$KERNEL_SDKROOT/usr/local/include/kernel" "$ROOT/build/xnu/obj/EXPORT_HDRS/libsa" "$ROOT/build/xnu/ios-obj/EXPORT_HDRS/libsa"
 copy_tree() {
   mkdir -p "$2"
   cp -R "$1/." "$2/"
