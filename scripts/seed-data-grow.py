@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Make a Data seed whose APFS container fills the tablet's storage: grow the container of an existing packed seed (DBRDISK1) to a chosen size.
 
-  seed-data-grow.py (--gib N | --auto [--userdata-bytes BYTES]) [--reserve-mib 1024] BASE.dbr OUTPUT.dbr
+  seed-data-grow.py (--gib N | --auto [--userdata-bytes BYTES]) [--reserve-mib 1024] [--volatile] BASE.dbr OUTPUT.dbr
 
 The same device ships with different storage sizes, so the size is chosen per build:
   --gib N        a container of exactly N GiB;
@@ -9,6 +9,8 @@ The same device ships with different storage sizes, so the size is chosen per bu
                  --userdata-bytes, and leaves out the root image (build/userdata-root/userdata-root.json), a 4 MiB guard, the log reserve
                  (--reserve-mib, the sheng-log-reserve value of the image, default 1024; 0 = none) and the store's own header and bitmap, then
                  rounds down to a whole GiB and keeps one more GiB free.
+  --volatile     for a board without a persistent store: 1 or 2 GiB. NativeRamBlock serves a disk of at most 2 GiB from RAM (each
+                 written page is allocated then), while a larger one is served only through the store and refuses writes without it.
 The container is grown on this Mac (a sparse raw image attached without mounting, `diskutil apfs resizeContainer`), then packed again: the output
 keeps only the nonzero pages, so it is about as big as BASE. The volume UUID is unchanged. The result is a different disk for the persistent
 store (the seed identity covers the size), so the Data of earlier images starts again. BASE is not modified; nothing is written to Git.
@@ -80,6 +82,7 @@ def main():
     size.add_argument('--auto', action='store_true')
     parser.add_argument('--userdata-bytes', type=lambda v: int(v, 0))
     parser.add_argument('--reserve-mib', type=int, default=1024)
+    parser.add_argument('--volatile', action='store_true')
     parser.add_argument('base', type=Path)
     parser.add_argument('output', type=Path)
     args = parser.parse_args()
@@ -89,8 +92,9 @@ def main():
         gib = auto_gib(args.userdata_bytes or userdata_bytes_from_fastboot(), args.reserve_mib)
     else:
         gib = args.gib
-    if not 3 <= gib <= MAX_GIB:
-        sys.exit(f'{gib} GiB is outside 3..{MAX_GIB}')
+    low, high = (1, 2) if args.volatile else (3, MAX_GIB)
+    if not low <= gib <= high:
+        sys.exit(f'{gib} GiB is outside {low}..{high}')
     target = gib * GIB
     blob = args.base.read_bytes()
     logical, extents = packed_ramdisk.regions(blob)
