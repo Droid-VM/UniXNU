@@ -129,7 +129,8 @@ def build(ctx, kernel=None):
         shutil.copyfile(data, payloads / 'scratch-data.img')
     command = ['python3', ctx.tree / adt['tool'], '--output', payloads / 'kernel.macho.adt', '--dram-size', str(spec['dram_size'])]
     for key, flag in (('owned_memory_size', '--owned-memory-size'), ('root_match_volume_uuid', '--root-match-volume-uuid'),
-                      ('chip_id', '--chip-id'), ('cpu_regs', '--cpu-regs'), ('psci_method', '--psci-method')):
+                      ('chip_id', '--chip-id'), ('cpu_regs', '--cpu-regs'), ('psci_method', '--psci-method'),
+                      ('dram_base', '--dram-base')):
         if adt.get(key) is not None:
             command += [flag, str(adt[key])]
     if seed:
