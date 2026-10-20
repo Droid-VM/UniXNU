@@ -83,12 +83,21 @@ def build(ctx, modules):
         # pass leaves behind. A first build from scratch therefore runs one pass without them; it stops at the link,
         # which needs their archives, so only the records are required of it.
         log('kernel: bootstrap pass for the compile records')
-        subprocess_env = {**env, 'XNU_BOOT_PROGRESS': '0'}
+        # The pass stands in empty placeholders for the archives the builders make next; they never reach a real link.
+        placeholders = ctx.tree / 'build/xnu/bootstrap-placeholders.txt'
+        placeholders.unlink(missing_ok=True)
+        subprocess_env = {**env, 'XNU_BOOT_PROGRESS': '0', 'UNIXNU_KERNEL_BOOTSTRAP': '1'}
         try:
             run(['bash', script], cwd=ctx.tree, env=subprocess_env, log_file=ctx.logs / 'kernel-bootstrap.log')
         except Error:
             if not record.is_file():
                 raise
+        finally:
+            if placeholders.is_file():
+                for line in placeholders.read_text().splitlines():
+                    if line.strip():
+                        Path(line.strip()).unlink(missing_ok=True)
+                placeholders.unlink()
     build_archives(ctx, env)
     run(['bash', script], cwd=ctx.tree, env=env, log_file=ctx.logs / 'kernel.log')
 
