@@ -87,6 +87,8 @@ def prepare(ctx, steps=()):
     feeds.update_submodules(ctx)
     modules = feeds.resolve(ctx)
     wanted = {name for step in steps for name in REFERENCES.get(step, ())}
+    # A feed source can name the steps that need it (a device repository's own references).
+    wanted |= {m.name for m in modules.values() if set(steps) & set((m.source or {}).get('steps', ()))}
     feeds.fetch(ctx, modules, only={m.name for m in modules.values() if m.origin == 'git' and (m.kind != 'refer' or m.name in wanted)})
     tree.assemble(ctx, modules)
     return modules
