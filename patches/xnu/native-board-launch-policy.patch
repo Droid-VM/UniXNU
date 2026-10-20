@@ -1,0 +1,23 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7353,6 +7353,20 @@
+ 	assert(scratch_addr);
+ 	assert(path);
+ 
++#if defined(XNU_BOARD_LAUNCH_POLICY) && XNU_BOARD_LAUNCH_POLICY
++	/*
++	 * The board's launchd overrides (jobs its hardware cannot serve), written as
++	 * root into the mounted Data before launchd reads them. Runs before each
++	 * attempt, so the writer is idempotent; it uses the scratch page before the
++	 * arguments below are copied out.
++	 */
++	extern int native_board_launch_policy(void *, uint64_t);
++	error = native_board_launch_policy(p, (uint64_t)scratch_addr);
++	if (error) {
++		panic("board launch policy failed: %d", error);
++	}
++#endif
++
+ 	/*
+ 	 * Copy out program name.
+ 	 */
