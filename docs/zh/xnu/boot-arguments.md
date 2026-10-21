@@ -70,6 +70,7 @@ mtype -i out/<device>/<os_profile>/<config>/payload/payload.img ::/EFI/UniXNU/un
 | `sheng-gpu-power=<n>` | 选择 GPU 电源序列 |
 | `sheng-gpu-metal=1` | 启用 Metal 路径 |
 | `sheng-gpu-addon=1` | 挂载 GPU addon 内容 |
+| `owner-staged-apps=1` | 把 OS 卷里待安装的系统 App（天气、日历、备忘录等）以只读 union 视图挂到 `/Applications` 上 |
 | `sheng-data-persist=<n>` | 1 只验证 Data store 窗口，2 打开写窗口 |
 | `sheng-data-reset=<n>` | 1 丢弃 Data overlay，2 同时要求 Setup |
 | `sheng-log-reserve=<mib>` | userdata 末尾为诊断日志和导出区保留的空间，默认 1024 |

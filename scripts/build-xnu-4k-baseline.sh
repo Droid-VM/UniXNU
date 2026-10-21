@@ -36,10 +36,11 @@ if [ -z "${UNIXNU_PATCH_LIST:-}" ]; then
 # The optional observation hooks overlap existing root/exec patch context.
 # Remove them first so earlier independent patches retain their idempotent checks.
 # The same holds for the boot-time GPU addon mount and the staged system apps copy (zzy), which edit the owner Data mount function
-# inside the systemos patch. Reverse newest first; the loop below re-applies them in name order.
-for LATE_PATCH in "$ROOT/patches/xnu/zzz-boot-progress.patch" "$ROOT/patches/xnu/zzyb-native-cryptex-os-view.patch" \
-    "$ROOT/patches/xnu/zzy-staged-system-apps.patch" "$ROOT/patches/xnu/zzy-native-gpu-addon-mount.patch" \
-    "$ROOT/patches/xnu/zzyc-owner-skip-launch-constraints.patch"; do
+# inside the systemos patch, and the staged system apps view (zzy-owner), which edits that function after them.
+# Reverse newest first; the loop below re-applies them in name order.
+for LATE_PATCH in "$ROOT/patches/xnu/zzz-boot-progress.patch" "$ROOT/patches/xnu/zzyc-owner-skip-launch-constraints.patch" \
+    "$ROOT/patches/xnu/zzyb-native-cryptex-os-view.patch" "$ROOT/patches/xnu/zzy-staged-system-apps.patch" \
+    "$ROOT/patches/xnu/zzy-owner-staged-apps-mount.patch" "$ROOT/patches/xnu/zzy-native-gpu-addon-mount.patch"; do
   if git -C .cache/xnu-work apply --reverse --check "$LATE_PATCH" >/dev/null 2>&1; then
     git -C .cache/xnu-work apply --reverse "$LATE_PATCH"
   fi

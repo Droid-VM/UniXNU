@@ -1,0 +1,40 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 0e1ac20..1c2ef35 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7269,6 +7269,26 @@ native_gpu_addon_prepare(proc_t p, user_addr_t scratch)
+ 	    "/System/Library/LaunchDaemons/org.blu-sharky.adrenoprobed.plist", &native_gpu_addon2_stage, &native_gpu_addon2_status);
+ }
+ 
++/* The deletable system apps (Weather, Calendar, Notes, Maps, ...) ship in the OS volume's /private/var/staged_system_apps: a restore copies
++ * that directory into the Data volume, and the first boot's data migration (SystemAppMigrator) installs the apps from there. An owner
++ * Data seed carries no copy and marks the migration done, so with boot-arg owner-staged-apps=1 the sealed directory itself is shown as a
++ * read-only union view over /Applications, mounted while /private/var still resolves to the OS volume (the Data mount covers it next).
++ * The apps then register as built-in system apps; their code is in the static trust cache with the rest of the OS. Never panics: a
++ * refused mount only records its status. */
++volatile int native_staged_apps_stage = 0;
++volatile int native_staged_apps_status = -1;
++static void
++native_staged_apps_prepare(proc_t p, user_addr_t scratch)
++{
++	uint32_t enabled = 0;
++	if (!PE_parse_boot_argn("owner-staged-apps", &enabled, sizeof(enabled)) || enabled != 1) {
++		return;
++	}
++	static const char source[] = "/private/var/staged_system_apps", point[] = "/Applications";
++	native_gpu_addon_mount(p, scratch, 0x800, source, sizeof(source), point, sizeof(point), "/Applications/Preferences.app/Info.plist",
++	    "/Applications/Weather.app/Info.plist", &native_staged_apps_stage, &native_staged_apps_status);
++}
++
+ static int
+ native_owner_data_prepare(proc_t p, user_addr_t scratch)
+ {
+@@ -7312,6 +7332,8 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
+ 	    (error = copyout("/private/var", request.path, 13)) ||
+ 	    (error = copyout(device_path, spec, strlen(device_path) + 1)) ||
+ 	    (error = copyout(payload, request.data, sizeof(payload)))) goto done;
++	/* still the OS volume's /private/var */
++	native_staged_apps_prepare(p, scratch);
+ 	native_owner_data_stage = 2;
+ 	error = mount(p, &request, &result);
+ 	if (error) goto done;
