@@ -176,6 +176,11 @@ def build(ctx, kernel=None):
             if not re.fullmatch(r'[A-Za-z0-9_.\-]{1,63},[0-9a-fA-F]{1,16},(?:[0-9a-fA-F]{2}){1,16},(?:[0-9a-fA-F]{2}){1,16}', fixup) or len(fixup) >= 160:
                 raise Error(f'malformed text fixup in board.toml [payload] text_fixups: {fixup}')
             command += ['--text-fixup', fixup]
+        # Options of the board's own ADT tool that the keys above do not cover, passed as given.
+        tool_args = adt.get('tool_args', [])
+        if not isinstance(tool_args, list) or not all(isinstance(item, str) for item in tool_args):
+            raise Error('board.toml [payload.adt] tool_args must be a list of strings')
+        command += tool_args
         run(command, cwd=ctx.tree, env=dict(os.environ, UNIXNU_UEFI=str(ctx.uefi or '')), log_file=ctx.logs / 'payload-adt.log')
     initrd = 'initrd = "Payloads/scratch-data.img"\n' if data else ''
     loader = '' if spec.get('loader', 'firmware') == 'firmware' else '[[driver]]\npath = "Payloads/DarwinBoot.efi"\n'

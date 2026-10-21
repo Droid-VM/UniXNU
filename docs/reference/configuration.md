@@ -180,6 +180,7 @@ Types are `s` for string, `x` for hex cells, `i` for decimal cells, `u` for unsi
 | `packed_data_ramdisk` | boolean | Use the packed Data format |
 | `ipad_identity` | boolean | Write the Apple device identity properties |
 | `unique_chip_id` | string | `required` when the seed is mandatory |
+| `tool_args` | list of strings | Further options of the board's ADT tool, passed as given |
 
 ## defconfig
 

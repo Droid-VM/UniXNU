@@ -179,6 +179,7 @@ kernel_args = ["-v", "serial=3", "debug=0x14e"]
 | `packed_data_ramdisk` | 布尔 | 使用 packed Data 格式 |
 | `ipad_identity` | 布尔 | 写入 Apple 设备身份属性 |
 | `unique_chip_id` | 字符串 | 种子必需时写 `required` |
+| `tool_args` | 字符串列表 | 板级 ADT 工具的其他选项，原样传入 |
 
 ## defconfig
 
