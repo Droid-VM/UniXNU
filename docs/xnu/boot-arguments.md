@@ -55,6 +55,7 @@ Use `amfi_get_out_of_my_way=1` only in a diagnostic boot. It changes the securit
 | `sheng-gpu-power=<n>` | Selects the GPU power sequence |
 | `sheng-gpu-metal=1` | Enables the Metal path |
 | `sheng-gpu-addon=1` | Mounts the GPU addon content |
+| `owner-staged-apps=1` | Shows the OS volume's staged system apps (Weather, Calendar, Notes, ...) as a read-only union view over `/Applications` |
 | `sheng-data-persist=<n>` | 1 proves the Data store window read-only, 2 opens it for writes |
 | `sheng-data-reset=<n>` | 1 discards the Data overlay, 2 also asks for Setup |
 | `sheng-log-reserve=<mib>` | End-of-userdata reserve for the diagnostic log and export region, default 1024 |
