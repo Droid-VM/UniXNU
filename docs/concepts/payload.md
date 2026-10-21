@@ -58,6 +58,7 @@ The ADT uses Apple's flattened node encoding. The board script named in `[payloa
 | `--trust-cache` | a trust cache bundle |
 | `--owner-trust-cache` | an owner-signed bundle with the original caches and extra modules. It replaces `--trust-cache` and skips the board allow-list |
 | `--ipad-identity` | `[payload.adt] ipad_identity` |
+| the board tool's own options | `[payload.adt] tool_args` |
 
 The ADT must reserve the following properties when the matching input exists:
 

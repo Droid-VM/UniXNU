@@ -58,6 +58,7 @@ ADT 使用 Apple 的扁平节点编码。`[payload.adt] tool` 指定的板级脚
 | `--trust-cache` | trust cache 包 |
 | `--owner-trust-cache` | owner 签名的包，包含原始缓存和额外模块。它替换 `--trust-cache`，并跳过板级允许列表 |
 | `--ipad-identity` | `[payload.adt] ipad_identity` |
+| 板级工具自己的选项 | `[payload.adt] tool_args` |
 
 ADT 必须为对应输入预留以下属性：
 
