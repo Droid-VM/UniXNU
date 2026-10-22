@@ -66,7 +66,7 @@
 | --- | --- |
 | `offline-native-gpu-broker` | 启动离线 GPU broker |
 | `zzy-native-gpu-addon-mount` | 为 GPU addon 内容和启动任务挂载只读 union 视图 |
-| `zzw-native-adreno-sandbox-grant` | 让 Adreno740 在 `NativeSandboxGrantProcess` 中指定 render server，并使其 user client 通过沙箱打开 |
+| `zzw-native-adreno-sandbox-grant` | 让 Adreno740 在 `NativeSandboxGrantProcess` 中指定 render server 或一组进程，并使其 user client 通过沙箱打开 |
 | `native-aes-personality` | 注册存储和控制台 personality |
 
 ## 诊断

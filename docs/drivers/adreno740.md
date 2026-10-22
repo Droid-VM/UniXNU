@@ -40,7 +40,7 @@ The runtime compiler chain is Metal, AIR, SPIR-V, NIR, IR3. AirNir is an offline
 | `--publish` | Writes `NativeAdrenoMetal.publish`. backboardd returns the native device to the original discovery, and CARenderServer composites the system UI through it. |
 | `--clients NAME,...` | Writes `NativeAdrenoMetal.clients`. Each listed process gets its own device and driver connection. Up to two also get a 256 MiB GPU window and their own shader cache. `*` lists every process. |
 
-The published device turns off backboardd's deep and compressed framebuffers. Patch `zzw-native-adreno-sandbox-grant` lets the accelerator service name the render server in `NativeSandboxGrantProcess`, so its user-client open passes the sandbox check.
+The published device turns off backboardd's deep and compressed framebuffers. Patch `zzw-native-adreno-sandbox-grant` lets the accelerator service name the render server in `NativeSandboxGrantProcess`, so its user-client open passes the sandbox check. The property can also be an array, the render server and the processes given a native device of their own (DroidVM's `droidvm-gpu-clients`).
 
 Adreno740 serves one user-client core per connection. The render server gets a 1 GiB window at `0x20000000`, and up to two listed clients get 256 MiB each with their own queue range and teardown.
 

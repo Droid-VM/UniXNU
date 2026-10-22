@@ -50,7 +50,7 @@ ADT 属性 `/chosen/amfi-only-platform-code` 让 AMFI 保持在平台代码策�
 
 ## GPU client 授权
 
-Adreno740 在加速器服务上发布 `NativeSandboxGrantProcess`。补丁 `zzw-native-adreno-sandbox-grant` 把打开进程的名称与该属性比较，指定进程可以绕过 `mac_iokit_check_open_service` 和 `mac_iokit_check_open` 打开 user client。render server 就是该指定进程。
+Adreno740 在加速器服务上发布 `NativeSandboxGrantProcess`。补丁 `zzw-native-adreno-sandbox-grant` 把打开进程的名称与该属性比较，指定进程可以绕过 `mac_iokit_check_open_service` 和 `mac_iokit_check_open` 打开 user client。该属性是一个名称（render server），或一个名称数组：板子若给其他进程各自的原生 Metal 设备，就把它们与 render server 一起列出，因为这些进程自己的沙箱配置同样拒绝该驱动的 user client。名称与进程名的前 16 个字符比较。
 
 ## verified root
 
