@@ -33,17 +33,38 @@ BRIDGE = ROOT / 'build/native-metal-bridge/ios/libnative_metal_bridge.a'
 pm4 = OUT / 'AdrenoPM4.o'
 subprocess.run([*base, '-std=c11', '-c', ROOT / 'kits/AdrenoPM4/AdrenoPM4.c', '-o', pm4], check=True)
 exe = bundle / 'NativeAdrenoMetal'
-# The device answers neither sharedMemorySize nor dedicatedMemorySize, which Core Image reads for every Metal context it makes
-# (CIMetalDeviceGetLimits): each CIContext raised an unrecognized selector, so iconservicesagent aborted on every SF Symbol it drew and the
-# processes waiting on its icons (Settings) never drew. Unified memory, as on the target hardware: the system's RAM, none of its own. The
-# frontend is compiled from a staged copy with the two methods for as long as NativeMetal lacks them.
+# Methods the OS frameworks call on the Metal objects and NativeMetal does not define yet; an unrecognized selector aborts the
+# caller. The frontend is compiled from a staged copy with each one placed after its anchor, for as long as NativeMetal lacks it.
+# - sharedMemorySize, dedicatedMemorySize (device): Core Image reads both for every Metal context it makes (CIMetalDeviceGetLimits);
+#   iconservicesagent aborted on every SF Symbol it drew, and Settings, waiting on its icons, never drew. Unified memory, as on the
+#   target hardware: the system's RAM, none of its own.
+# - getGPUPriority, getBackgroundGPUPriority (command queue): RenderBox reads both when it makes its queue (RB::Device::command_queue)
+#   and only compares them with the priorities it then sets; WidgetRenderer_Default aborted there, so the widgets stayed white. The
+#   setters apply nothing (one hardware queue), so none is applied: 0.
+# - respondsToSelector: (device) without targetDeviceInfo: the device inherits it from the target's _MTLDevice, which answers it from
+#   driver state only the target's IOGPU drivers set (NULL here). Metal's pipeline library loader (MTLPipelineLibraryBuilder::
+#   newLibraryWithFile, RenderBox's prebuilt pipelines) asks whether the device has it and then reads through it (a fault at 0x10 in
+#   WidgetRenderer_Default); refused, the loader describes the device by its name instead.
+ADDED_METHODS = [
+    ('- (BOOL)hasUnifiedMemory {return YES;}\n', 'targetDeviceInfo',
+     '- (BOOL)respondsToSelector:(SEL)selector {\n'
+     ' if(selector==sel_registerName("targetDeviceInfo"))return NO;   // the inherited _MTLDevice one, NULL without IOGPU\n'
+     ' return [super respondsToSelector:selector];\n'
+     '}\n'),
+    ('- (BOOL)hasUnifiedMemory {return YES;}\n', 'sharedMemorySize',
+     '- (uint64_t)sharedMemorySize {return NSProcessInfo.processInfo.physicalMemory;}\n'
+     '- (uint64_t)dedicatedMemorySize {return 0;}\n'),
+    ('- (BOOL)setBackgroundGPUPriority:(NSUInteger)priority {(void)priority;return NO;}\n', 'getGPUPriority',
+     '- (NSUInteger)getGPUPriority {return 0;}\n'
+     '- (NSUInteger)getBackgroundGPUPriority {return 0;}\n'),
+]
 frontend = (ROOT / 'drivers/NativeMetal/NativeBridgeMetalFrontend.mm').read_text()
-if 'sharedMemorySize' not in frontend:
-    anchor = '- (BOOL)hasUnifiedMemory {return YES;}\n'
+for anchor, marker, methods in ADDED_METHODS:
+    if marker in frontend:
+        continue
     if frontend.count(anchor) != 1:
-        raise SystemExit('NativeBridgeMetalFrontend.mm no longer declares hasUnifiedMemory exactly once')
-    frontend = frontend.replace(anchor, anchor + '- (uint64_t)sharedMemorySize {return NSProcessInfo.processInfo.physicalMemory;}\n'
-                                '- (uint64_t)dedicatedMemorySize {return 0;}\n')
+        raise SystemExit(f'NativeBridgeMetalFrontend.mm no longer has exactly one {anchor.strip()!r}')
+    frontend = frontend.replace(anchor, anchor + methods)
 staged_frontend = OUT / 'NativeBridgeMetalFrontend.mm'
 staged_frontend.write_text(frontend)
 subprocess.run([*(['xcrun', 'clang++'] + base[2:]), '-std=c++17', '-fobjc-arc', '-Wno-deprecated-declarations', '-bundle',
