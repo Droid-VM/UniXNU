@@ -33,6 +33,41 @@ def merge_pref(var, name, values):
     os.chmod(path, 0o600)
     print('pref', name, sorted(values))
 
+def write_network(var):
+    """Seed a SystemConfiguration Ethernet service on en0 set to DHCP, so configd/IPConfiguration brings the guest's
+    virtio-net interface (UniXNU-droidvm package/DroidVMVirtioEthernet.cpp, an IOEthernetController) up and leases an address
+    from the br-wifi network it is bridged to. configd brings an interface up only for a service in the current set, and none
+    is created for a new Ethernet interface on its own. The NetworkInterfaces.plist entry, which InterfaceNamer matches by the
+    MAC (the VM's --net mac), is what names the interface en0 for that service; with another MAC it would come up as en1, down."""
+    import uuid
+    scdir = var / 'preferences/SystemConfiguration'
+    scdir.mkdir(parents=True, exist_ok=True)
+    def load(name):
+        f = scdir / name
+        return (plistlib.loads(f.read_bytes()) if f.exists() else {}), f
+    prefs, pfile = load('preferences.plist')
+    prefs.setdefault('__VERSION__', 20191120)
+    service, setid = str(uuid.uuid4()).upper(), str(uuid.uuid4()).upper()
+    prefs['CurrentSet'] = '/Sets/' + setid
+    prefs['NetworkServices'] = {service: {
+        'DNS': {}, 'IPv4': {'ConfigMethod': 'DHCP'}, 'IPv6': {'ConfigMethod': 'Automatic'},
+        'Interface': {'DeviceName': 'en0', 'Hardware': 'Ethernet', 'Type': 'Ethernet', 'UserDefinedName': 'Ethernet'},
+        'Proxies': {'ExceptionsList': ['*.local', '169.254/16'], 'FTPPassive': 1},
+        'UserDefinedName': 'Ethernet'}}
+    prefs['Sets'] = {setid: {'Network': {
+        'Global': {'IPv4': {'ServiceOrder': [service]}},
+        'Service': {service: {'__LINK__': '/NetworkServices/' + service}}}, 'UserDefinedName': 'Automatic'}}
+    pfile.write_bytes(plistlib.dumps(prefs, fmt=plistlib.FMT_BINARY)); os.chmod(pfile, 0o644)
+    interfaces, ifile = load('NetworkInterfaces.plist')
+    interfaces.setdefault('__VERSION__', 20191120)
+    interfaces['Interfaces'] = [{
+        'Active': True, 'BSD Name': 'en0', 'IOBuiltin': False, 'IOInterfaceNamePrefix': 'en',
+        'IOInterfaceType': 6, 'IOInterfaceUnit': 0, 'IOMACAddress': bytes([0x02, 0x00, 0x00, 0xaa, 0xbb, 0x01]),
+        'SCNetworkInterfaceInfo': {'UserDefinedName': 'Ethernet'}, 'SCNetworkInterfaceType': 'Ethernet'}]
+    ifile.write_bytes(plistlib.dumps(interfaces, fmt=plistlib.FMT_BINARY)); os.chmod(ifile, 0o644)
+    print('network service en0 DHCP (service %s)' % service)
+
+
 def main():
     if len(sys.argv) != 3:
         sys.exit(__doc__)
@@ -72,6 +107,7 @@ def main():
                                    'SilentICDPUpgrade')})
             merge_pref(mount, 'com.apple.managedconfiguration.notbackedup', {
                 'LockdownActivationIndicatesCloudConfigurationAvailable': False})
+            write_network(mount)
             for sub in ('Bundle', 'Data/System', 'Shared/SystemGroup', 'Temp'):
                 d = mount / 'containers' / sub
                 if not d.is_dir():
@@ -85,7 +121,7 @@ def main():
         metadata = packed_ramdisk.pack(raw, output)
     report = dict(base_sha256=packed_ramdisk.inspect(base)[0]['sha256'], output=metadata,
                   preferences=['com.apple.migration', 'com.apple.springboard', 'com.apple.purplebuddy',
-                               'com.apple.purplebuddy.notbackedup', 'com.apple.managedconfiguration.notbackedup'],
+                               'com.apple.purplebuddy.notbackedup', 'com.apple.managedconfiguration.notbackedup'], network='en0 DHCP',
                   build=BUILD, source='github.com/dipa-studio/ios-sweet tools/sweet-root-tweaks.py')
     output.with_suffix('.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report, indent=2))
