@@ -37,12 +37,26 @@ exe = bundle / 'NativeAdrenoMetal'
 # render server's sandbox may refuse to read the list file beside the bundle, and the plugin then primes from this copy (PrimeShaders.h).
 PRIME_LIST = ROOT / 'build/prime-list.txt'
 prime_section = [f'-Wl,-sectcreate,__DATA,__primelist,{PRIME_LIST}'] if PRIME_LIST.is_file() else []
+# The device answers neither sharedMemorySize nor dedicatedMemorySize, which Core Image reads for every Metal context it makes
+# (CIMetalDeviceGetLimits): each CIContext raised an unrecognized selector, so iconservicesagent aborted on every SF Symbol it drew and the
+# processes waiting on its icons (Settings) never drew. Unified memory, as on the target hardware: the system's RAM, none of its own. The
+# frontend is compiled from a staged copy with the two methods for as long as NativeMetal lacks them.
+frontend = (ROOT / 'drivers/NativeMetal/NativeBridgeMetalFrontend.mm').read_text()
+if 'sharedMemorySize' not in frontend:
+    anchor = '- (BOOL)hasUnifiedMemory {return YES;}\n'
+    if frontend.count(anchor) != 1:
+        raise SystemExit('NativeBridgeMetalFrontend.mm no longer declares hasUnifiedMemory exactly once')
+    frontend = frontend.replace(anchor, anchor + '- (uint64_t)sharedMemorySize {return NSProcessInfo.processInfo.physicalMemory;}\n'
+                                '- (uint64_t)dedicatedMemorySize {return 0;}\n')
+staged_frontend = OUT / 'NativeBridgeMetalFrontend.mm'
+staged_frontend.write_text(frontend)
 subprocess.run([*(['xcrun', 'clang++'] + base[2:]), '-std=c++17', '-fobjc-arc', '-Wno-deprecated-declarations', '-bundle',
                 '-I', ROOT / 'drivers/Adreno740', '-I', ROOT / 'kits/AdrenoPM4', '-I', VULKAN_INCLUDE, '-I', ROOT / 'build/turnip-smoke',
+                '-I', ROOT / 'drivers/AdrenoMetal',
                 '-x', 'objective-c++', ROOT / 'drivers/AdrenoMetal/NativeAdrenoMetalPlugin.mm',
-                ROOT / 'drivers/AdrenoMetal/NativeBridgeMetalFrontend.mm', '-x', 'none', pm4, BRIDGE,
-                '-Wl,-dead_strip', *prime_section, '-lobjc', '-framework', 'Foundation', '-framework', 'Metal', '-framework', 'IOSurface', '-o', exe],
-               check=True)
+                 staged_frontend, '-x', 'none', pm4, BRIDGE,
+                 '-Wl,-dead_strip', *prime_section, '-lobjc', '-framework', 'Foundation', '-framework', 'Metal', '-framework', 'IOSurface', '-o', exe],
+                check=True)
 subprocess.run(['strip', '-x', exe], check=True)
 # The linker writes the debug symbols of the Rust bridge next to the executable; keep them beside the bundle, not in the image.
 symbols = OUT / 'NativeAdrenoMetal.dSYM'
