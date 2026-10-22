@@ -1,0 +1,25 @@
+diff --git a/bsd/vfs/vfs_lookup.c b/bsd/vfs/vfs_lookup.c
+index 3db098f..cb7b5fb 100644
+--- a/bsd/vfs/vfs_lookup.c
++++ b/bsd/vfs/vfs_lookup.c
+@@ -1509,7 +1509,19 @@ lookup_traverse_union(vnode_t dvp, vnode_t *new_dvp, vfs_context_t ctx)
+ 	nd.ni_dvp = dvp->v_mount->mnt_vnodecovered;
+ 	error = namei(&nd);
+ 	if (error == 0) {
+-		*new_dvp = nd.ni_vp;
++		/*
++		 * A lower entry that is not a directory (the OS volume's link to
++		 * the same directory in the SystemOS cryptex, for one) is shadowed
++		 * by the upper directory and has nothing below it: report it as
++		 * no corresponding lower directory, the end of the union for every
++		 * caller, rather than hand a directory read a non-directory.
++		 */
++		if (nd.ni_vp->v_type != VDIR) {
++			vnode_put(nd.ni_vp);
++			error = ENOENT;
++		} else {
++			*new_dvp = nd.ni_vp;
++		}
+ 	}
+ 	nameidone(&nd);
+ done:

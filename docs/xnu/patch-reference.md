@@ -83,6 +83,7 @@ Patches apply in name order from `patches/xnu/*.patch` and `kits/NativePrelink/p
 | `native-priv-work-interval` | Grants `PRIV_WORK_INTERVAL` before policy evaluation |
 | `native-work-interval-soft-fail` | Soft-fails a refused CA client work interval |
 | `native-union-getattrlistbulk` | Continues a bulk directory read in the lower union directory |
+| `native-union-shadowed-lower` | Ends a union directory read where the lower entry of that name is not a directory |
 | `null-root-media` | Handles a null root in `IOService::setRootMedia` |
 | `published-freezer-condition` | Fixes the freezer default condition |
 
