@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build the trust bundle for the boot image: one owner module for the Adreno Metal plugin, then the two original Apple
-trust modules byte for byte. Output: build/adreno-metal-plugin/owner-trust.bundle (ignored). The original modules are
+trust modules byte for byte, then any further original module a board supplies (ORIGINAL_EXTRA, pinned: the App cryptex's).
+Output: build/adreno-metal-plugin/owner-trust.bundle (ignored). The original modules are
 verified unchanged against build/original-static-system-trust; only the plugin's CDHashes are added, and those a board's own
 owner-built tools list in build/owner-trust-extra/*.json ({"cdhashes": [...], "category": N}), which are in the owner module too.
 The category is the entry's launch constraint category (0, none, unless the json names one): AMFI kills a program launchd starts
@@ -12,6 +13,31 @@ import struct
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def im4p_payload(data):
+    """The payload of an IM4P (DER sequence: "IM4P", type, version, payload, ...)."""
+    def item(at):
+        tag, size, at = data[at], data[at + 1], at + 2
+        if size & 0x80:
+            count = size & 0x7f
+            size, at = int.from_bytes(data[at:at + count], 'big'), at + count
+        return tag, at, size
+    tag, start, length = item(0)
+    at, items = start, []
+    while tag == 0x30 and at < start + length:
+        _, body, size = item(at)
+        items.append(data[body:body + size])
+        at = body + size
+    if len(items) < 4 or items[0] != b'IM4P':
+        raise SystemExit('Not an IM4P')
+    return items[3]
+
+
+# Further original Apple trust modules a board adds byte for byte, each the unchanged IM4P of its IPSW in
+# build/original-trust-extra/*.trustcache and accepted only with a digest pinned here: the App cryptex's, for a board that shows the
+# cryptex's Safari daemons (DroidVM's owner-app-cryptex=1).
+ORIGINAL_EXTRA = {'5d9bf23c900cb0b6ea241b1208a08aeef9cd863536452d85e68d1c0ef98e77c4': 'Cryptex1,AppTrustCache of 21H461'}
 original = (ROOT / 'build/original-static-system-trust/original-static-system.bundle').read_bytes()
 if hashlib.sha256(original).hexdigest() != '7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7':
     raise SystemExit('The original static/System trust bundle differs from the unchanged target input')
@@ -44,12 +70,21 @@ hashes = sorted(set(hashes) | set(cryptex_hashes))
 cdhash = hashes[0]
 identifier = uuid.uuid5(uuid.NAMESPACE_URL, 'org.blu-sharky.adreno-metal:' + ''.join(h.hex() for h in hashes))
 own = struct.pack('<I16sI', 2, identifier.bytes, len(hashes)) + b''.join(h + bytes([2, 0, categories.get(h, 0), 0]) for h in hashes)
-modules = [own, *originals]
-cursor, starts = 16, []
+extras = []
+for path in sorted((ROOT / 'build/original-trust-extra').glob('*.trustcache')):
+    im4p = path.read_bytes()
+    if hashlib.sha256(im4p).hexdigest() not in ORIGINAL_EXTRA:
+        raise SystemExit(f'{path.name} is not one of the pinned original trust caches')
+    module = im4p_payload(im4p)
+    if struct.unpack_from('<I', module)[0] != 2 or len(module) != 24 + struct.unpack_from('<I', module, 20)[0] * 24:
+        raise SystemExit(f'{path.name} carries no complete version-2 trust module')
+    extras.append(module)
+modules = [own, *originals, *extras]
+cursor, starts = 4 + 4 * len(modules), []
 for module in modules:
     starts.append(cursor)
     cursor += len(module)
-bundle = struct.pack('<4I', 3, *starts) + b''.join(modules)
+bundle = struct.pack(f'<{1 + len(modules)}I', len(modules), *starts) + b''.join(modules)
 def valid_like_the_loader(data):
     # The same structural checks as drivers/DarwinBoot/DarwinBootPkg/Driver/DarwinBoot.c ValidTrustCaches.
     count = struct.unpack_from('<I', data)[0]
@@ -76,5 +111,6 @@ out = ROOT / 'build/adreno-metal-plugin/owner-trust.bundle'
 out.write_bytes(bundle)
 (ROOT / 'build/adreno-metal-plugin/owner-trust.json').write_text(json.dumps(dict(
     bundle_sha256=hashlib.sha256(bundle).hexdigest(), own_cdhashes=[h.hex() for h in hashes], original_modules_unchanged=True,
+    original_extra_modules=[hashlib.sha256(m).hexdigest() for m in extras],
     apple_trust_chain_verified=False, purpose='owner trust for the Adreno Metal plugin and the board tools in build/owner-trust-extra'), indent=2) + '\n')
-print('PASS: owner trust bundle (own module + both original modules)', hashlib.sha256(bundle).hexdigest())
+print(f'PASS: owner trust bundle (own module + both original modules + {len(extras)} further original)', hashlib.sha256(bundle).hexdigest())
