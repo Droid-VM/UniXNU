@@ -1,8 +1,8 @@
 diff --git a/meson.build b/meson.build
-index 3aed8ca..6a2a30c 100644
+index 75bed36..8adc478 100644
 --- a/meson.build
 +++ b/meson.build
-@@ -985,6 +985,7 @@ if with_clc
+@@ -1078,6 +1078,7 @@ if with_gallium_rusticl or with_microsoft_clc
  endif
  
  with_gfx_compute = [

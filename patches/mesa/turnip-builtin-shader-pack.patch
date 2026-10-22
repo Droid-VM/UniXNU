@@ -1,8 +1,8 @@
 diff --git a/meson.options b/meson.options
-index 680d08f..8b92a2b 100644
+index 3cd0628..eeee155 100644
 --- a/meson.options
 +++ b/meson.options
-@@ -914,3 +914,6 @@ option('offline-air-nir-dir', type : 'string', value : '',
+@@ -930,3 +930,6 @@ option('offline-air-nir-dir', type : 'string', value : '',
         description : 'Optional external AIR frontend source directory for offline tests')
  option('offline-air-nir-llvm-config', type : 'string', value : '',
         description : 'Explicit LLVM config executable for the offline AIR frontend')
@@ -10,7 +10,7 @@ index 680d08f..8b92a2b 100644
 +option('tu-builtin-source-id', type : 'string', value : '', description : 'Exact builtin compiler source and profile identity')
 +option('tu-builtin-pack-header', type : 'string', value : '', description : 'Explicit generated builtin pack header; empty retains compiler path')
 diff --git a/src/freedreno/vulkan/meson.build b/src/freedreno/vulkan/meson.build
-index 762ecc8..b544a9f 100644
+index b0f35c9..de4b0c0 100644
 --- a/src/freedreno/vulkan/meson.build
 +++ b/src/freedreno/vulkan/meson.build
 @@ -139,7 +139,11 @@ endif
@@ -306,10 +306,10 @@ index 0000000..74e97e6
 +extern "C" VkResult tu_validate_builtin_shader_pack(VkDevice device, size_t size, const void *data);
 +#endif
 diff --git a/src/freedreno/vulkan/tu_clear_blit.cc b/src/freedreno/vulkan/tu_clear_blit.cc
-index 47a2fc6..1d33085 100644
+index e5bfd00..d6aa3a3 100644
 --- a/src/freedreno/vulkan/tu_clear_blit.cc
 +++ b/src/freedreno/vulkan/tu_clear_blit.cc
-@@ -981,33 +981,39 @@ static void
+@@ -926,33 +926,39 @@ static void
  compile_shader(struct tu_device *dev, struct nir_shader *nir,
                 unsigned consts, unsigned *offset, enum global_shader idx)
  {
@@ -369,7 +369,7 @@ index 47a2fc6..1d33085 100644
  
     struct tu6_global *global = dev->global_bo_map;
  
-@@ -1045,6 +1051,8 @@ tu_destroy_clear_blit_shaders(struct tu_device *dev)
+@@ -990,6 +996,8 @@ tu_destroy_clear_blit_shaders(struct tu_device *dev)
        if (dev->global_shaders[i])
           ir3_shader_destroy(dev->global_shaders[i]);
     }
@@ -379,7 +379,7 @@ index 47a2fc6..1d33085 100644
  
  enum r3d_type {
 diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.cc
-index 3b512f8..527a4d4 100644
+index 60244e1..5597422 100644
 --- a/src/freedreno/vulkan/tu_device.cc
 +++ b/src/freedreno/vulkan/tu_device.cc
 @@ -34,6 +34,7 @@
@@ -390,9 +390,9 @@ index 3b512f8..527a4d4 100644
  #include "tu_cmd_buffer.h"
  #include "tu_cs.h"
  #include "tu_descriptor_set.h"
-@@ -3049,6 +3050,11 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
- 
-    global = (struct tu6_global *)device->global_bo->map;
+@@ -3120,6 +3121,11 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
+     * overflow feedback that controls visibility-stream growth. */
+    memset(global, 0, global_size);
     device->global_bo_map = global;
 +#ifdef TU_HAS_DARWIN
 +   result = tu_builtin_pack_load(device);
@@ -403,7 +403,7 @@ index 3b512f8..527a4d4 100644
  
     if (device->vk.enabled_features.accelerationStructure &&
 diff --git a/src/freedreno/vulkan/tu_device.h b/src/freedreno/vulkan/tu_device.h
-index ce1d494..356ab86 100644
+index 5a6d73b..28a2b7b 100644
 --- a/src/freedreno/vulkan/tu_device.h
 +++ b/src/freedreno/vulkan/tu_device.h
 @@ -136,6 +136,8 @@ struct tu_physical_device
@@ -415,7 +415,7 @@ index ce1d494..356ab86 100644
     bool has_cached_non_coherent_memory;
     /* Index for device local, host-coherent, host-cached memory.
      * Only set to positive index when overwriting device-local, uncached memory
-@@ -310,6 +312,8 @@ struct tu_device
+@@ -330,6 +332,8 @@ struct tu_device
     int fd;
  
     struct ir3_compiler *compiler;
@@ -425,10 +425,10 @@ index ce1d494..356ab86 100644
     /* Backup in-memory cache to be used if the app doesn't provide one */
     struct vk_pipeline_cache *mem_cache;
 diff --git a/src/freedreno/vulkan/tu_shader.cc b/src/freedreno/vulkan/tu_shader.cc
-index 8c228e9..d99d55c 100644
+index 1f43ebf..96f5aca 100644
 --- a/src/freedreno/vulkan/tu_shader.cc
 +++ b/src/freedreno/vulkan/tu_shader.cc
-@@ -3858,10 +3858,21 @@ tu_empty_fs_create(struct tu_device *dev, struct tu_shader **shader,
+@@ -3855,10 +3855,21 @@ tu_empty_fs_create(struct tu_device *dev, struct tu_shader **shader,
     for (unsigned i = 0; i < MAX_SETS; i++)
        (*shader)->dynamic_descriptor_sizes[i] = -1;
  

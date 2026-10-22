@@ -1,5 +1,5 @@
 diff --git a/meson.options b/meson.options
-index fc7e9cb..680d08f 100644
+index 14c2d6f..3cd0628 100644
 --- a/meson.options
 +++ b/meson.options
 @@ -222,11 +222,18 @@ option(
@@ -23,7 +23,7 @@ index fc7e9cb..680d08f 100644
    'amdgpu-virtio',
    type : 'boolean',
 diff --git a/src/freedreno/vulkan/meson.build b/src/freedreno/vulkan/meson.build
-index d6c8a05..762ecc8 100644
+index b019710..b0f35c9 100644
 --- a/src/freedreno/vulkan/meson.build
 +++ b/src/freedreno/vulkan/meson.build
 @@ -100,6 +100,7 @@ libtu_includes = [
@@ -61,7 +61,7 @@ index d6c8a05..762ecc8 100644
  if freedreno_kmds.contains('msm')
    tu_flags += '-DTU_HAS_MSM'
    libtu_files += files('tu_knl_drm_msm.cc', 'tu_knl_drm.cc')
-@@ -225,7 +239,7 @@ libvulkan_freedreno = shared_library(
+@@ -226,7 +240,7 @@ libvulkan_freedreno = shared_library(
    c_args : [no_override_init_args, tu_flags, soong_compat_c_args],
    cpp_args : [tu_cpp_args, tu_flags, soong_compat_cpp_args],
    gnu_symbol_visibility : 'hidden',
@@ -71,10 +71,10 @@ index d6c8a05..762ecc8 100644
    install : true,
  )
 diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.cc
-index 82efb07..3b512f8 100644
+index 68255ce..60244e1 100644
 --- a/src/freedreno/vulkan/tu_device.cc
 +++ b/src/freedreno/vulkan/tu_device.cc
-@@ -327,6 +327,7 @@ get_device_extensions(const struct tu_physical_device *device,
+@@ -350,6 +350,7 @@ get_device_extensions(const struct tu_physical_device *device,
        .EXT_extended_dynamic_state2 = true,
        .EXT_extended_dynamic_state3 = true,
        .EXT_external_memory_dma_buf = true,
@@ -82,7 +82,7 @@ index 82efb07..3b512f8 100644
        .EXT_filter_cubic = device->info->props.has_tex_filter_cubic,
        .EXT_fragment_density_map = true,
        .EXT_fragment_density_map_offset = true,
-@@ -1163,6 +1164,8 @@ tu_get_properties(struct tu_physical_device *pdevice,
+@@ -1194,6 +1195,8 @@ tu_get_properties(struct tu_physical_device *pdevice,
           : pdevice->info->props.max_storage_buffer_range_bytes;
     props->maxPushConstantsSize = MAX_PUSH_CONSTANTS_SIZE;
     props->maxMemoryAllocationCount = UINT32_MAX;
@@ -91,7 +91,7 @@ index 82efb07..3b512f8 100644
     props->maxSamplerAllocationCount = 64 * 1024;
     props->bufferImageGranularity = 64;          /* A cache line */
     props->sparseAddressSpaceSize = pdevice->va_size;
-@@ -3161,6 +3164,9 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
+@@ -3232,6 +3235,9 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
                                   "pthread condattr init");
        goto fail_timeline_cond;
     }
@@ -101,7 +101,7 @@ index 82efb07..3b512f8 100644
     if (pthread_condattr_setclock(&condattr, CLOCK_MONOTONIC) != 0) {
        pthread_condattr_destroy(&condattr);
        result = vk_startup_errorf(physical_device->instance,
-@@ -3168,6 +3174,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
+@@ -3239,6 +3245,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
                                   "pthread condattr clock setup");
        goto fail_timeline_cond;
     }
@@ -109,7 +109,7 @@ index 82efb07..3b512f8 100644
     if (pthread_cond_init(&device->timeline_cond, &condattr) != 0) {
        pthread_condattr_destroy(&condattr);
        result = vk_startup_errorf(physical_device->instance,
-@@ -3485,6 +3492,17 @@ vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName)
+@@ -3560,6 +3567,17 @@ vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName)
     return tu_GetInstanceProcAddr(instance, pName);
  }
  
@@ -127,7 +127,7 @@ index 82efb07..3b512f8 100644
  static VkResult
  tu_add_to_heap(struct tu_device *dev, struct tu_bo *bo)
  {
-@@ -3684,7 +3702,18 @@ tu_AllocateMemory(VkDevice _device,
+@@ -3759,7 +3777,18 @@ tu_AllocateMemory(VkDevice _device,
     const VkImportMemoryFdInfoKHR *fd_info =
        vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_FD_INFO_KHR);
  
@@ -147,7 +147,7 @@ index 82efb07..3b512f8 100644
        assert(fd_info->handleType ==
                  VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
               fd_info->handleType ==
-@@ -3808,6 +3837,22 @@ tu_AllocateMemory(VkDevice _device,
+@@ -3890,6 +3919,22 @@ fail:
     return VK_SUCCESS;
  }
  
@@ -171,9 +171,10 @@ index 82efb07..3b512f8 100644
  tu_allocate_lazy_memory(struct tu_device *dev,
                          struct tu_device_memory *mem)
 diff --git a/src/freedreno/vulkan/tu_device.h b/src/freedreno/vulkan/tu_device.h
+index 7de14c0..5a6d73b 100644
 --- a/src/freedreno/vulkan/tu_device.h
 +++ b/src/freedreno/vulkan/tu_device.h
-@@ -300,6 +300,7 @@
+@@ -320,6 +320,7 @@ struct tu_device
  {
     struct vk_device vk;
     struct tu_instance *instance;
@@ -221,10 +222,10 @@ index ab27798..9c545c6 100644
     return VK_ERROR_INCOMPATIBLE_DRIVER;
  #endif
 diff --git a/src/freedreno/vulkan/tu_knl.h b/src/freedreno/vulkan/tu_knl.h
-index 4c2bf6a..a8ccd76 100644
+index dd27052..365cd2e 100644
 --- a/src/freedreno/vulkan/tu_knl.h
 +++ b/src/freedreno/vulkan/tu_knl.h
-@@ -58,6 +58,13 @@ struct tu_bo {
+@@ -66,6 +66,13 @@ struct tu_bo {
     int shared_fd;
  #endif
  
@@ -238,7 +239,7 @@ index 4c2bf6a..a8ccd76 100644
     bool implicit_sync : 1;
     bool never_unmap : 1;
     bool cached_non_coherent : 1;
-@@ -140,6 +147,9 @@ struct tu_knl {
+@@ -148,6 +155,9 @@ struct tu_knl {
                         const char *name);
     VkResult (*bo_init_dmabuf)(struct tu_device *dev, struct tu_bo **out_bo,
                                uint64_t size, enum tu_bo_alloc_flags flags, int prime_fd);
@@ -248,7 +249,7 @@ index 4c2bf6a..a8ccd76 100644
     int (*bo_export_dmabuf)(struct tu_device *dev, struct tu_bo *bo);
     VkResult (*bo_alloc_lazy)(struct tu_device *dev, struct tu_bo *bo);
     VkResult (*bo_map)(struct tu_device *dev, struct tu_bo *bo, void *placed_addr);
-@@ -221,6 +231,9 @@ tu_bo_init_dmabuf(struct tu_device *dev,
+@@ -229,6 +239,9 @@ tu_bo_init_dmabuf(struct tu_device *dev,
  int
  tu_bo_export_dmabuf(struct tu_device *dev, struct tu_bo *bo);
  
@@ -258,7 +259,7 @@ index 4c2bf6a..a8ccd76 100644
  void
  tu_bo_finish(struct tu_device *dev, struct tu_bo *bo);
  
-@@ -262,6 +275,7 @@ void tu_sparse_vma_finish(struct tu_device *device,
+@@ -270,6 +283,7 @@ void tu_sparse_vma_finish(struct tu_device *device,
                            struct tu_sparse_vma *vma);
  
  VkResult tu_knl_kgsl_load(struct tu_instance *instance, int fd);
@@ -1406,7 +1407,7 @@ index d56ab8a..2ab772b 100644
  
  static uint32_t
 diff --git a/src/vulkan/wsi/wsi_common_metal_layer.m b/src/vulkan/wsi/wsi_common_metal_layer.m
-index 67c3e7f..9fbb042 100644
+index d7f50df..0b41726 100644
 --- a/src/vulkan/wsi/wsi_common_metal_layer.m
 +++ b/src/vulkan/wsi/wsi_common_metal_layer.m
 @@ -4,6 +4,7 @@
@@ -1417,7 +1418,7 @@ index 67c3e7f..9fbb042 100644
  #include "wsi_common_metal_layer.h"
  
  #import <QuartzCore/CAMetalLayer.h>
-@@ -137,7 +138,9 @@
+@@ -137,7 +138,9 @@ void
  wsi_metal_layer_set_immediate(const CAMetalLayer *metal_layer,
                                bool enable_immediate)
  {
@@ -1427,7 +1428,7 @@ index 67c3e7f..9fbb042 100644
  }
  
  VkResult
-@@ -169,7 +172,9 @@
+@@ -168,7 +171,9 @@ wsi_metal_layer_configure(const CAMetalLayer *metal_layer,
        metal_layer.maximumDrawableCount = image_count;
        metal_layer.drawableSize = (CGSize){.width = width, .height = height};
        metal_layer.opaque = enable_opaque;
