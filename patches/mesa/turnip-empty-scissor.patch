@@ -1,8 +1,8 @@
 diff --git a/src/freedreno/vulkan/tu_pipeline.cc b/src/freedreno/vulkan/tu_pipeline.cc
-index dba43f9..8b010ed 100644
+index 0fb1431..1c89e18 100644
 --- a/src/freedreno/vulkan/tu_pipeline.cc
 +++ b/src/freedreno/vulkan/tu_pipeline.cc
-@@ -2854,13 +2858,16 @@ template <chip CHIP>
+@@ -2858,13 +2858,16 @@ template <chip CHIP>
  static unsigned
  tu6_scissor_size(struct tu_device *dev, const struct vk_viewport_state *vp)
  {

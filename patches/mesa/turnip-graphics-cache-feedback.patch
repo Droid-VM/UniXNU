@@ -1,7 +1,8 @@
 diff --git a/src/freedreno/vulkan/tu_pipeline.cc b/src/freedreno/vulkan/tu_pipeline.cc
+index 04f516e..0fb1431 100644
 --- a/src/freedreno/vulkan/tu_pipeline.cc
 +++ b/src/freedreno/vulkan/tu_pipeline.cc
-@@ -1958,7 +1958,10 @@
+@@ -1958,7 +1958,10 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
  
     if (!executable_info) {
        cache_hit = true;
@@ -13,7 +14,7 @@ diff --git a/src/freedreno/vulkan/tu_pipeline.cc b/src/freedreno/vulkan/tu_pipel
  
        unsigned char shader_blake3[BLAKE3_KEY_LEN + 1];
        memcpy(shader_blake3, pipeline_blake3, sizeof(pipeline_blake3));
-@@ -1997,7 +2000,8 @@
+@@ -1997,7 +2000,8 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
           cache_hit &= !!nir_shaders;
        }
  

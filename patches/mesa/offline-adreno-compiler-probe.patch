@@ -1,8 +1,8 @@
 diff --git a/meson.options b/meson.options
-index 678bc67..fc7e9cb 100644
+index 93a60e3..14c2d6f 100644
 --- a/meson.options
 +++ b/meson.options
-@@ -899,3 +899,11 @@ option(
+@@ -915,3 +915,11 @@ option(
    value : false,
    description : 'Build panfrost Rust components.'
  )
