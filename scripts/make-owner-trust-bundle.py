@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Build the trust bundle for the boot image: one owner module for the Adreno Metal plugin, then the two original Apple
 trust modules byte for byte. Output: build/adreno-metal-plugin/owner-trust.bundle (ignored). The original modules are
-verified unchanged against build/original-static-system-trust; only the plugin's CDHash is added."""
+verified unchanged against build/original-static-system-trust; only the plugin's CDHashes are added, and those a board's own
+owner-built tools list in build/owner-trust-extra/*.json ({"cdhashes": [...], "category": N}), which are in the owner module too.
+The category is the entry's launch constraint category (0, none, unless the json names one): AMFI kills a program launchd starts
+as a system service unless its category allows that, as the one of the program it stands in for does."""
 import hashlib
 import json
 from pathlib import Path
@@ -28,13 +31,19 @@ if cryptex_trust.is_file():
         raise SystemExit('The App cryptex trust module is not a complete version-2 module')
     cryptex_hashes = [module[24 + 24 * entry:24 + 24 * entry + 20] for entry in range(entries)]
 # DarwinBoot's ValidTrustCaches (and the kernel's binary search) need the hashes of a module in strictly ascending order.
-hashes = sorted({bytes.fromhex(trust['cdhash']), bytes.fromhex(trust['daemon_cdhash']),
-                 bytes.fromhex(trust['turnip_cdhash']), *cryptex_hashes})
-if len(hashes) != 3 + len(set(cryptex_hashes)):
+hashes = [bytes.fromhex(trust['cdhash']), bytes.fromhex(trust['daemon_cdhash']), bytes.fromhex(trust['turnip_cdhash'])]
+categories = {}
+for extra in sorted((ROOT / 'build/owner-trust-extra').glob('*.json')):
+    listed = json.loads(extra.read_text())
+    for value in listed['cdhashes']:
+        hashes.append(bytes.fromhex(value))
+        categories[hashes[-1]] = listed.get('category', 0)
+if len(set(hashes)) != len(hashes):
     raise SystemExit('Duplicate CDHash')
+hashes = sorted(set(hashes) | set(cryptex_hashes))
 cdhash = hashes[0]
 identifier = uuid.uuid5(uuid.NAMESPACE_URL, 'org.blu-sharky.adreno-metal:' + ''.join(h.hex() for h in hashes))
-own = struct.pack('<I16sI', 2, identifier.bytes, len(hashes)) + b''.join(h + bytes([2, 0, 0, 0]) for h in hashes)
+own = struct.pack('<I16sI', 2, identifier.bytes, len(hashes)) + b''.join(h + bytes([2, 0, categories.get(h, 0), 0]) for h in hashes)
 modules = [own, *originals]
 cursor, starts = 16, []
 for module in modules:
@@ -67,5 +76,5 @@ out = ROOT / 'build/adreno-metal-plugin/owner-trust.bundle'
 out.write_bytes(bundle)
 (ROOT / 'build/adreno-metal-plugin/owner-trust.json').write_text(json.dumps(dict(
     bundle_sha256=hashlib.sha256(bundle).hexdigest(), own_cdhashes=[h.hex() for h in hashes], original_modules_unchanged=True,
-    apple_trust_chain_verified=False, purpose='owner trust for the Adreno Metal plugin only'), indent=2) + '\n')
+    apple_trust_chain_verified=False, purpose='owner trust for the Adreno Metal plugin and the board tools in build/owner-trust-extra'), indent=2) + '\n')
 print('PASS: owner trust bundle (own module + both original modules)', hashlib.sha256(bundle).hexdigest())
