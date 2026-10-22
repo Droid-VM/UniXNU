@@ -33,10 +33,24 @@ BRIDGE = ROOT / 'build/native-metal-bridge/ios/libnative_metal_bridge.a'
 pm4 = OUT / 'AdrenoPM4.o'
 subprocess.run([*base, '-std=c11', '-c', ROOT / 'kits/AdrenoPM4/AdrenoPM4.c', '-o', pm4], check=True)
 exe = bundle / 'NativeAdrenoMetal'
+# The device answers neither sharedMemorySize nor dedicatedMemorySize, which Core Image reads for every Metal context it makes
+# (CIMetalDeviceGetLimits): each CIContext raised an unrecognized selector, so iconservicesagent aborted on every SF Symbol it drew and the
+# processes waiting on its icons (Settings) never drew. Unified memory, as on the target hardware: the system's RAM, none of its own. The
+# frontend is compiled from a staged copy with the two methods for as long as NativeMetal lacks them.
+frontend = (ROOT / 'drivers/NativeMetal/NativeBridgeMetalFrontend.mm').read_text()
+if 'sharedMemorySize' not in frontend:
+    anchor = '- (BOOL)hasUnifiedMemory {return YES;}\n'
+    if frontend.count(anchor) != 1:
+        raise SystemExit('NativeBridgeMetalFrontend.mm no longer declares hasUnifiedMemory exactly once')
+    frontend = frontend.replace(anchor, anchor + '- (uint64_t)sharedMemorySize {return NSProcessInfo.processInfo.physicalMemory;}\n'
+                                '- (uint64_t)dedicatedMemorySize {return 0;}\n')
+staged_frontend = OUT / 'NativeBridgeMetalFrontend.mm'
+staged_frontend.write_text(frontend)
 subprocess.run([*(['xcrun', 'clang++'] + base[2:]), '-std=c++17', '-fobjc-arc', '-Wno-deprecated-declarations', '-bundle',
                 '-I', ROOT / 'drivers/NativeAdreno', '-I', ROOT / 'kits/AdrenoPM4', '-I', VULKAN_INCLUDE, '-I', ROOT / 'build/turnip-smoke',
+                '-I', ROOT / 'drivers/NativeMetal',
                 '-x', 'objective-c++', ROOT / 'drivers/NativeMetal/NativeAdrenoMetalPlugin.mm',
-                ROOT / 'drivers/NativeMetal/NativeBridgeMetalFrontend.mm', '-x', 'none', pm4, BRIDGE,
+                staged_frontend, '-x', 'none', pm4, BRIDGE,
                 '-Wl,-dead_strip', '-lobjc', '-framework', 'Foundation', '-framework', 'Metal', '-framework', 'IOSurface', '-o', exe], check=True)
 subprocess.run(['strip', '-x', exe], check=True)
 # The linker writes the debug symbols of the Rust bridge next to the executable; keep them beside the bundle, not in the image.
