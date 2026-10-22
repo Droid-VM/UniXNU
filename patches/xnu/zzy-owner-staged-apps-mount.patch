@@ -1,8 +1,8 @@
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
-index 0e1ac20..1c2ef35 100644
+index 0e1ac20..2abfef6 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -7269,6 +7269,26 @@ native_gpu_addon_prepare(proc_t p, user_addr_t scratch)
+@@ -7269,6 +7269,43 @@ native_gpu_addon_prepare(proc_t p, user_addr_t scratch)
  	    "/System/Library/LaunchDaemons/org.blu-sharky.adrenoprobed.plist", &native_gpu_addon2_stage, &native_gpu_addon2_status);
  }
  
@@ -26,10 +26,27 @@ index 0e1ac20..1c2ef35 100644
 +	    "/Applications/Weather.app/Info.plist", &native_staged_apps_stage, &native_staged_apps_status);
 +}
 +
++/* With boot-arg owner-tools-overlay=1 the owner's tools in the Data volume's /private/var/ngpu/bin also show, read-only, over
++ * /usr/libexec. launchd starts only the jobs of the system's cached job set, by their program paths, so an owner tool runs by
++ * taking the file name of a job the board has no use for (the board names which). Mounted after the Data mount; never panics. */
++volatile int native_owner_tools_stage = 0;
++volatile int native_owner_tools_status = -1;
++static void
++native_owner_tools_prepare(proc_t p, user_addr_t scratch)
++{
++	uint32_t enabled = 0;
++	if (!PE_parse_boot_argn("owner-tools-overlay", &enabled, sizeof(enabled)) || enabled != 1) {
++		return;
++	}
++	static const char source[] = "/private/var/ngpu/bin", point[] = "/usr/libexec";
++	native_gpu_addon_mount(p, scratch, 0xa00, source, sizeof(source), point, sizeof(point), "/usr/libexec/lockdownd",
++	    "/usr/libexec/IOMFB_bics_daemon", &native_owner_tools_stage, &native_owner_tools_status);
++}
++
  static int
  native_owner_data_prepare(proc_t p, user_addr_t scratch)
  {
-@@ -7312,6 +7332,8 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
+@@ -7312,6 +7349,8 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
  	    (error = copyout("/private/var", request.path, 13)) ||
  	    (error = copyout(device_path, spec, strlen(device_path) + 1)) ||
  	    (error = copyout(payload, request.data, sizeof(payload)))) goto done;
@@ -38,3 +55,34 @@ index 0e1ac20..1c2ef35 100644
  	native_owner_data_stage = 2;
  	error = mount(p, &request, &result);
  	if (error) goto done;
+@@ -7328,6 +7367,7 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
+ 	    strcmp(vfs_statfs(data_mount)->f_fstypename, "apfs")) error = EINVAL;
+ 	if (!error) native_owner_data_stage = 4;
+ 	if (!error) native_gpu_addon_prepare(p, scratch);
++	if (!error) native_owner_tools_prepare(p, scratch);
+ done:
+ 	if (data_root) vnode_put(data_root);
+ 	native_owner_data_status = error;
+@@ -8006,8 +8046,20 @@ process_signature(proc_t p, struct image_params *imgp)
+ 	/* call the launch constraints hook */
+ 	os_reason_t launch_constraint_reason;
+ 	if ((error = mac_proc_check_launch_constraints(p, imgp, &launch_constraint_reason)) != 0) {
+-		signature_failure_reason = launch_constraint_reason;
+-		goto done;
++		/* AMFI (the original RELEASE kext) gates a system-service launch on a platform binary, which an owner-signed tool
++		 * in the owner trust module is not, so it is killed with a Launch Constraint Violation. This VM is not a security
++		 * boundary; owner-skip-launch-constraints=1 lets such a tool take a daemon's place. */
++		uint32_t owner_skip_launch_constraints = 0;
++		if (PE_parse_boot_argn("owner-skip-launch-constraints", &owner_skip_launch_constraints,
++		    sizeof(owner_skip_launch_constraints)) && owner_skip_launch_constraints == 1) {
++			if (launch_constraint_reason != OS_REASON_NULL) {
++				os_reason_free(launch_constraint_reason);
++			}
++			error = 0;
++		} else {
++			signature_failure_reason = launch_constraint_reason;
++			goto done;
++		}
+ 	}
+ 
+ #if XNU_TARGET_OS_OSX
