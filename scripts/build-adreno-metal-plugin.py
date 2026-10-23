@@ -91,7 +91,8 @@ REPLACED_METHODS = [
      ' if(!surface || !d)return nil;\n'
      ' const size_t planes=IOSurfaceGetPlaneCount(surface);\n'
      ' if(planes?plane>=planes:plane!=0){surfaceRefused(surface,plane,"no such plane");return nil;}\n'
-     ' uint8_t *base=(uint8_t *)IOSurfaceGetBaseAddress(surface);const size_t page=(size_t)getpagesize(),allocation=IOSurfaceGetAllocSize(surface);\n'
+     ' // vm_page_size, not getpagesize(): WebKit\'s GPU process may not read the hw.pagesize sysctl that getpagesize() asks.\n'
+     ' uint8_t *base=(uint8_t *)IOSurfaceGetBaseAddress(surface);const size_t page=(size_t)vm_page_size,allocation=IOSurfaceGetAllocSize(surface);\n'
      ' if(!page || (page&(page-1)) || !base || ((uintptr_t)base&(page-1)) || !allocation || allocation>SIZE_MAX-(page-1)) {\n'
      '  surfaceRefused(surface,plane,"no page-aligned mapping");return nil;\n'
      ' }\n'
@@ -103,6 +104,16 @@ REPLACED_METHODS = [
      ' }\n'
      ' const size_t bytes=(allocation+page-1)&~(page-1);\n'
      ' NBBuffer *buffer=surfaceBuffer(surface,base,bytes);if(!buffer){surfaceRefused(surface,plane,"import");return nil;}\n'
+     ' {  // Each OSType and pixel format a surface is first textured as (the first 32 pairs).\n'
+     '  static std::mutex seenLock;static uint64_t seen[32];static unsigned seenCount;\n'
+     '  const uint64_t pair=(uint64_t)IOSurfaceGetPixelFormat(surface)<<32|(uint32_t)d.pixelFormat;bool fresh=false;\n'
+     '  {std::lock_guard<std::mutex> lock(seenLock);fresh=seenCount<32 && std::find(seen,seen+seenCount,pair)==seen+seenCount;if(fresh)seen[seenCount++]=pair;}\n'
+     '  if(fresh) {\n'
+     '   const OSType f=IOSurfaceGetPixelFormat(surface);\n'
+     '   NBLOG(@"native-metal: iosurface %#x %c%c%c%c %zux%zu planes %zu textured as format %lu",IOSurfaceGetID(surface),(char)(f>>24),\n'
+     '         (char)(f>>16),(char)(f>>8),(char)f,IOSurfaceGetWidth(surface),IOSurfaceGetHeight(surface),planes,(unsigned long)d.pixelFormat);\n'
+     '  }\n'
+     ' }\n'
      ' if(!planes) {\n'
      '  NBTexture *texture=textureOnBuffer(buffer,d,offset,row,true);if(!texture){surfaceRefused(surface,plane,"texture");return nil;}\n'
      '  texture.surface=(IOSurfaceRef)CFRetain(surface);return (id<MTLTexture>)texture;\n'
@@ -161,12 +172,64 @@ for original, replacement in REPLACED_METHODS:
     if frontend.count(original) != 1:
         raise SystemExit(f'NativeBridgeMetalFrontend.mm no longer has exactly one {original.splitlines()[0]!r}')
     frontend = frontend.replace(original, replacement)
+# The plugin's own source, staged the same way while NativeMetal lacks the change:
+# - its clients list (NativeAdrenoMetal.clients, written from droidvm-gpu-clients) also takes a name ending in '*' for every process
+#   whose name begins with the rest: com.apple.WebKit.* gives WebKit's WebContent processes a device as well as its GPU process.
+#   CoreGraphics draws a layer's wide-color backing store ('b3a8' RGB10A8, 'w30r' RGB10) only through the GPU; without a device
+#   it draws nothing into one, and Safari's pages stayed black. The kernel's grant compares the first 16 characters of a name
+#   (com.apple.WebKit), and the command line has no room to name each process.
+plugin = (ROOT / 'drivers/NativeMetal/NativeAdrenoMetalPlugin.mm').read_text()
+PLUGIN_REPLACED = [
+    ('// Whether NativeAdrenoMetal.clients names this process (names separated by blanks, commas or new lines; "*" names every process).\n',
+     '// Whether NativeAdrenoMetal.clients names this process (names separated by blanks, commas or new lines; "*" names every process,\n'
+     '// a name ending in "*" every process whose name begins with the rest).\n'),
+    ('        if (!strcmp(name, "*") || !strcmp(name, self)) return true;\n',
+     '        if (!strcmp(name, "*") || !strcmp(name, self)) return true;\n'
+     '        else if (const size_t length = strlen(name); length > 1 && name[length - 1] == \'*\' && !strncmp(name, self, length - 1)) return true;\n'),
+]
+for original, replacement in PLUGIN_REPLACED:
+    if replacement in plugin:
+        continue
+    if plugin.count(original) != 1:
+        raise SystemExit(f'NativeAdrenoMetalPlugin.mm no longer has exactly one {original.strip()!r}')
+    plugin = plugin.replace(original, replacement)
+# - a client that may write in neither shader-cache directory -- WebKit's GPU process, whose sandbox refuses both -- got no device and
+#   said nothing, so CoreGraphics drew the page's wide-color layers nowhere: it now opens one whose cache is never on disk (the
+#   runtime's METAL2VULKAN_SHADER_CACHE_OPTIONAL, patches/metal2vulkan/0006).
+PLUGIN_REPLACED.append((
+    '            device = nil;\n'
+    '        }\n'
+    '    }\n'
+    '    return device;\n'
+    '}\n',
+    '            device = nil;\n'
+    '        }\n'
+    '    }\n'
+    '    if (!device) {\n'
+    '        setenv("METAL2VULKAN_SHADER_CACHE_OPTIONAL", "1", 1);\n'
+    '        const char *path = candidates[0][0] ? candidates[0] : candidates[1][0] ? candidates[1] : "/var/mobile/tmp/m2v";\n'
+    '        @try {\n'
+    '            device = native_bridge_metal_open(turnip, path, registryID, nullptr);\n'
+    '        } @catch (NSException *exception) {\n'
+    '            device = nil;\n'
+    '        }\n'
+    '    }\n'
+    '    return device;\n'
+    '}\n'))
+for original, replacement in PLUGIN_REPLACED[2:]:
+    if replacement in plugin:
+        continue
+    if plugin.count(original) != 1:
+        raise SystemExit(f'NativeAdrenoMetalPlugin.mm no longer has exactly one {original.strip()!r}')
+    plugin = plugin.replace(original, replacement)
+staged_plugin = OUT / 'NativeAdrenoMetalPlugin.mm'
+staged_plugin.write_text(plugin)
 staged_frontend = OUT / 'NativeBridgeMetalFrontend.mm'
 staged_frontend.write_text(frontend)
 subprocess.run([*(['xcrun', 'clang++'] + base[2:]), '-std=c++17', '-fobjc-arc', '-Wno-deprecated-declarations', '-bundle',
                 '-I', ROOT / 'drivers/NativeAdreno', '-I', ROOT / 'kits/AdrenoPM4', '-I', VULKAN_INCLUDE, '-I', ROOT / 'build/turnip-smoke',
                 '-I', ROOT / 'drivers/NativeMetal',
-                '-x', 'objective-c++', ROOT / 'drivers/NativeMetal/NativeAdrenoMetalPlugin.mm',
+                '-x', 'objective-c++', staged_plugin,
                 staged_frontend, '-x', 'none', pm4, BRIDGE,
                 '-Wl,-dead_strip', '-lobjc', '-framework', 'Foundation', '-framework', 'Metal', '-framework', 'IOSurface', '-o', exe], check=True)
 subprocess.run(['strip', '-x', exe], check=True)

@@ -23,7 +23,10 @@ if subprocess.check_output(['git', '-C', str(SOURCE), 'rev-parse', 'HEAD'], text
 PATCHES = [ROOT / 'drivers/NativeMetal/bridge/patches' / name for name in [
     '0001-optional-constant-output-members.patch', '0002-resource-wait-storage-dependencies.patch',
     '0003-cache-device-entry-point-priming.patch', '0004-fold-constant-global-field-loads.patch',
-    '0005-keep-module-decodes-and-profile-fingerprints.patch']]
+    '0005-keep-module-decodes-and-profile-fingerprints.patch']] + [ROOT / 'patches/metal2vulkan' / name for name in [
+    # The board's own: a shader-cache directory a sandboxed process cannot write opens anyway when the environment asks
+    # (METAL2VULKAN_SHADER_CACHE_OPTIONAL, which the Metal plugin sets for WebKit's GPU process); every lookup is then a miss.
+    '0006-optional-shader-cache-directory.patch']]
 tree_diff = subprocess.check_output(['git', '-C', str(SOURCE), 'diff', 'HEAD', '--'], text=True)
 def canonical_diff(diff):
     # Independent patches touch disjoint files; Git orders the combined diff by
