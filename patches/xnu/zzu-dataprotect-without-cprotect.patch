@@ -1,0 +1,101 @@
+diff --git a/bsd/vfs/kpi_vfs.c b/bsd/vfs/kpi_vfs.c
+index 10ac956..5ff5f44 100644
+--- a/bsd/vfs/kpi_vfs.c
++++ b/bsd/vfs/kpi_vfs.c
+@@ -104,6 +104,7 @@
+ #include <sys/user.h>
+ #include <sys/lockf.h>
+ #include <sys/xattr.h>
++#include <pexpert/pexpert.h>
+ #include <sys/kdebug.h>
+ 
+ #include <kern/assert.h>
+@@ -3701,6 +3702,65 @@ VNOP_ACCESS(vnode_t vp, int action, vfs_context_t ctx)
+ 	return _err;
+ }
+ 
++/*
++ * Data protection on a volume without content protection (a UniXNU owner Data volume is an unencrypted APFS volume, MNT_CPROTECT
++ * clear). APFS answers class 0 ("none") for every file there and keeps no class a caller sets, so a daemon that sets one and checks
++ * it back never sees it: PosterBoard creates its poster data store with NSFileProtectionNone (class D), finds the class missing,
++ * judges the store not viable and has no wallpaper. With boot-arg owner-dataprotect=1 a writable volume without content
++ * protection keeps the class a caller sets in an extended attribute, and a file without one reads as class D, which is what an
++ * unencrypted file is. Nothing is encrypted either way.
++ */
++#define NATIVE_DATAPROTECT_XATTR "com.unixnu.dataprotect-class"
++#define NATIVE_DATAPROTECT_CLASS_D 4
++
++static int
++native_dataprotect_emulated(vnode_t vp)
++{
++	static int enabled = -1;
++	if (enabled < 0) {
++		uint32_t value = 0;
++		enabled = PE_parse_boot_argn("owner-dataprotect", &value, sizeof(value)) && value == 1;
++	}
++	mount_t mp = vnode_mount(vp);
++	return enabled && mp != NULL && !(vfs_flags(mp) & MNT_CPROTECT) && !vfs_isrdonly(mp) &&
++	       (vnode_isreg(vp) || vnode_isdir(vp));
++}
++
++static void
++native_dataprotect_getattr(vnode_t vp, struct vnode_attr *vap, vfs_context_t ctx)
++{
++	uint32_t class = 0;
++	size_t size = sizeof(class);
++	uio_t uio = uio_create(1, 0, UIO_SYSSPACE, UIO_READ);
++	if (uio == NULL) {
++		return;
++	}
++	uio_addiov(uio, CAST_USER_ADDR_T(&class), sizeof(class));
++	if (vn_getxattr(vp, NATIVE_DATAPROTECT_XATTR, uio, &size, XATTR_NOSECURITY, ctx) != 0 || class == 0 || class > 7) {
++		class = NATIVE_DATAPROTECT_CLASS_D;
++	}
++	uio_free(uio);
++	vap->va_dataprotect_class = class;
++	VATTR_SET_SUPPORTED(vap, va_dataprotect_class);
++}
++
++/* Keeps the class asked for and takes it out of what the file system is asked to set (which would only drop it). */
++static void
++native_dataprotect_setattr(vnode_t vp, struct vnode_attr *vap, vfs_context_t ctx)
++{
++	uint32_t class = vap->va_dataprotect_class;
++	uio_t uio = uio_create(1, 0, UIO_SYSSPACE, UIO_WRITE);
++	if (uio == NULL) {
++		return;
++	}
++	uio_addiov(uio, CAST_USER_ADDR_T(&class), sizeof(class));
++	if (vn_setxattr(vp, NATIVE_DATAPROTECT_XATTR, uio, XATTR_NOSECURITY, ctx) == 0) {
++		VATTR_SET_SUPPORTED(vap, va_dataprotect_class);
++		VATTR_CLEAR_ACTIVE(vap, va_dataprotect_class);
++	}
++	uio_free(uio);
++}
++
+ #if 0
+ /*
+ *#
+@@ -3727,6 +3787,9 @@ VNOP_GETATTR(vnode_t vp, struct vnode_attr * vap, vfs_context_t ctx)
+ 
+ 	_err = (*vp->v_op[vnop_getattr_desc.vdesc_offset])(&a);
+ 	DTRACE_FSINFO(getattr, vnode_t, vp);
++	if (_err == 0 && VATTR_IS_ACTIVE(vap, va_dataprotect_class) && native_dataprotect_emulated(vp)) {
++		native_dataprotect_getattr(vp, vap, ctx);
++	}
+ 
+ 	return _err;
+ }
+@@ -3755,6 +3818,12 @@ VNOP_SETATTR(vnode_t vp, struct vnode_attr * vap, vfs_context_t ctx)
+ 	a.a_vap = vap;
+ 	a.a_context = ctx;
+ 
++	if (VATTR_IS_ACTIVE(vap, va_dataprotect_class) && native_dataprotect_emulated(vp)) {
++		native_dataprotect_setattr(vp, vap, ctx);
++		if (vap->va_active == 0) {
++			return 0;
++		}
++	}
+ 	_err = (*vp->v_op[vnop_setattr_desc.vdesc_offset])(&a);
+ 	DTRACE_FSINFO(setattr, vnode_t, vp);
+ 
