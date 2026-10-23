@@ -62,6 +62,78 @@ ADDED_METHODS = [
      '- (NSUInteger)getGPUPriority {return 0;}\n'
      '- (NSUInteger)getBackgroundGPUPriority {return 0;}\n'),
 ]
+# Methods replaced in the staged copy, for as long as NativeMetal has the original:
+# - newTextureWithDescriptor:iosurface:plane: (device) refused every surface with planes and said nothing; the render server
+#   (backboardd) logged "Failed to allocate MTLTexture from IOSurface" thousands of times, and what it could not texture stayed
+#   blank. A plane is now a texture at its offset in the imported surface, with its own row bytes, and each refusal names the
+#   surface and why (the first 64).
+REPLACED_METHODS = [
+    ('- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d iosurface:(IOSurfaceRef)surface plane:(NSUInteger)plane {\n'
+     ' if(!surface || !d || plane || IOSurfaceGetPlaneCount(surface))return nil;\n'
+     ' void *base=IOSurfaceGetBaseAddress(surface);const size_t page=(size_t)getpagesize(),allocation=IOSurfaceGetAllocSize(surface);\n'
+     ' if(!page || (page&(page-1)) || !base || ((uintptr_t)base&(page-1)) || !allocation || allocation>SIZE_MAX-(page-1))return nil;\n'
+     ' const size_t bytes=(allocation+page-1)&~(page-1);\n'
+     ' NBBuffer *buffer=surfaceBuffer(surface,base,bytes);if(!buffer)return nil;\n'
+     ' NBTexture *texture=textureOnBuffer(buffer,d,0,IOSurfaceGetBytesPerRow(surface),true);if(!texture)return nil;\n'
+     ' texture.surface=(IOSurfaceRef)CFRetain(surface);return (id<MTLTexture>)texture;\n'
+     '}\n',
+     'static void surfaceRefused(IOSurfaceRef surface,NSUInteger plane,const char *why) {\n'
+     ' static std::atomic<int> logged{0};\n'
+     ' if(logged.fetch_add(1)>=64)return;\n'
+     ' const OSType f=IOSurfaceGetPixelFormat(surface);\n'
+     ' NBLOG(@"native-metal: iosurface %#x refused (%s): %c%c%c%c %zux%zu planes %zu plane %lu row %zu alloc %zu base %p",\n'
+     '       IOSurfaceGetID(surface),why,(char)(f>>24),(char)(f>>16),(char)(f>>8),(char)f,IOSurfaceGetWidth(surface),\n'
+     '       IOSurfaceGetHeight(surface),IOSurfaceGetPlaneCount(surface),(unsigned long)plane,IOSurfaceGetBytesPerRow(surface),\n'
+     '       IOSurfaceGetAllocSize(surface),IOSurfaceGetBaseAddress(surface));\n'
+     '}\n'
+     '- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d iosurface:(IOSurfaceRef)surface plane:(NSUInteger)plane {\n'
+     ' if(!surface || !d)return nil;\n'
+     ' const size_t planes=IOSurfaceGetPlaneCount(surface);\n'
+     ' if(planes?plane>=planes:plane!=0){surfaceRefused(surface,plane,"no such plane");return nil;}\n'
+     ' uint8_t *base=(uint8_t *)IOSurfaceGetBaseAddress(surface);const size_t page=(size_t)getpagesize(),allocation=IOSurfaceGetAllocSize(surface);\n'
+     ' if(!page || (page&(page-1)) || !base || ((uintptr_t)base&(page-1)) || !allocation || allocation>SIZE_MAX-(page-1)) {\n'
+     '  surfaceRefused(surface,plane,"no page-aligned mapping");return nil;\n'
+     ' }\n'
+     ' size_t offset=0,row=IOSurfaceGetBytesPerRow(surface);\n'
+     ' if(planes) {\n'
+     '  const uint8_t *at=(const uint8_t *)IOSurfaceGetBaseAddressOfPlane(surface,plane);\n'
+     '  if(!at || at<base || at>=base+allocation){surfaceRefused(surface,plane,"plane outside the surface");return nil;}\n'
+     '  offset=(size_t)(at-base);row=IOSurfaceGetBytesPerRowOfPlane(surface,plane);\n'
+     ' }\n'
+     ' const size_t bytes=(allocation+page-1)&~(page-1);\n'
+     ' NBBuffer *buffer=surfaceBuffer(surface,base,bytes);if(!buffer){surfaceRefused(surface,plane,"import");return nil;}\n'
+     ' NBTexture *texture=textureOnBuffer(buffer,d,offset,row,true);if(!texture){surfaceRefused(surface,plane,"texture");return nil;}\n'
+     ' texture.surface=(IOSurfaceRef)CFRetain(surface);return (id<MTLTexture>)texture;\n'
+     '}\n'),
+    # - supportsFamily: (device), asked by RenderBox: on MTLGPUFamilyApple3 and up RenderBox draws an opaque layer -- a widget, a
+    #   poster -- into its own two-plane 4:4:4 format (MTLPixelFormatRGB8_444_2P over an '_RB4' IOSurface, 3 bytes a pixel), which
+    #   the bridge cannot make a texture of over an IOSurface (the texture is refused, "RBDrawable: no surface", and the render
+    #   server could not composite what was drawn): white widgets, a black wallpaper. RenderBox learns its tier by asking
+    #   supportsFamily: from Apple1 up until the first NO (RB::Device's constructor), so it alone is told Apple2 and draws them in
+    #   BGRA8; every other caller keeps the bridge's answer.
+    ('static void installAnswers(Class cls) {\n',
+     'static BOOL (*gFamilyAnswer)(id,SEL,NSInteger);\n'
+     'static BOOL familyForCaller(id self,SEL _cmd,NSInteger family) {\n'
+     ' if(family>=1003 && family<2000) {   // MTLGPUFamilyApple3 and up\n'
+     '  Dl_info caller;\n'
+     '  if(dladdr(__builtin_return_address(0),&caller) && caller.dli_fname && strstr(caller.dli_fname,"/RenderBox.framework/"))return NO;\n'
+     ' }\n'
+     ' return gFamilyAnswer(self,_cmd,family);\n'
+     '}\n'
+     'static void installAnswers(Class cls) {\n'),
+    ('  case NMB_ANSWER_FLAG_ARG: class_addMethod(cls,sel,(IMP)flagArgAnswer,"B24@0:8Q16");break;\n'
+     '  }\n'
+     ' }\n'
+     '}\n',
+     '  case NMB_ANSWER_FLAG_ARG: class_addMethod(cls,sel,(IMP)flagArgAnswer,"B24@0:8Q16");break;\n'
+     '  }\n'
+     ' }\n'
+     ' if(Method family=class_getInstanceMethod(cls,@selector(supportsFamily:))) {\n'
+     '  gFamilyAnswer=(BOOL (*)(id,SEL,NSInteger))method_getImplementation(family);\n'
+     '  method_setImplementation(family,(IMP)familyForCaller);\n'
+     ' }\n'
+     '}\n'),
+]
 frontend = (ROOT / 'drivers/NativeMetal/NativeBridgeMetalFrontend.mm').read_text()
 for anchor, marker, methods in ADDED_METHODS:
     if marker in frontend:
@@ -69,6 +141,12 @@ for anchor, marker, methods in ADDED_METHODS:
     if frontend.count(anchor) != 1:
         raise SystemExit(f'NativeBridgeMetalFrontend.mm no longer has exactly one {anchor.strip()!r}')
     frontend = frontend.replace(anchor, anchor + methods)
+for original, replacement in REPLACED_METHODS:
+    if replacement in frontend:
+        continue
+    if frontend.count(original) != 1:
+        raise SystemExit(f'NativeBridgeMetalFrontend.mm no longer has exactly one {original.splitlines()[0]!r}')
+    frontend = frontend.replace(original, replacement)
 staged_frontend = OUT / 'NativeBridgeMetalFrontend.mm'
 staged_frontend.write_text(frontend)
 subprocess.run([*(['xcrun', 'clang++'] + base[2:]), '-std=c++17', '-fobjc-arc', '-Wno-deprecated-declarations', '-bundle',
