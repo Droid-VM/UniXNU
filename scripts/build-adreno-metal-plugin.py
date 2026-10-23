@@ -289,6 +289,24 @@ FRONTEND_REPLACED = [
     # (layer_private_check_pixel_format), and AegirPoster (the Astronomy wallpaper, ClockKitUI's quad view in BGRA10_XR_sRGB) died on
     # "CAMetalLayerInvalid: unsupported extended range format". Given to every process but the render server, Settings showed stale
     # layer contents (a row drew the status bar's time), so only a "...Poster..." process other than PosterBoard gets the answer.
+    # IOSurfaces the render server textures are in use (IOSurfaceIncrementUseCount) for as long as the texture lives, as Apple's GPU
+    # driver counts a surface while a GPU resource is made of it. An app's Core Animation draws into a backing store in place, or
+    # recycles it for another layer, only while it is not in use (IOSurfaceIsInUse); with nothing counted, Settings redrew labels into
+    # the surfaces on screen and recycled them for other rows, and the render server's next frames showed torn text and one row's
+    # label in another's place. Only the render server counts: an app's own textures (its drawables) would look in use forever.
+    ('@property(nonatomic) NSUInteger heapOffset;\n@end\n// A no-copy import keeps its pages',
+     '@property(nonatomic) NSUInteger heapOffset;\n@property(nonatomic) BOOL counted;   // its surface counted in use (countUse)\n'
+     '- (void)countUse;\n@end\n'
+     '// The render server counts the surfaces it textures in use while the textures live (countUse).\n'
+     'static const bool gCountsSurfaceUse=!strcmp(getprogname(),"backboardd");\n'
+     '// A no-copy import keeps its pages'),
+    ('- (void)dealloc {nmb_texture_release(_handle);if(_surface)CFRelease(_surface);}\n',
+     '- (void)dealloc {nmb_texture_release(_handle);if(_surface){if(_counted)IOSurfaceDecrementUseCount(_surface);CFRelease(_surface);}}\n'
+     '- (void)countUse {if(_surface && !_counted && gCountsSurfaceUse){IOSurfaceIncrementUseCount(_surface);_counted=YES;}}\n'),
+    (' if(_surface)view.surface=(IOSurfaceRef)CFRetain(_surface);\n',
+     ' if(_surface){view.surface=(IOSurfaceRef)CFRetain(_surface);[view countUse];}\n'),
+    (' gSurfaceTextures++;texture.surface=(IOSurfaceRef)CFRetain(surface);return (id<MTLTexture>)texture;\n',
+     ' gSurfaceTextures++;texture.surface=(IOSurfaceRef)CFRetain(surface);[texture countUse];return (id<MTLTexture>)texture;\n'),
     ('   if(!strcmp(name,"supportsExtendedXR10Formats"))value=0;\n',
      '   if(!strcmp(name,"supportsExtendedXR10Formats") && (!strstr(getprogname(),"Poster") || !strcmp(getprogname(),"PosterBoard")))value=0;\n'),
 ]
