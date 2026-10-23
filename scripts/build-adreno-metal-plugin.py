@@ -39,7 +39,15 @@ exe = bundle / 'NativeAdrenoMetal'
 #   driver state only the target's IOGPU drivers set (NULL here). Metal's pipeline library loader (MTLPipelineLibraryBuilder::
 #   newLibraryWithFile, RenderBox's prebuilt pipelines) asks whether the device has it and then reads through it (a fault at 0x10 in
 #   WidgetRenderer_Default); refused, the loader describes the device by its name instead.
+# - setDepthClipMode: (render encoder): VectorKit sets it on every encoder (Maps aborted on the unrecognized selector). The runtime has
+#   no depth clamp, so Clip, Metal's default, is what it draws; Clamp is drawn as Clip and said once.
 ADDED_METHODS = [
+    ('- (void)setLineWidth:(float)width {[self check:nmb_render_set_line_width(self.handle,width) what:"setLineWidth"];}\n',
+     'setDepthClipMode',
+     '- (void)setDepthClipMode:(MTLDepthClipMode)mode {\n'
+     ' static std::atomic<bool> told{false};\n'
+     ' if(mode!=MTLDepthClipModeClip && !told.exchange(true))NBLOG(@"native-metal: depth clamp requested; drawn with depth clipping");\n'
+     '}\n'),
     ('- (BOOL)hasUnifiedMemory {return YES;}\n', 'targetDeviceInfo',
      '- (BOOL)respondsToSelector:(SEL)selector {\n'
      ' if(selector==sel_registerName("targetDeviceInfo"))return NO;   // the inherited _MTLDevice one, NULL without IOGPU\n'
