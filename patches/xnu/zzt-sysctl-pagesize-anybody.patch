@@ -1,0 +1,19 @@
+diff --git a/bsd/kern/kern_newsysctl.c b/bsd/kern/kern_newsysctl.c
+index e4b17c6..10eb8a1 100644
+--- a/bsd/kern/kern_newsysctl.c
++++ b/bsd/kern/kern_newsysctl.c
+@@ -1770,7 +1770,13 @@ found:
+ 	lck_rw_done(&sysctl_geometry_lock);
+ 
+ #if CONFIG_MACF
+-	if (!from_kernel) {
++	/*
++	 * Reading the page size (hw.pagesize, which getpagesize() and sysconf(_SC_PAGESIZE) ask) is left to everyone: the GPU's
++	 * userspace -- the Metal plugin, its Vulkan bridge and driver -- sizes its mappings by it inside WebKit's GPU process, whose
++	 * sandbox refuses the read, and a page size of -1 refused every IOSurface it was to draw into.
++	 */
++	const bool page_size_read = namelen == 2 && name[0] == CTL_HW && name[1] == HW_PAGESIZE && req->newptr == USER_ADDR_NULL;
++	if (!from_kernel && !page_size_read) {
+ 		error = mac_system_check_sysctlbyname(kauth_cred_get(),
+ 		    namestring,
+ 		    name,
