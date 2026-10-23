@@ -64,8 +64,10 @@ for anchor, marker, methods in ADDED_METHODS:
 # - the plugin's clients list (NativeAdrenoMetal.clients, written from droidvm-gpu-clients) also takes a name ending in '*' for every
 #   process whose name begins with the rest: com.apple.WebKit.* gives WebKit's WebContent processes a device as well as its GPU process.
 #   CoreGraphics draws a layer's wide-color backing store ('b3a8' RGB10A8, 'w30r' RGB10) only through the GPU; without a device
-#   it draws nothing into one, and Safari's pages stayed black. The kernel's grant compares the first 16 characters of a name
-#   (com.apple.WebKit), and the command line has no room to name each process.
+#   it draws nothing into one, and Safari's pages stayed black. The command line has no room to name each process. "*X*" names
+#   every process whose name holds X: *Poster* gives PosterBoard and each wallpaper's poster extension (AegirPoster, the Kaleidoscope
+#   and Extragalactic watch faces) a device; without one they crashed rendering the gallery's previews. The kernel's grant (patch
+#   zzw-native-adreno-sandbox-grant) matches the same three forms.
 # - a client that may write in neither shader-cache directory -- WebKit's GPU process, whose sandbox refuses both -- got no device
 #   ("no-cachedir"), so CoreGraphics drew the page's wide-color layers nowhere: it now opens one whose cache is never on disk (the
 #   runtime's METAL2VULKAN_SHADER_CACHE_OPTIONAL, patches/metal2vulkan/0006).
@@ -84,10 +86,13 @@ PLUGIN_REPLACED = [
      '        setenv("TU_DEBUG", "", 0);\n'),
     ('// Whether NativeAdrenoMetal.clients names this process (names separated by blanks, commas or new lines; "*" names every process).\n',
      '// Whether NativeAdrenoMetal.clients names this process (names separated by blanks, commas or new lines; "*" names every process,\n'
-     '// a name ending in "*" every process whose name begins with the rest).\n'),
+     '// a name ending in "*" every process whose name begins with the rest, "*X*" every process whose name holds X).\n'),
     ('        if (!strcmp(name, "*") || !strcmp(name, self)) return true;\n',
      '        if (!strcmp(name, "*") || !strcmp(name, self)) return true;\n'
-     '        else if (const size_t length = strlen(name); length > 1 && name[length - 1] == \'*\' && !strncmp(name, self, length - 1)) return true;\n'),
+     '        else if (const size_t length = strlen(name); length > 1 && name[length - 1] == \'*\') {\n'
+     '            name[length - 1] = 0;\n'
+     '            if (name[0] == \'*\' ? strstr(self, name + 1) != nullptr : !strncmp(name, self, length - 1)) return true;\n'
+     '        }\n'),
     ('    if (!device) clientFailure(port, usable ? "no-device" : "no-cachedir", lastError);\n',
      '    if (!device && !usable) {\n'
      '        setenv("METAL2VULKAN_SHADER_CACHE_OPTIONAL", "1", 1);\n'
