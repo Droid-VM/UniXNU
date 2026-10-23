@@ -29,7 +29,10 @@ PATCHES = [ROOT / 'drivers/NativeMetal/bridge/patches' / name for name in [
     '0007-accept-two-plane-rgb-surfaces.patch']] + [ROOT / 'patches/metal2vulkan' / name for name in [
     # The board's own: a shader-cache directory a sandboxed process cannot write opens anyway when the environment asks
     # (METAL2VULKAN_SHADER_CACHE_OPTIONAL, which the Metal plugin sets for WebKit's GPU process); every lookup is then a miss.
-    '0006-optional-shader-cache-directory.patch']]
+    '0006-optional-shader-cache-directory.patch',
+    # An `_sRGB` extended-range form's blend the translator's fast-math model does not hold takes its rounded model (Metal's own
+    # without fast math) instead of refusing the pipeline: NanoUniverse's starfield, the Astronomy wallpaper, had no pipeline.
+    '0007-srgb-extended-range-blend-rounded-model.patch']]
 tree_diff = subprocess.check_output(['git', '-C', str(SOURCE), 'diff', 'HEAD', '--'], text=True)
 def canonical_diff(diff):
     # Independent patches touch disjoint files; Git orders the combined diff by

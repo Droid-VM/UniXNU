@@ -260,6 +260,37 @@ FRONTEND_REPLACED = [
      '  method_setImplementation(family,(IMP)familyForCaller);\n'
      ' }\n'
      '}\n'),
+    # Refusals said in the log, the first 64 of a process: failWith (a library, a pipeline the runtime refused), a function a library
+    # does not give, and a pipeline descriptor refused before the runtime sees it (a missing or foreign function). They only went to the
+    # problem counters, so AegirPoster's "pipelineState != nil" assertion (the Astronomy wallpaper) left no reason anywhere.
+    (' noteProblem([NSString stringWithFormat:@"%@: %@",what,lastError()]);\n'
+     ' if(error)*error=nbError([NSString stringWithFormat:@"%@: %@",what,lastError()]);\n',
+     ' static std::atomic<int> told{0};\n'
+     ' if(told.fetch_add(1)<64)NBLOG(@"native-metal: %@ refused: %@",what,lastError());else noteProblem([NSString stringWithFormat:@"%@: %@",what,lastError()]);\n'
+     ' if(error)*error=nbError([NSString stringWithFormat:@"%@: %@",what,lastError()]);\n'),
+    (' NmbFunction *handle=name?nmb_function_new(_handle,name.UTF8String):nullptr;gTimeFunction.add(functionBegan);\n'
+     ' if(!handle)return nil;\n',
+     ' NmbFunction *handle=name?nmb_function_new(_handle,name.UTF8String):nullptr;gTimeFunction.add(functionBegan);\n'
+     ' if(!handle) {\n'
+     '  static std::atomic<int> told{0};\n'
+     '  if(told.fetch_add(1)<64)NBLOG(@"native-metal: function %@ refused: %@",name,lastError());\n'
+     '  return nil;\n'
+     ' }\n'),
+    (' if(!renderDescriptor(d,p,error)){delete p;return nil;}\n',
+     ' if(!renderDescriptor(d,p,error)) {\n'
+     '  static std::atomic<int> told{0};\n'
+     '  if(told.fetch_add(1)<64)NBLOG(@"native-metal: render pipeline descriptor refused (vertex %@, fragment %@): %@",d.vertexFunction.name,\n'
+     '                               d.fragmentFunction.name,error?(*error).localizedDescription:@"?");\n'
+     '  delete p;return nil;\n'
+     ' }\n'),
+    # supportsExtendedXR10Formats (device): given to the wallpaper's poster extensions. NativeMetal withholds it from every process
+    # because the render server picks a 64-bit wide-gamut framebuffer when the device offers XR10, which the display chain cannot
+    # show; but CAMetalLayer asks it too, in the extension's process, before it takes an XR10 pixel format
+    # (layer_private_check_pixel_format), and AegirPoster (the Astronomy wallpaper, ClockKitUI's quad view in BGRA10_XR_sRGB) died on
+    # "CAMetalLayerInvalid: unsupported extended range format". Given to every process but the render server, Settings showed stale
+    # layer contents (a row drew the status bar's time), so only a "...Poster..." process other than PosterBoard gets the answer.
+    ('   if(!strcmp(name,"supportsExtendedXR10Formats"))value=0;\n',
+     '   if(!strcmp(name,"supportsExtendedXR10Formats") && (!strstr(getprogname(),"Poster") || !strcmp(getprogname(),"PosterBoard")))value=0;\n'),
 ]
 for original, replacement in FRONTEND_REPLACED:
     if replacement in frontend:
