@@ -28,7 +28,8 @@ def paths(ctx):
 
 def check_args(arguments):
     for value in arguments:
-        if not re.fullmatch(r'[A-Za-z0-9_.\-]+(=[A-Za-z0-9_.,/\-]+)?', value):
+        # A value may hold '*': a board's list of process names takes a name ending in it for a prefix (droidvm-gpu-clients).
+        if not re.fullmatch(r'[A-Za-z0-9_.\-]+(=[A-Za-z0-9_.,/*\-]+)?', value):
             raise Error(f'unsupported kernel argument: {value}')
     line = ' '.join(arguments)
     # DarwinBoot copies the command line into a 1024-byte buffer and refuses a longer one.
