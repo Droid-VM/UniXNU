@@ -61,7 +61,19 @@ for anchor, marker, methods in ADDED_METHODS:
 # - a client that may write in neither shader-cache directory -- WebKit's GPU process, whose sandbox refuses both -- got no device
 #   ("no-cachedir"), so CoreGraphics drew the page's wide-color layers nowhere: it now opens one whose cache is never on disk (the
 #   runtime's METAL2VULKAN_SHADER_CACHE_OPTIONAL, patches/metal2vulkan/0006).
+# - Turnip renders as it does by default, in GMEM with binning: NativeMetal makes every Metal process render in system memory without
+#   concurrent binning (TU_DEBUG=sysmem,nocb) because Turnip's BV and BR threads stalled each other under sheng's own kernel driver,
+#   which DroidVM does not have (the host's KGSL schedules the GPU); here system-memory rendering left stale runs and garbled labels
+#   in composited layers once several apps had run, and GMEM did not. The first line of /private/var/ngpu/tu_debug, read by each
+#   process that may read it, names other flags.
 PLUGIN_REPLACED = [
+    ('        setenv("TU_DEBUG", "sysmem,nocb", 0);\n',
+     '        if (FILE *flags = fopen("/private/var/ngpu/tu_debug", "r")) {\n'
+     '            char line[128] = {};\n'
+     '            if (fgets(line, sizeof line, flags)) {line[strcspn(line, "\\n")] = 0; setenv("TU_DEBUG", line, 1);}\n'
+     '            fclose(flags);\n'
+     '        }\n'
+     '        setenv("TU_DEBUG", "", 0);\n'),
     ('// Whether NativeAdrenoMetal.clients names this process (names separated by blanks, commas or new lines; "*" names every process).\n',
      '// Whether NativeAdrenoMetal.clients names this process (names separated by blanks, commas or new lines; "*" names every process,\n'
      '// a name ending in "*" every process whose name begins with the rest).\n'),
