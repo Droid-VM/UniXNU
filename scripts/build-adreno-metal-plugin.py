@@ -233,6 +233,33 @@ FRONTEND_REPLACED = [
  return layout;
 }
 """),
+    # supportsFamily: (device), asked by RenderBox: on MTLGPUFamilyApple3 and up RenderBox draws an opaque layer (a widget, a poster)
+    # into its own two-plane 4:4:4 format, MTLPixelFormatRGB8_444_2P over an '_RB4' IOSurface. NativeMetal textures such a surface but
+    # renders into none ("render encoder: Unsupported ... MTLPixelFormatRGB8_444_2P"), so the layer stayed whatever the surface held:
+    # the Weather widget showed rows of stray colour. RenderBox learns its tier by asking supportsFamily: from Apple1 up until the
+    # first NO (RB::Device's constructor), so it alone is told Apple2 and draws them in BGRA8; every other caller keeps the answer.
+    ('static void installAnswers(Class cls) {\n',
+     'static BOOL (*gFamilyAnswer)(id,SEL,NSInteger);\n'
+     'static BOOL familyForCaller(id self,SEL _cmd,NSInteger family) {\n'
+     ' if(family>=1003 && family<2000) {   // MTLGPUFamilyApple3 and up\n'
+     '  Dl_info caller;\n'
+     '  if(dladdr(__builtin_return_address(0),&caller) && caller.dli_fname && strstr(caller.dli_fname,"/RenderBox.framework/"))return NO;\n'
+     ' }\n'
+     ' return gFamilyAnswer(self,_cmd,family);\n'
+     '}\n'
+     'static void installAnswers(Class cls) {\n'),
+    ('  case NMB_ANSWER_FLAG_ARG: class_addMethod(cls,sel,(IMP)flagArgAnswer,"B24@0:8Q16");break;\n'
+     '  }\n'
+     ' }\n'
+     '}\n',
+     '  case NMB_ANSWER_FLAG_ARG: class_addMethod(cls,sel,(IMP)flagArgAnswer,"B24@0:8Q16");break;\n'
+     '  }\n'
+     ' }\n'
+     ' if(Method family=class_getInstanceMethod(cls,@selector(supportsFamily:))) {\n'
+     '  gFamilyAnswer=(BOOL (*)(id,SEL,NSInteger))method_getImplementation(family);\n'
+     '  method_setImplementation(family,(IMP)familyForCaller);\n'
+     ' }\n'
+     '}\n'),
 ]
 for original, replacement in FRONTEND_REPLACED:
     if replacement in frontend:
