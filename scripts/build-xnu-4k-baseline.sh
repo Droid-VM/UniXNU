@@ -1,27 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Many checks are bare `test -f`; name the one that stops the build.
+trap 'echo "build-xnu-4k-baseline.sh: line $LINENO: $BASH_COMMAND failed" >&2' ERR
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
-# A link input of the kernel. The board's archive builders read the compile records of an earlier XNU pass, so a
-# first build from scratch runs one bootstrap pass (UNIXNU_KERNEL_BOOTSTRAP=1, unixnu kernel.py) before they exist.
-# Only there a missing input becomes an empty placeholder, listed in build/xnu/bootstrap-placeholders.txt so the
-# driver removes it after the pass; the pass may then stop at the link. Any other pass refuses a missing input.
-need_input() {
-  if [ -f "$1" ]; then
-    return 0
-  fi
-  if [ "${UNIXNU_KERNEL_BOOTSTRAP:-0}" != 1 ]; then
-    echo "error: missing kernel link input $1" >&2
-    return 1
-  fi
-  mkdir -p "$(dirname "$1")" "$ROOT/build/xnu"
-  case "$1" in
-    *.a) printf '!<arch>\n' > "$1" ;;
-    *.o) xcrun --sdk iphoneos clang -target arm64-apple-ios17.0 -x c -c /dev/null -o "$1" ;;
-    *) : > "$1" ;;
-  esac
-  printf '%s\n' "$1" >> "$ROOT/build/xnu/bootstrap-placeholders.txt"
-}
 # Source versions come from feeds.toml through the unixnu driver; the defaults are the qualified ones.
 XNU_TAG=${UNIXNU_XNU_TAG:-xnu-10063.141.1}
 XNU_COMMIT=${UNIXNU_XNU_COMMIT:-d8b80295118ef25ac3a784134bcf95cd8e88109f}
@@ -51,12 +33,13 @@ if [ ! -x .cache/fakeroot/usr/local/libexec/availability.pl ]; then
 fi
 # The optional observation hooks overlap existing root/exec patch context.
 # Remove them first so earlier independent patches retain their idempotent checks.
-# The same holds for the boot-time GPU addon mount (zzy), which edits the owner Data mount function inside the systemos patch,
-# and the staged system apps view (zzy-owner), which edits that function after it; the bindfs file-ID lookup (zzy-zbindfs)
-# edits bind_vfsops.c next to the GPU addon mount's root-owner change; the pmap page-attribute flush (zzx-pmap-sync-flush) edits
-# what zzx-pmap-sync-64bit-pa does.
-# Reverse newest first; the loop below re-applies them in name order.
-for LATE_PATCH in "$ROOT/patches/xnu/zzz-boot-progress.patch" "$ROOT/patches/xnu/zzy-zbindfs-vget.patch" "$ROOT/patches/xnu/zzy-owner-staged-apps-mount.patch" \
+# The same holds for the boot-time GPU addon mount and the staged system apps copy (zzy), which edit the owner Data mount function
+# inside the systemos patch, and the staged system apps view (zzy-union), which edits that function after them; the bindfs
+# file-ID lookup (zzy-zbindfs) edits bind_vfsops.c next to the GPU addon mount's root-owner change; the pmap page-attribute
+# flush (zzx-pmap-sync-flush) edits what zzx-pmap-sync-64bit-pa does. Reverse newest first; the loop below re-applies them in
+# name order.
+for LATE_PATCH in "$ROOT/patches/xnu/zzz-boot-progress.patch" "$ROOT/patches/xnu/zzy-zbindfs-vget.patch" \
+    "$ROOT/patches/xnu/zzy-union-staged-apps.patch" "$ROOT/patches/xnu/zzy-staged-system-apps.patch" \
     "$ROOT/patches/xnu/zzy-native-gpu-addon-mount.patch" "$ROOT/patches/xnu/zzx-pmap-sync-flush.patch"; do
   if git -C .cache/xnu-work apply --reverse --check "$LATE_PATCH" >/dev/null 2>&1; then
     git -C .cache/xnu-work apply --reverse "$LATE_PATCH"
@@ -70,6 +53,13 @@ for PATCH in "$ROOT"/patches/xnu/*.patch "$ROOT"/kits/NativePrelink/patches/*.pa
 done
 export XNU_AVAILABILITY_PL=$ROOT/.cache/fakeroot/usr/local/libexec/availability.pl
 python3 scripts/prepare-xnu-source.py
+# The first pass of a new tree (XNU_BOOTSTRAP=1, set by the unixnu driver) only has to leave the compile records and
+# link.filelist for the archive builders that run after it, so it links without their archives.
+BOOTSTRAP=${XNU_BOOTSTRAP:-0}
+if [ "$BOOTSTRAP" != 0 ] && [ "$BOOTSTRAP" != 1 ]; then
+  echo 'XNU_BOOTSTRAP must be 0 or 1' >&2
+  exit 1
+fi
 BOOT_PROGRESS=${XNU_BOOT_PROGRESS:-0}
 if [ "$BOOT_PROGRESS" != 0 ] && [ "$BOOT_PROGRESS" != 1 ]; then
   echo 'XNU_BOOT_PROGRESS must be 0 or 1' >&2
@@ -419,7 +409,7 @@ if [ "$BOARD_LAUNCH_POLICY" = 1 ] && [ "$OWNER_DATA_MOUNT" != 1 ]; then
   exit 1
 fi
 OWNER_DATA_HEADER=$ROOT/build/xnu/owner-data-volume.h
-python3 - "$OWNER_DATA_HEADER" "$OWNER_DATA_MOUNT" "$NATIVE_RAM_BLOCK" "${XNU_OWNER_DATA_VOLUME_UUID:-}" <<'PY_DATA_UUID'
+python3 - "$OWNER_DATA_HEADER" "$OWNER_DATA_MOUNT" "$NATIVE_RAM_BLOCK" "${XNU_OWNER_DATA_VOLUME_UUID:-}" "${XNU_OWNER_CACHE_VOLUME_UUID:-}" <<'PY_DATA_UUID'
 from pathlib import Path
 import sys
 import uuid
@@ -431,14 +421,22 @@ if sys.argv[2:4] == ['1', '1']:
     except ValueError:
         raise SystemExit('Set XNU_OWNER_DATA_VOLUME_UUID to the actual observed scratch APFS volume UUID')
     text = '#define XNU_OWNER_DATA_VOLUME_UUID "' + value + '"\n'
+# The SystemOS cryptex volume of this image; the sheng value stays the default of the patch.
+cache = '8846FE78-2910-4297-AF97-D59BB6F8FC16'
+if len(sys.argv) > 5 and sys.argv[5]:
+    try:
+        cache = str(uuid.UUID(sys.argv[5])).upper()
+    except ValueError:
+        raise SystemExit('Set XNU_OWNER_CACHE_VOLUME_UUID to the SystemOS volume UUID of the signed policy')
+text += '#define XNU_OWNER_CACHE_VOLUME_UUID "' + cache + '"\n'
 path.parent.mkdir(parents=True, exist_ok=True)
 if not path.exists() or path.read_text() != text:
     path.write_text(text)
 PY_DATA_UUID
 OWNER_DATA_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.owner-data-mount-mode
-if [ "$(cat "$OWNER_DATA_STAMP" 2>/dev/null || echo 0)" != "$OWNER_DATA_MOUNT:$NATIVE_RAM_BLOCK:$BOARD_LAUNCH_POLICY" ]; then
+if [ "$(cat "$OWNER_DATA_STAMP" 2>/dev/null || echo 0)" != "$OWNER_DATA_MOUNT:$NATIVE_RAM_BLOCK:$BOARD_LAUNCH_POLICY:${XNU_OWNER_CACHE_VOLUME_UUID:-}" ]; then
   rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/kern_exec.o"
-  printf '%s\n' "$OWNER_DATA_MOUNT:$NATIVE_RAM_BLOCK:$BOARD_LAUNCH_POLICY" > "$OWNER_DATA_STAMP"
+  printf '%s\n' "$OWNER_DATA_MOUNT:$NATIVE_RAM_BLOCK:$BOARD_LAUNCH_POLICY:${XNU_OWNER_CACHE_VOLUME_UUID:-}" > "$OWNER_DATA_STAMP"
 fi
 OWNER_CRYPTEX_FILES=${XNU_OWNER_CRYPTEX_FILES:-0}
 if [ "$OWNER_CRYPTEX_FILES" != 0 ] && [ "$OWNER_CRYPTEX_FILES" != 1 ]; then
@@ -559,56 +557,58 @@ else
   EXTRA_MAKE_ARGS+=("platform_tests.o_CFLAGS_ADD=")
 fi
 if [ "${XNU_SOURCE_CORECRYPTO14:-0}" = 1 ]; then
-  CRYPTO_ARCHIVE=$ROOT/build/corecrypto-2023/libcorecrypto_kernel_noasm-namespaced.a
-  need_input "$CRYPTO_ARCHIVE"
   EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_SOURCE_CORECRYPTO14=1"
+fi
+if [ "${XNU_SOURCE_CORECRYPTO14:-0}" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then
+  CRYPTO_ARCHIVE=$ROOT/build/corecrypto-2023/libcorecrypto_kernel_noasm-namespaced.a
+  test -f "$CRYPTO_ARCHIVE"
   KERNEL_EXTRA_ARCHIVES="-L$KERNEL_SDKROOT/usr/local/lib/kernel -lfirehose_kernel $CRYPTO_ARCHIVE"
   KERNEL_ARCHIVE_DEPENDENCIES=$CRYPTO_ARCHIVE
   if [ "$ADRENO_FIRMWARE_PROBE" = 1 ]; then
     ADRENO_PROBE_ARCHIVE=$ROOT/build/adreno-firmware-probe/libAdrenoFirmwareProbe.a
-    need_input "$ADRENO_PROBE_ARCHIVE"
+    test -f "$ADRENO_PROBE_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ADRENO_PROBE_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ADRENO_PROBE_ARCHIVE"
   fi
   if [ "$ADRENO_PM4_PROBE" = 1 ]; then
     PM4_PROBE_ARCHIVE=$ROOT/build/adreno-pm4-probe/libAdrenoPM4Probe.a
-    need_input "$PM4_PROBE_ARCHIVE"
+    test -f "$PM4_PROBE_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$PM4_PROBE_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $PM4_PROBE_ARCHIVE"
   fi
   if [ "$SMMU4K_PROBE" = 1 ]; then
     SMMU4K_PROBE_ARCHIVE=$ROOT/build/smmu4k-probe/libArmSmmu4KProbe.a
-    need_input "$SMMU4K_PROBE_ARCHIVE"
+    test -f "$SMMU4K_PROBE_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$SMMU4K_PROBE_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $SMMU4K_PROBE_ARCHIVE"
   fi
   if [ "$CONSTANT_UPLOADS_PROBE" = 1 ]; then
     CONSTANT_UPLOADS_ARCHIVE=$ROOT/build/constant-uploads-probe/libConstantUploadsProbe.a
-    need_input "$CONSTANT_UPLOADS_ARCHIVE"
+    test -f "$CONSTANT_UPLOADS_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$CONSTANT_UPLOADS_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $CONSTANT_UPLOADS_ARCHIVE"
   fi
   if [ "${XNU_ARMVIRT_PLATFORM:-0}" = 1 ]; then
     ARMVIRT_ARCHIVE=$ROOT/build/armvirt-platform/libArmVirtPlatform.a
-    need_input "$ARMVIRT_ARCHIVE"
+    test -f "$ARMVIRT_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ARMVIRT_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ARMVIRT_ARCHIVE"
   fi
   if [ "$ARM_DT_PLATFORM" = 1 ]; then
     ARM_DT_ARCHIVE=$ROOT/build/armdt-platform/libArmDTPlatform.a
-    need_input "$ARM_DT_ARCHIVE"
+    test -f "$ARM_DT_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ARM_DT_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ARM_DT_ARCHIVE"
   fi
   if [ "${XNU_ARMCPU:-0}" = 1 ]; then
     ARMCPU_ARCHIVE=$ROOT/build/armcpu/libArmCpu.a
-    need_input "$ARMCPU_ARCHIVE"
+    test -f "$ARMCPU_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ARMCPU_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ARMCPU_ARCHIVE"
   fi
   if [ "${XNU_NATIVE_UFS:-0}" = 1 ]; then
     UFS_ARCHIVE=$ROOT/build/native-ufs/libNativeUfs.a
-    need_input "$UFS_ARCHIVE"
+    test -f "$UFS_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$UFS_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $UFS_ARCHIVE"
   fi
@@ -616,13 +616,13 @@ if [ "${XNU_SOURCE_CORECRYPTO14:-0}" = 1 ]; then
     # NativeAdreno plus its kits (scripts/build-native-adreno-kits.py). No personality is installed: the
     # board probe calls NativeAdrenoGmuContextBringup directly once it has powered the GPU CX domain.
     ADRENO_ARCHIVE=$ROOT/build/native-adreno/libNativeAdreno.a
-    need_input "$ADRENO_ARCHIVE"
+    test -f "$ADRENO_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ADRENO_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ADRENO_ARCHIVE"
   fi
   if [ "$NATIVE_MOBILE_DISPLAY" = 1 ]; then
     MOBILE_DISPLAY_ARCHIVE=$ROOT/build/native-mobile-display/libNativeMobileDisplay.late.a
-    need_input "$MOBILE_DISPLAY_ARCHIVE"
+    test -f "$MOBILE_DISPLAY_ARCHIVE"
     python3 - "$MOBILE_DISPLAY_ARCHIVE" <<'PY_MOBILE_DISPLAY'
 import hashlib, json, sys
 from pathlib import Path
@@ -636,7 +636,7 @@ PY_MOBILE_DISPLAY
   fi
   if [ "$NATIVE_LEGACY_DISPLAY" = 1 ]; then
     LEGACY_DISPLAY_ARCHIVE=$ROOT/build/native-legacy-display/libNativeLegacyDisplay.late.a
-    need_input "$LEGACY_DISPLAY_ARCHIVE"
+    test -f "$LEGACY_DISPLAY_ARCHIVE"
     python3 - "$LEGACY_DISPLAY_ARCHIVE" "$ROOT" <<'PY_LEGACY_DISPLAY'
 import hashlib, json, sys
 from pathlib import Path
@@ -652,19 +652,19 @@ PY_LEGACY_DISPLAY
   fi
   if [ "${XNU_NATIVE_AES:-0}" = 1 ]; then
     AES_ARCHIVE=${XNU_NATIVE_AES_ARCHIVE:-$ROOT/build/native-aes/libNativeAES.a}
-    need_input "$AES_ARCHIVE"
+    test -f "$AES_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$AES_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $AES_ARCHIVE"
   fi
   if [ "${XNU_NATIVE_VIRTIO_BLOCK:-0}" = 1 ]; then
     VIRTIO_ARCHIVE=${XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE:-$ROOT/build/native-virtio-block/libNativeVirtioBlock.a}
-    need_input "$VIRTIO_ARCHIVE"
+    test -f "$VIRTIO_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$VIRTIO_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $VIRTIO_ARCHIVE"
   fi
   if [ "$NATIVE_OFFLINE_GPU" = 1 ]; then
     GPU_BROKER_ARCHIVE=$ROOT/build/native-offline-gpu/libNativeOfflineGPU.late.a
-    need_input "$GPU_BROKER_ARCHIVE"
+    test -f "$GPU_BROKER_ARCHIVE"
     python3 - "$GPU_BROKER_ARCHIVE" "$ROOT" <<'PY_GPU_BROKER'
 import hashlib,json,sys
 from pathlib import Path
@@ -682,13 +682,13 @@ PY_GPU_BROKER
   fi
   if [ "$NATIVE_VIRTIO_CONSOLE" = 1 ]; then
     CONSOLE_ARCHIVE=$ROOT/build/native-virtio-console/libNativeVirtioConsole.a
-    need_input "$CONSOLE_ARCHIVE"
+    test -f "$CONSOLE_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$CONSOLE_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $CONSOLE_ARCHIVE"
   fi
   if [ "$NATIVE_RAM_BLOCK" = 1 ]; then
     RAM_BLOCK_ARCHIVE=$ROOT/build/native-ram-block/libNativeRamBlock.a
-    need_input "$RAM_BLOCK_ARCHIVE"
+    test -f "$RAM_BLOCK_ARCHIVE"
     if [ "${XNU_NATIVE_VIRTIO_BLOCK:-0}" = 1 ]; then
       # Both transports import the same original class. Keep one exact alias
       # definition; link the real RAM transport object, not duplicate aliases.
@@ -708,7 +708,7 @@ if any(first.get(name) != value for name, value in second.items()):
     raise SystemExit('RAM transport imports must match the already linked original storage bindings')
 PY_BINDINGS
       RAM_BLOCK_OBJECT=$ROOT/build/native-ram-block/NativeRamBlock.o
-      need_input "$RAM_BLOCK_OBJECT"
+      test -f "$RAM_BLOCK_OBJECT"
       KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES $RAM_BLOCK_OBJECT"
     else
       KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$RAM_BLOCK_ARCHIVE"
@@ -718,26 +718,26 @@ PY_BINDINGS
   if [ "${XNU_SOURCE_PTHREAD:-0}" = 1 ]; then
     PTHREAD_ARCHIVE=$ROOT/build/libpthread-kernel/libpthread_kernel.a
     PTHREAD_BOOTSTRAP=$ROOT/build/libpthread-kernel/source_pthread_bootstrap.o
-    need_input "$PTHREAD_ARCHIVE"
-    need_input "$PTHREAD_BOOTSTRAP"
+    test -f "$PTHREAD_ARCHIVE"
+    test -f "$PTHREAD_BOOTSTRAP"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$PTHREAD_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $PTHREAD_ARCHIVE"
   fi
   if [ "$OWNER_ROOT_PROBE" = 1 ]; then
     VERIFIED_ROOT_ARCHIVE=${XNU_VERIFIED_ROOT_ARCHIVE:-$ROOT/build/verified-root-xnu/libVerifiedRootProbe.a}
-    need_input "$VERIFIED_ROOT_ARCHIVE"
+    test -f "$VERIFIED_ROOT_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$VERIFIED_ROOT_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $VERIFIED_ROOT_ARCHIVE"
   fi
   if [ "$MOCKFS_MODE" = 1 ]; then
     MOCKFS_ARCHIVE=$ROOT/build/mockfs-fixture/libmockfs_fixture.a
-    need_input "$MOCKFS_ARCHIVE"
+    test -f "$MOCKFS_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$MOCKFS_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $MOCKFS_ARCHIVE"
   fi
   if [ "$SHENG_PMGR" = 1 ]; then
     PMGR_ARCHIVE=$ROOT/build/sheng-platform-power/libShengPlatformPower.a
-    need_input "$PMGR_ARCHIVE"
+    test -f "$PMGR_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$PMGR_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $PMGR_ARCHIVE"
   fi
@@ -767,8 +767,17 @@ from pathlib import Path
 import sys
 directory = Path('build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837')
 stamp = directory / '.native-aes-link-input'
-identity = '|'.join(mode + ':' + (hashlib.sha256(Path(archive).read_bytes()).hexdigest() if mode == '1' else 'disabled')
-                    for mode, archive in zip(sys.argv[1::2], sys.argv[2::2]))
+
+
+def state(mode, archive):
+    if mode != '1':
+        return 'disabled'
+    # The bootstrap pass of a new tree links before the archive builders have run.
+    path = Path(archive)
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else 'missing'
+
+
+identity = '|'.join(mode + ':' + state(mode, archive) for mode, archive in zip(sys.argv[1::2], sys.argv[2::2]))
 if not stamp.exists() or stamp.read_text() != identity:
     # Make does not track selection of an older alternative external archive.
     # Rebuild the conditional personality and relink when this input changes.

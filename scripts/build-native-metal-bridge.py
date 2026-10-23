@@ -17,13 +17,16 @@ PIN = json.loads((ROOT / 'scripts/data/gpu-metal-vulkan-inputs.json').read_text(
 SOURCE = ROOT / '.cache/gpu-reference/metal2vulkan'
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--target', choices=['ios', 'host'], default='ios')
+parser.add_argument('--manifest-only', action='store_true',
+                    help='write build/native-metal-bridge/Cargo.toml (patched source, fixtures) and stop before cargo, for `cargo fetch`')
 args = parser.parse_args()
 if subprocess.check_output(['git', '-C', str(SOURCE), 'rev-parse', 'HEAD'], text=True).strip() != PIN:
     raise SystemExit('Translator revision differs from the qualified source pin')
 PATCHES = [ROOT / 'drivers/NativeMetal/bridge/patches' / name for name in [
     '0001-optional-constant-output-members.patch', '0002-resource-wait-storage-dependencies.patch',
     '0003-cache-device-entry-point-priming.patch', '0004-fold-constant-global-field-loads.patch',
-    '0005-keep-module-decodes-and-profile-fingerprints.patch']] + [ROOT / 'patches/metal2vulkan' / name for name in [
+    '0005-keep-module-decodes-and-profile-fingerprints.patch', '0006-skip-draws-without-a-pipeline.patch',
+    '0007-accept-two-plane-rgb-surfaces.patch']] + [ROOT / 'patches/metal2vulkan' / name for name in [
     # The board's own: a shader-cache directory a sandboxed process cannot write opens anyway when the environment asks
     # (METAL2VULKAN_SHADER_CACHE_OPTIONAL, which the Metal plugin sets for WebKit's GPU process); every lookup is then a miss.
     '0006-optional-shader-cache-directory.patch']]
@@ -51,38 +54,6 @@ if subprocess.check_output(['git', '-C', str(SOURCE), 'diff', 'HEAD', '--'], tex
     raise SystemExit('Translator patch result differs from its exact recorded source')
 out = ROOT / 'build/native-metal-bridge'
 out.mkdir(parents=True, exist_ok=True)
-# Functions the board's Metal plugin calls and NativeMetal's bridge does not define yet, appended to a staged copy of the bridge for as
-# long as it lacks them:
-# - nmb_texture_new_on_iosurface: newTextureWithDescriptor:iosurface:plane: over a surface with planes, with the facts the runtime
-#   reads a two-plane texture over it by (IoSurfaceYCbCr: the OSType, the plane, the size, plane 1's offset and rows). The bridge's
-#   nmb_texture_new_on_buffer gives none and says the surface has no planes, so every two-plane surface was refused -- WebKit's
-#   'b3a8' backing stores (RGB10A8_2P_XR10, which the runtime makes over 'b3a8' as Metal does) among them.
-ADDED_FUNCTIONS = [('nmb_texture_new_on_iosurface', '''
-/// `newTextureWithDescriptor:iosurface:plane:` over a surface with planes (added by the board's build): the plane's `offset` and rows
-/// in the buffer that stands for the surface, and the surface's facts a two-plane texture over it reads -- its OSType, the plane
-/// asked of, its size, and plane 1's offset and rows (0 and 0 without a plane 1).
-#[unsafe(no_mangle)]
-pub extern "C" fn nmb_texture_new_on_iosurface(buffer: *mut NmbBuffer, descriptor: *const NmbTextureDescriptor, offset: u64,
-                                               bytes_per_row: u64, pixel_format: u32, plane: u64, width: u64, height: u64,
-                                               plane1_offset: u64, plane1_bytes_per_row: u64) -> *mut NmbTexture {
-    guard(std::ptr::null_mut(), || {
-        let descriptor = texture_descriptor(descriptor)?;
-        let facts = metal2vulkan_runtime::IoSurfaceYCbCr::new(pixel_format, plane, [width, height], plane1_offset, plane1_bytes_per_row);
-        let plane = IoSurfacePlane::new(offset, bytes_per_row, true).with_ycbcr(facts);
-        let texture = get(buffer)?.0.new_texture_with_iosurface_plane(&descriptor, plane);
-        Ok(boxed(NmbTexture(texture.map_err(e("texture over surface"))?)))
-    })
-}
-''')]
-bridge = out / 'staged-bridge'
-shutil.rmtree(bridge, ignore_errors=True)
-bridge.mkdir()
-shutil.copyfile(ROOT / 'drivers/NativeMetal/bridge/NativeMetalBridge.rs', bridge / 'NativeMetalBridge.rs')
-objects = (ROOT / 'drivers/NativeMetal/bridge/NativeMetalObjects.rs').read_text()
-for name, function in ADDED_FUNCTIONS:
-    if 'fn %s(' % name not in objects:
-        objects += function
-(bridge / 'NativeMetalObjects.rs').write_text(objects)
 llvm_as = next((p for p in ['/opt/homebrew/opt/llvm/bin/llvm-as', shutil.which('llvm-as') or ''] if p and Path(p).exists()), None)
 if not llvm_as:
     raise SystemExit('llvm-as (LLVM 21 or newer) is required to assemble the fixture')
@@ -93,7 +64,7 @@ subprocess.run([llvm_as, '-o', fc_air, SOURCE / 'crates/metal2vulkan-validation/
 manifest = out / 'Cargo.toml'
 manifest.write_text('\n'.join([
     '[package]', 'name = "native-metal-bridge"', 'version = "0.1.0"', 'edition = "2024"', 'rust-version = "1.98"', '[workspace]',
-    '[lib]', 'crate-type = ["staticlib"]', 'path = ' + json.dumps(str(bridge / 'NativeMetalBridge.rs')),
+    '[lib]', 'crate-type = ["staticlib"]', 'path = ' + json.dumps(str(ROOT / 'drivers/NativeMetal/bridge/NativeMetalBridge.rs')),
     '[dependencies]',
     'metal2vulkan = { path = ' + json.dumps(str(SOURCE / 'crates/metal2vulkan')) + ', features = ["ash"] }',
     'metal2vulkan-runtime = { path = ' + json.dumps(str(SOURCE / 'crates/metal2vulkan-runtime')) + ' }',
@@ -103,6 +74,9 @@ manifest.write_text('\n'.join([
     'sha2 = { version = "0.10", features = ["asm"] }',
     '[profile.release]', 'panic = "unwind"', 'debug = 1', '',
 ]))
+if args.manifest_only:
+    print(manifest)
+    raise SystemExit(0)
 triple = 'aarch64-apple-ios' if args.target == 'ios' else 'aarch64-apple-darwin'
 env = dict(os.environ, NMB_FIXTURE_AIR=str(air), NMB_FC_AIR=str(fc_air), IPHONEOS_DEPLOYMENT_TARGET='17.0', MACOSX_DEPLOYMENT_TARGET='14.0')
 target_dir = ROOT / 'build/m2v-target'

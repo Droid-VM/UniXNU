@@ -26,6 +26,48 @@ The device repository is remembered in `out/state.json` after the first `-D`.
 
 The boot image is `out/<board>/boot/boot.img` with `out/<board>/boot/boot.json` next to it. Options follow the subcommand.
 
+## macOS runner
+
+The kernel, userdata and Data seed steps call Xcode, `hdiutil` and `diskutil`. A fork can run them on a GitHub macOS runner without a local Mac.
+
+1. Fork the repository and enable Actions.
+2. Add the repository secret `UNIXNU_UNIQUE_CHIP_ID` when the board requires a platform seed.
+3. Run the `macOS build` workflow. Choose the device repository, ref, defconfig and steps.
+4. Download the artifacts from the run.
+
+| Input | Meaning |
+| --- | --- |
+| `device_repository` | Device repository as `owner/name` |
+| `device_ref` | Ref of the device repository |
+| `defconfig` | Defconfig name |
+| `steps` | `kernel`, `kernel userdata` or `kernel userdata payload`. The default is `kernel userdata` |
+| `ipsw_url` | Optional IPSW URL. An empty value uses `board.toml` |
+| `pre_build` | Optional shell commands run in the UniXNU checkout before the kernel build. The device repository is at `DEVICE_DIR` |
+| `trust_cache_url` | Optional trust cache bundle URL |
+| `owner_trust_cache` | Treat the URL as an owner-signed bundle |
+| `data_seed_url` | Optional Data seed URL |
+| `grow_gib` | Grow the Data seed to this size |
+| `skip_setup` | Mark Setup as done in the Data seed |
+| `upload_userdata` | Upload the userdata image. The image is large |
+
+Add the repository secret `UNIXNU_DEVICE_TOKEN` when the device repository is private.
+
+A device archive chain that needs a bootstrap candidate, display ABI evidence or a staged kernelcache uses `pre_build`. Its commands run after `unixnu fetch` and before `unixnu build kernel`. The workflow removes the fetched IPSW, the fetched feeds and the staged firmware cache after the artifacts are uploaded.
+
+A bootstrap candidate example:
+
+```sh
+./unixnu defconfig bootstrap_defconfig -D "$DEVICE_DIR"
+./unixnu build kernel -D "$DEVICE_DIR"
+mkdir -p out/<board>/tree/build/native-prelink
+cp out/<board>/kernel/kernel.macho \
+   out/<board>/tree/build/native-prelink/<candidate>.macho
+```
+
+The candidate names and the display or kernelcache inputs come from the device repository.
+
+The workflow runs kernel, userdata and payload. Package, firmware and boot image steps run on any OS and stay outside the workflow. Public repositories use the free macOS runner quota. Private repositories consume Actions minutes.
+
 ## Commands
 
 | Command | Action |

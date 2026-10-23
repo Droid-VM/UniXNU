@@ -48,8 +48,11 @@ def build_archives(ctx, env):
     """Run the board's archive builders ([kernel] archives of board.toml), in order, then check the prebuilt archives.
 
     Each entry is a script of the build tree with its arguments. The kernel link needs their archives, and some of
-    them read the compile records that an XNU pass leaves behind.
+    them read the compile records that an XNU pass leaves behind. A configuration opts in with
+    CONFIG_XNU_BUILD_ARCHIVES; the bootstrap pass and first-console configurations have no archives to build.
     """
+    if not ctx.need_config().get('XNU_BUILD_ARCHIVES'):
+        return
     entries = ctx.board.get('kernel', {}).get('archives', [])
     env = dict(env, PATH=toolchain_path())
     for index, entry in enumerate(entries, 1):
@@ -80,24 +83,21 @@ def build(ctx, modules):
     record = ctx.tree / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/osfmk/DEVELOPMENT/startup.o.json'
     if not record.is_file():
         # The archive builders and the boot progress layer read compile records of the XNU build, which only an earlier
-        # pass leaves behind. A first build from scratch therefore runs one pass without them; it stops at the link,
-        # which needs their archives, so only the records are required of it.
+        # pass leaves behind. A first build from scratch therefore runs one pass without them; XNU_BOOTSTRAP makes it
+        # skip the archive checks and link without the archives, so it stops at the link and only the records are
+        # required of it.
         log('kernel: bootstrap pass for the compile records')
-        # The pass stands in empty placeholders for the archives the builders make next; they never reach a real link.
-        placeholders = ctx.tree / 'build/xnu/bootstrap-placeholders.txt'
-        placeholders.unlink(missing_ok=True)
-        subprocess_env = {**env, 'XNU_BOOT_PROGRESS': '0', 'UNIXNU_KERNEL_BOOTSTRAP': '1'}
+        subprocess_env = {**env, 'XNU_BOOT_PROGRESS': '0', 'XNU_BOOTSTRAP': '1'}
         try:
             run(['bash', script], cwd=ctx.tree, env=subprocess_env, log_file=ctx.logs / 'kernel-bootstrap.log')
         except Error:
             if not record.is_file():
                 raise
-        finally:
-            if placeholders.is_file():
-                for line in placeholders.read_text().splitlines():
-                    if line.strip():
-                        Path(line.strip()).unlink(missing_ok=True)
-                placeholders.unlink()
+    storage = ctx.tree / 'build/storage-abi/include/IOKit/storage'
+    if (ctx.tree / 'refer/IOStorageFamily').is_dir() and not storage.is_dir():
+        log('kernel: prepare storage headers')
+        run(['python3', ctx.tree / 'scripts/prepare-storage-headers.py'], cwd=ctx.tree, env=env,
+            log_file=ctx.logs / 'storage-headers.log')
     build_archives(ctx, env)
     run(['bash', script], cwd=ctx.tree, env=env, log_file=ctx.logs / 'kernel.log')
 

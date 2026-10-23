@@ -205,7 +205,9 @@ unique_chip_id = "required"
 | `title` | 菜单标题 |
 | `dram_size` | 传给 ADT 工具的 DRAM 大小 |
 | `panic_screen` | 把 panic 屏幕打进负载内核副本 |
+| `entry_probe_reset_*` | 保留入口探针的定时复位，可改到某个调用之后（见[调试](/zh/guide/debugging)） |
 | `skip_setup_tool` | `--skip-setup` 使用的脚本 |
+| `skip_setup_args` | 传给该脚本的额外参数，例如 `["--no-auto-dim"]` |
 | `trust_cache_sha256` | 接受的 trust cache 哈希 |
 | `timeout` | 菜单超时 |
 | `kernel_args` | 默认内核命令行 |
@@ -226,9 +228,12 @@ CONFIG_XNU_NATIVE_CS_HASH_CACHE=y
 # CONFIG_XNU_ARMVIRT_PLATFORM is not set
 CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
 CONFIG_XNU_OWNER_DATA_VOLUME_UUID="00000000-0000-0000-0000-000000000000"
+CONFIG_XNU_OWNER_CACHE_VOLUME_UUID="00000000-0000-0000-0000-000000000000"
 ```
 
 取值可以是 `y`、`n`、数字或带引号字符串。每个 `CONFIG_XNU_<NAME>` 变成内核构建的 `XNU_<NAME>`，字符串中的 `{tree}` 替换为构建树路径。
+
+`CONFIG_XNU_OWNER_CACHE_VOLUME_UUID` 指定 owner 链作为缓存载体挂载的 SystemOS cryptex 卷，即签名 SystemOS 策略所覆盖镜像中的 APFS 卷 UUID。不设置时，内核使用 sheng 镜像的卷。
 
 ## feeds.toml
 

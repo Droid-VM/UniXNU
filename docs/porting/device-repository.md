@@ -207,7 +207,9 @@ unique_chip_id = "required"
 | `title` | Menu entry title |
 | `dram_size` | DRAM size passed to the ADT tool |
 | `panic_screen` | Patches the panic screen into the payload copy of the kernel |
+| `entry_probe_reset_*` | Keeps the entry probe's timed reset, optionally after a given call (see [Debugging](/guide/debugging)) |
 | `skip_setup_tool` | Script used by `--skip-setup` |
+| `skip_setup_args` | Extra arguments for that script, such as `["--no-auto-dim"]` |
 | `trust_cache_sha256` | Accepted trust cache bundle hashes |
 | `timeout` | Menu timeout in seconds |
 | `kernel_args` | Default kernel command line |
@@ -228,9 +230,12 @@ CONFIG_XNU_NATIVE_CS_HASH_CACHE=y
 # CONFIG_XNU_ARMVIRT_PLATFORM is not set
 CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
 CONFIG_XNU_OWNER_DATA_VOLUME_UUID="00000000-0000-0000-0000-000000000000"
+CONFIG_XNU_OWNER_CACHE_VOLUME_UUID="00000000-0000-0000-0000-000000000000"
 ```
 
 Values can be `y`, `n`, a number or a quoted string. Each `CONFIG_XNU_<NAME>` becomes `XNU_<NAME>` in the kernel build. `{tree}` in a string becomes the build tree path.
+
+`CONFIG_XNU_OWNER_CACHE_VOLUME_UUID` names the SystemOS cryptex volume that the owner chain mounts as the cache carrier: the APFS volume UUID inside the image the signed SystemOS policy covers. Without it the kernel uses the sheng image's volume.
 
 The file name is selected by `[kernel] defconfig`.
 
