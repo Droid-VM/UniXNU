@@ -65,8 +65,9 @@ ADDED_METHODS = [
 # Methods replaced in the staged copy, for as long as NativeMetal has the original:
 # - newTextureWithDescriptor:iosurface:plane: (device) refused every surface with planes and said nothing; the render server
 #   (backboardd) logged "Failed to allocate MTLTexture from IOSurface" thousands of times, and what it could not texture stayed
-#   blank. A plane is now a texture at its offset in the imported surface, with its own row bytes, and each refusal names the
-#   surface and why (the first 64).
+#   blank. A plane is now a texture at its offset in the imported surface, with its own row bytes -- over a surface with planes
+#   through the staged bridge's nmb_texture_new_on_iosurface, with the facts a two-plane format reads its second plane by -- and
+#   each refusal names the surface and why (the first 64).
 REPLACED_METHODS = [
     ('- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d iosurface:(IOSurfaceRef)surface plane:(NSUInteger)plane {\n'
      ' if(!surface || !d || plane || IOSurfaceGetPlaneCount(surface))return nil;\n'
@@ -77,6 +78,10 @@ REPLACED_METHODS = [
      ' NBTexture *texture=textureOnBuffer(buffer,d,0,IOSurfaceGetBytesPerRow(surface),true);if(!texture)return nil;\n'
      ' texture.surface=(IOSurfaceRef)CFRetain(surface);return (id<MTLTexture>)texture;\n'
      '}\n',
+     '// The staged bridge\'s (scripts/build-native-metal-bridge.py): a texture over a surface with planes, with the surface\'s facts.\n'
+     'extern "C" NmbTexture *nmb_texture_new_on_iosurface(NmbBuffer *,const NmbTextureDescriptor *,uint64_t offset,uint64_t bytes_per_row,\n'
+     '                                                    uint32_t pixel_format,uint64_t plane,uint64_t width,uint64_t height,\n'
+     '                                                    uint64_t plane1_offset,uint64_t plane1_bytes_per_row);\n'
      'static void surfaceRefused(IOSurfaceRef surface,NSUInteger plane,const char *why) {\n'
      ' static std::atomic<int> logged{0};\n'
      ' if(logged.fetch_add(1)>=64)return;\n'
@@ -102,7 +107,20 @@ REPLACED_METHODS = [
      ' }\n'
      ' const size_t bytes=(allocation+page-1)&~(page-1);\n'
      ' NBBuffer *buffer=surfaceBuffer(surface,base,bytes);if(!buffer){surfaceRefused(surface,plane,"import");return nil;}\n'
-     ' NBTexture *texture=textureOnBuffer(buffer,d,offset,row,true);if(!texture){surfaceRefused(surface,plane,"texture");return nil;}\n'
+     ' if(!planes) {\n'
+     '  NBTexture *texture=textureOnBuffer(buffer,d,offset,row,true);if(!texture){surfaceRefused(surface,plane,"texture");return nil;}\n'
+     '  texture.surface=(IOSurfaceRef)CFRetain(surface);return (id<MTLTexture>)texture;\n'
+     ' }\n'
+     ' // A surface with planes: the runtime reads a two-plane format\'s second plane from the facts (WebKit\'s \'b3a8\' backing stores).\n'
+     ' NmbTextureDescriptor descriptor;if(!textureDescriptor(d,&descriptor))return nil;\n'
+     ' const uint8_t *second=planes>1?(const uint8_t *)IOSurfaceGetBaseAddressOfPlane(surface,1):nullptr;\n'
+     ' const bool secondInside=second && second>=base && second<base+allocation;\n'
+     ' NmbTexture *handle=nmb_texture_new_on_iosurface(buffer.handle,&descriptor,offset,row,IOSurfaceGetPixelFormat(surface),plane,\n'
+     '  IOSurfaceGetWidth(surface),IOSurfaceGetHeight(surface),secondInside?(uint64_t)(second-base):0,\n'
+     '  secondInside?IOSurfaceGetBytesPerRowOfPlane(surface,1):0);\n'
+     ' if(!handle){NBLOG(@"native-metal: texture over surface refused: %@",lastError());surfaceRefused(surface,plane,"texture");return nil;}\n'
+     ' NBTexture *texture=[NBTexture new];texture.handle=handle;nmb_texture_describe(handle,&descriptor);texture.descriptor=descriptor;\n'
+     ' texture.buffer=buffer;texture.offset=offset;texture.rowBytes=row;\n'
      ' texture.surface=(IOSurfaceRef)CFRetain(surface);return (id<MTLTexture>)texture;\n'
      '}\n'),
     # - supportsFamily: (device), asked by RenderBox: on MTLGPUFamilyApple3 and up RenderBox draws an opaque layer -- a widget, a

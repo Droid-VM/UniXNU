@@ -56,6 +56,38 @@ if git_tree(['add', '-A']) != states[-1]:
     raise SystemExit('Translator patch result differs from its exact recorded source')
 out = ROOT / 'build/adreno-metal-bridge'
 out.mkdir(parents=True, exist_ok=True)
+# Functions the board's Metal plugin calls and NativeMetal's bridge does not define yet, appended to a staged copy of the bridge for as
+# long as it lacks them:
+# - nmb_texture_new_on_iosurface: newTextureWithDescriptor:iosurface:plane: over a surface with planes, with the facts the runtime
+#   reads a two-plane texture over it by (IoSurfaceYCbCr: the OSType, the plane, the size, plane 1's offset and rows). The bridge's
+#   nmb_texture_new_on_buffer gives none and says the surface has no planes, so every two-plane surface was refused -- WebKit's
+#   'b3a8' backing stores (RGB10A8_2P_XR10, which the runtime makes over 'b3a8' as Metal does) among them.
+ADDED_FUNCTIONS = [('nmb_texture_new_on_iosurface', '''
+/// `newTextureWithDescriptor:iosurface:plane:` over a surface with planes (added by the board's build): the plane's `offset` and rows
+/// in the buffer that stands for the surface, and the surface's facts a two-plane texture over it reads -- its OSType, the plane
+/// asked of, its size, and plane 1's offset and rows (0 and 0 without a plane 1).
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_texture_new_on_iosurface(buffer: *mut NmbBuffer, descriptor: *const NmbTextureDescriptor, offset: u64,
+                                               bytes_per_row: u64, pixel_format: u32, plane: u64, width: u64, height: u64,
+                                               plane1_offset: u64, plane1_bytes_per_row: u64) -> *mut NmbTexture {
+    guard(std::ptr::null_mut(), || {
+        let descriptor = texture_descriptor(descriptor)?;
+        let facts = metal2vulkan_runtime::IoSurfaceYCbCr::new(pixel_format, plane, [width, height], plane1_offset, plane1_bytes_per_row);
+        let plane = IoSurfacePlane::new(offset, bytes_per_row, true).with_ycbcr(facts);
+        let texture = get(buffer)?.0.new_texture_with_iosurface_plane(&descriptor, plane);
+        Ok(boxed(NmbTexture(texture.map_err(e("texture over surface"))?)))
+    })
+}
+''')]
+bridge = out / 'staged-bridge'
+shutil.rmtree(bridge, ignore_errors=True)
+bridge.mkdir()
+shutil.copyfile(ROOT / 'drivers/NativeMetal/bridge/NativeMetalBridge.rs', bridge / 'NativeMetalBridge.rs')
+objects = (ROOT / 'drivers/NativeMetal/bridge/NativeMetalObjects.rs').read_text()
+for name, function in ADDED_FUNCTIONS:
+    if 'fn %s(' % name not in objects:
+        objects += function
+(bridge / 'NativeMetalObjects.rs').write_text(objects)
 llvm_as = next((p for p in ['/opt/homebrew/opt/llvm/bin/llvm-as', shutil.which('llvm-as') or ''] if p and Path(p).exists()), None)
 if not llvm_as:
     raise SystemExit('llvm-as (LLVM 21 or newer) is required to assemble the fixture')
@@ -66,7 +98,7 @@ subprocess.run([llvm_as, '-o', fc_air, SOURCE / 'crates/metal2vulkan-validation/
 manifest = out / 'Cargo.toml'
 manifest.write_text('\n'.join([
     '[package]', 'name = "adreno-metal-bridge"', 'version = "0.1.0"', 'edition = "2024"', 'rust-version = "1.98"', '[workspace]',
-    '[lib]', 'crate-type = ["staticlib"]', 'path = ' + json.dumps(str(ROOT / 'drivers/AdrenoMetal/bridge/NativeMetalBridge.rs')),
+    '[lib]', 'crate-type = ["staticlib"]', 'path = ' + json.dumps(str(bridge / 'NativeMetalBridge.rs')),
     '[dependencies]',
     'metal2vulkan = { path = ' + json.dumps(str(SOURCE / 'crates/metal2vulkan')) + ', features = ["ash"] }',
     'metal2vulkan-runtime = { path = ' + json.dumps(str(SOURCE / 'crates/metal2vulkan-runtime')) + ' }',
