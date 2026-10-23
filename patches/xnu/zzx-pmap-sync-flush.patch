@@ -1,0 +1,35 @@
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index 7b8ccd4..bcce68a 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -7063,9 +7063,15 @@ void
+ pmap_sync_page_attributes_phys(
+ 	ppnum_t pp)
+ {
+-	/* ptoa() widens before the shift: pp << PAGE_SHIFT is a 32-bit shift and drops the high bits of physical
+-	 * addresses at or above 4 GiB (all of DRAM on boards whose memory starts there), which phystokv() then rejects. */
+-	flush_dcache((vm_offset_t) ptoa(pp), PAGE_SIZE, TRUE);
++	/*
++	 * Not flush_dcache(), which __ARM_COHERENT_IO__ makes a barrier: Apple's SoCs keep a page's lines coherent across a change of
++	 * its memory attributes, and this board's do not. A page made write-combined (an IOSurface a client draws into past the
++	 * cache) kept the dirty lines of its cacheable zero-fill, and the GPU's coherent reads took them over the data written later:
++	 * 16-pixel black runs over Safari's pages. Write them back and drop them through the physical aperture.
++	 * ptoa() widens before the shift: pp << PAGE_SHIFT is a 32-bit shift and drops the high bits of physical addresses at or
++	 * above 4 GiB (all of DRAM on boards whose memory starts there), which phystokv() then rejects.
++	 */
++	FlushPoC_DcacheRegion(phystokv(ptoa(pp)), PAGE_SIZE);
+ }
+ 
+ #if CONFIG_COREDUMP
+@@ -10753,6 +10759,11 @@ pmap_batch_set_cache_attributes_internal(
+ 
+ 			pvh_unlock(pai);
+ 
++			/* As pmap_set_cache_attributes() does: a page leaving write-back loses its lines (pmap_sync_page_attributes_phys). */
++			if (wimg_bits_new != wimg_bits_prev && wimg_bits_new != VM_WIMG_RT) {
++				pmap_sync_wimg(pn, wimg_bits_prev, wimg_bits_new);
++			}
++
+ 			page_index++;
+ 
+ #if XNU_MONITOR
