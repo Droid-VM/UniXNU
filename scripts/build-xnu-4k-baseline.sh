@@ -53,10 +53,11 @@ fi
 # Remove them first so earlier independent patches retain their idempotent checks.
 # The same holds for the boot-time GPU addon mount (zzy), which edits the owner Data mount function inside the systemos patch,
 # and the staged system apps view (zzy-owner), which edits that function after it; the bindfs file-ID lookup (zzy-zbindfs)
-# edits bind_vfsops.c next to the GPU addon mount's root-owner change.
+# edits bind_vfsops.c next to the GPU addon mount's root-owner change; the pmap page-attribute flush (zzx-pmap-sync-flush) edits
+# what zzx-pmap-sync-64bit-pa does.
 # Reverse newest first; the loop below re-applies them in name order.
 for LATE_PATCH in "$ROOT/patches/xnu/zzz-boot-progress.patch" "$ROOT/patches/xnu/zzy-zbindfs-vget.patch" "$ROOT/patches/xnu/zzy-owner-staged-apps-mount.patch" \
-    "$ROOT/patches/xnu/zzy-native-gpu-addon-mount.patch"; do
+    "$ROOT/patches/xnu/zzy-native-gpu-addon-mount.patch" "$ROOT/patches/xnu/zzx-pmap-sync-flush.patch"; do
   if git -C .cache/xnu-work apply --reverse --check "$LATE_PATCH" >/dev/null 2>&1; then
     git -C .cache/xnu-work apply --reverse "$LATE_PATCH"
   fi
