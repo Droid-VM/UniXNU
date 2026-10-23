@@ -108,13 +108,16 @@ def main():
                 handle.seek(offset)
                 handle.write(data)
         attached = run('hdiutil', 'attach', '-imagekey', 'diskimage-class=CRawDiskImage', '-nomount', '-nobrowse', str(raw))
-        store = re.match(r'(/dev/disk\d+)', attached).group(1).split('/')[-1]
+        # hdiutil lists the raw disk and the APFS container synthesized on it, in either order
+        disks = re.findall(r'^/dev/(disk\d+)\s', attached, re.M)
+        store = disks[0]
         try:
             listing = plistlib.loads(subprocess.check_output(['diskutil', 'apfs', 'list', '-plist']))
             container = None
             for entry in listing['Containers']:
-                if any(s['DeviceIdentifier'] == store for s in entry.get('PhysicalStores', [])):
-                    container = entry['ContainerReference']
+                stores = [s['DeviceIdentifier'] for s in entry.get('PhysicalStores', [])]
+                if entry['ContainerReference'] in disks or any(s in disks for s in stores):
+                    container, store = entry['ContainerReference'], stores[0] if stores else store
             if not container:
                 sys.exit('No APFS container found on the attached seed')
             run('diskutil', 'apfs', 'resizeContainer', container, '0')
