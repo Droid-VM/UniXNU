@@ -2,36 +2,55 @@ diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
 index e7d6592..f940ab2 100644
 --- a/iokit/Kernel/IOUserClient.cpp
 +++ b/iokit/Kernel/IOUserClient.cpp
-@@ -4325,6 +4325,36 @@ is_io_service_set_authorization_id(
+@@ -4325,6 +4325,55 @@ is_io_service_set_authorization_id(
  }
  
  /* Routine io_service_open_ndr */
 +/*
 + * The native GPU driver names, by the property NativeSandboxGrantProcess on its accelerator service, the processes (a comma-separated list of
 + * process names, the render server and the other processes that run its Metal plugin) to which it grants its own user client in place of the
-+ * sandbox's verdict: the original profiles name no class of that driver. Nothing else is affected.
++ * sandbox's verdict: the original profiles name no class of that driver. Nothing else is affected. A name ending in '*' names every process
++ * whose name begins with the rest (com.apple.WebKit.*), "*X*" every process whose name holds X (*Poster*: PosterBoard and each wallpaper's
++ * poster extension); the Metal plugin's own list takes the same forms. A process's name is its whole p_name, up to 32 characters.
++ * The first 64 refusals of an AGX service are logged with the name and the list (a framework's sandbox_check is not one of them).
 + */
 +extern "C" void proc_selfname(char * buf, int size);
 +static bool
 +native_sandbox_grant(IOService * service)
 +{
 +	OSString * list = OSDynamicCast(OSString, service->getProperty("NativeSandboxGrantProcess"));
-+	char name[17] = {};
++	char name[33] = {};
++	proc_selfname(name, sizeof(name));
++	static int told = 0;
 +	if (!list) {
++		const char * cls = service->getMetaClass()->getClassName();
++		if (told < 64 && 0 == strncmp(cls, "AGX", 3)) {
++			++told;
++			IOLog("native-sandbox-grant: %s opens %s, which names no grant (%s)\n", name, cls,
++			    service->getProperty("NativeSandboxGrantProcess") ? "not a string" : "none");
++		}
 +		return false;
 +	}
-+	proc_selfname(name, sizeof(name));
 +	for (const char * at = list->getCStringNoCopy(); *at;) {
 +		size_t length = 0;
 +		while (at[length] && at[length] != ',') {
 +			++length;
 +		}
-+		/* A process name holds 16 characters, so a longer entry is compared by its first 16. */
-+		if (length && 0 == strncmp(name, at, length < sizeof(name) - 1 ? length : sizeof(name) - 1)
-+		    && (length >= sizeof(name) - 1 || name[length] == 0)) {
++		const bool prefix = length > 1 && at[length - 1] == '*';
++		if (prefix && length > 2 && at[0] == '*') {
++			for (const char * from = name; strlen(from) >= length - 2; ++from) {
++				if (0 == strncmp(from, at + 1, length - 2)) {
++					return true;
++				}
++			}
++		} else if (prefix ? 0 == strncmp(name, at, length - 1) : (length && 0 == strncmp(name, at, length) && name[length] == 0)) {
 +			return true;
 +		}
 +		at += length + (at[length] == ',' ? 1 : 0);
++	}
++	if (told < 64) {
++		++told;
++		IOLog("native-sandbox-grant: %s not in %s's grant \"%s\"\n", name, service->getMetaClass()->getClassName(), list->getCStringNoCopy());
 +	}
 +	return false;
 +}
@@ -39,7 +58,7 @@ index e7d6592..f940ab2 100644
  kern_return_t
  is_io_service_open_extended(
  	io_object_t _service,
-@@ -4353,7 +4383,7 @@ is_io_service_open_extended(
+@@ -4353,7 +4402,7 @@ is_io_service_open_extended(
  	}
  
  #if CONFIG_MACF
@@ -48,7 +67,7 @@ index e7d6592..f940ab2 100644
  		return kIOReturnNotPermitted;
  	}
  #endif
-@@ -4512,7 +4542,9 @@ is_io_service_open_extended(
+@@ -4512,7 +4561,9 @@ is_io_service_open_extended(
  				res = kIOReturnNotPrivileged;
  			}
  #if CONFIG_MACF
@@ -59,7 +78,7 @@ index e7d6592..f940ab2 100644
  				IOLog("IOUC %s failed MACF in process %s\n",
  				    client->getMetaClass()->getClassName(), creatorNameCStr);
  				res = kIOReturnNotPermitted;
-@@ -4520,6 +4552,7 @@ is_io_service_open_extended(
+@@ -4520,6 +4571,7 @@ is_io_service_open_extended(
  #endif
  
  			if ((kIOReturnSuccess == res)
