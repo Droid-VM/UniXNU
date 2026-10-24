@@ -15,7 +15,7 @@
 	url = https://github.com/UniXNU/NativeAES.git
 [submodule "drivers/NativeAdreno"]
 	path = drivers/NativeAdreno
-	url = https://github.com/UniXNU/NativeAdreno.git
+	url = https://github.com/Droid-VM/NativeAdreno.git
 [submodule "drivers/NativeGeniSpi"]
 	path = drivers/NativeGeniSpi
 	url = https://github.com/UniXNU/NativeGeniSpi.git
