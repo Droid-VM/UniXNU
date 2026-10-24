@@ -9,7 +9,7 @@
 	url = https://github.com/UniXNU/ArmVirtPlatform.git
 [submodule "drivers/DarwinBoot"]
 	path = drivers/DarwinBoot
-	url = https://github.com/UniXNU/DarwinBoot.git
+	url = https://github.com/Droid-VM/DarwinBoot.git
 [submodule "drivers/NativeAES"]
 	path = drivers/NativeAES
 	url = https://github.com/UniXNU/NativeAES.git
@@ -27,10 +27,10 @@
 	url = https://github.com/UniXNU/NativeKeyStoreEvents.git
 [submodule "drivers/NativeMetal"]
 	path = drivers/NativeMetal
-	url = https://github.com/UniXNU/NativeMetal.git
+	url = https://github.com/Droid-VM/NativeMetal.git
 [submodule "drivers/NativeMobileDisplay"]
 	path = drivers/NativeMobileDisplay
-	url = https://github.com/UniXNU/NativeMobileDisplay.git
+	url = https://github.com/Droid-VM/NativeMobileDisplay.git
 [submodule "drivers/NativeRamBlock"]
 	path = drivers/NativeRamBlock
 	url = https://github.com/UniXNU/NativeRamBlock.git
