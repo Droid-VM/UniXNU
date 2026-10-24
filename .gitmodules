@@ -1,6 +1,6 @@
 [submodule "drivers/ArmCpu"]
 	path = drivers/ArmCpu
-	url = https://github.com/UniXNU/ArmCpu.git
+	url = https://github.com/Droid-VM/ArmCpu.git
 [submodule "drivers/ArmDTPlatform"]
 	path = drivers/ArmDTPlatform
 	url = https://github.com/UniXNU/ArmDTPlatform.git
@@ -9,13 +9,13 @@
 	url = https://github.com/UniXNU/ArmVirtPlatform.git
 [submodule "drivers/DarwinBoot"]
 	path = drivers/DarwinBoot
-	url = https://github.com/UniXNU/DarwinBoot.git
+	url = https://github.com/Droid-VM/DarwinBoot.git
 [submodule "drivers/SoftwareAES"]
 	path = drivers/SoftwareAES
 	url = https://github.com/UniXNU/SoftwareAES.git
 [submodule "drivers/Adreno740"]
 	path = drivers/Adreno740
-	url = https://github.com/UniXNU/Adreno740.git
+	url = https://github.com/Droid-VM/NativeAdreno.git
 [submodule "drivers/QcomGeniSpi"]
 	path = drivers/QcomGeniSpi
 	url = https://github.com/UniXNU/QcomGeniSpi.git
@@ -24,10 +24,10 @@
 	url = https://github.com/UniXNU/AppleKeyStoreState.git
 [submodule "drivers/AdrenoMetal"]
 	path = drivers/AdrenoMetal
-	url = https://github.com/UniXNU/AdrenoMetal.git
+	url = https://github.com/Droid-VM/NativeMetal.git
 [submodule "drivers/GopFramebuffer"]
 	path = drivers/GopFramebuffer
-	url = https://github.com/UniXNU/GopFramebuffer.git
+	url = https://github.com/Droid-VM/NativeMobileDisplay.git
 [submodule "drivers/RamBlock"]
 	path = drivers/RamBlock
 	url = https://github.com/UniXNU/RamBlock.git
