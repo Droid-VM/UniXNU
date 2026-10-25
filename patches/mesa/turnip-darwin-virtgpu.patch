@@ -128,10 +128,10 @@ index b03c6ee..0c607a4 100644
     kern_return_t kr = dw_call(NativeAdrenoMethodBoCpuMap, &req, sizeof(req), &reply, sizeof(reply));
 diff --git a/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc b/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc
 new file mode 100644
-index 0000000..9787116
+index 0000000..dcb483f
 --- /dev/null
 +++ b/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc
-@@ -0,0 +1,590 @@
+@@ -0,0 +1,625 @@
 +/*
 + * Turnip's Darwin kernel backend over the guest's virtio GPU: the NativeAdreno ABI methods tu_knl_darwin.cc calls, served by a DRM
 + * native context (the virtgpu methods of NativeAdreno's user client, DroidVMVirtgpuABI.h) in the msm protocol the host's drm2kgsl
@@ -216,11 +216,46 @@ index 0000000..9787116
 +   uint64_t va_start, va_size;
 +} dwv = {.lock = PTHREAD_MUTEX_INITIALIZER};
 +
++static kern_return_t vg_call(uint32_t op, const void *in, size_t in_size, void *out, size_t out_size);
++
++/* Whether the board makes the virtio-gpu context the default 3D path (its kernel answers DROIDVM_VIRTGPU_PARAM_DEFAULT_3D, from
++ * the boot-arg vgpu-3d=1): asked once, over a connection of its own that is closed again. */
++static bool
++dwv_board_default(void)
++{
++   static int answer = -1;
++   if (answer >= 0)
++      return answer;
++   answer = 0;
++   io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOAcceleratorES"));
++   if (!service)
++      return false;
++   kern_return_t kr = IOServiceOpen(service, mach_task_self(), DROIDVM_VIRTGPU_OPEN_TYPE, &dwv.conn);
++   IOObjectRelease(service);
++   if (kr != KERN_SUCCESS)
++      return false;
++   const uint32_t probe[2] = {DWV_TUNNEL_MAGIC, 0xffffffffu};
++   for (dwv.selector = 0; dwv.selector < 256; dwv.selector++)
++      if (IOConnectCallStructMethod(dwv.conn, dwv.selector, probe, sizeof(probe), NULL, NULL) == KERN_SUCCESS)
++         break;
++   const struct droidvm_virtgpu_getparam param = {DROIDVM_VIRTGPU_PARAM_DEFAULT_3D};
++   struct droidvm_virtgpu_getparam_reply reply = {};
++   if (dwv.selector < 256 &&
++       vg_call(DROIDVM_VIRTGPU_GETPARAM, &param, sizeof(param), &reply, sizeof(reply)) == KERN_SUCCESS)
++      answer = reply.value == 1;
++   IOServiceClose(dwv.conn);
++   dwv.conn = IO_OBJECT_NULL;
++   return answer;
++}
++
++/* TU_DARWIN_VIRTGPU=1 or 0 chooses the backend; unset, the board does (dwv_board_default). */
 +bool
 +dwv_enabled(void)
 +{
 +   const char *text = getenv("TU_DARWIN_VIRTGPU");
-+   return text && *text && strcmp(text, "0");
++   if (text && *text)
++      return strcmp(text, "0") != 0;
++   return dwv_board_default();
 +}
 +
 +static kern_return_t
