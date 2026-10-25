@@ -11,6 +11,22 @@ index de4b0c0..c0dcab1 100644
    tu_flags += '-DTU_BUILTIN_SOURCE_ID="' + get_option('tu-builtin-source-id') + '"'
    if get_option('tu-builtin-pack-header') != ''
      tu_flags += '-DTU_BUILTIN_PACK_HEADER="' + get_option('tu-builtin-pack-header') + '"'
+diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.cc
+index 5597422..cf9b92a 100644
+--- a/src/freedreno/vulkan/tu_device.cc
++++ b/src/freedreno/vulkan/tu_device.cc
+@@ -3936,8 +3936,9 @@ tu_GetMemoryHostPointerPropertiesEXT(VkDevice _device,
+        !device->physical_device->has_host_import || ((uintptr_t) pHostPointer & 4095))
+       return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+    /* Imported pages keep the owner's CPU mapping; they are offered as the plain (host-coherent) type. On Darwin the importer cleans
+-    * and invalidates its own CPU caches around GPU use (NativeAdrenoAbiBoImport), as an IOSurface's owner does. */
+-   pMemoryHostPointerProperties->memoryTypeBits = 1u;
++    * and invalidates its own CPU caches around GPU use (NativeAdrenoAbiBoImport), as an IOSurface's owner does. Where the GPU maps
++    * memory IO-coherent (cached coherent: the virtio-gpu backend's BOs), the pages are the cached-coherent type as well. */
++   pMemoryHostPointerProperties->memoryTypeBits = device->physical_device->has_cached_coherent_memory ? 3u : 1u;
+    return VK_SUCCESS;
+ }
+ 
 diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
 index b03c6ee..0c607a4 100644
 --- a/src/freedreno/vulkan/tu_knl_darwin.cc
@@ -112,10 +128,10 @@ index b03c6ee..0c607a4 100644
     kern_return_t kr = dw_call(NativeAdrenoMethodBoCpuMap, &req, sizeof(req), &reply, sizeof(reply));
 diff --git a/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc b/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc
 new file mode 100644
-index 0000000..17fd883
+index 0000000..9787116
 --- /dev/null
 +++ b/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc
-@@ -0,0 +1,530 @@
+@@ -0,0 +1,590 @@
 +/*
 + * Turnip's Darwin kernel backend over the guest's virtio GPU: the NativeAdreno ABI methods tu_knl_darwin.cc calls, served by a DRM
 + * native context (the virtgpu methods of NativeAdreno's user client, DroidVMVirtgpuABI.h) in the msm protocol the host's drm2kgsl
@@ -127,6 +143,7 @@ index 0000000..17fd883
 + */
 +
 +#include <pthread.h>
++#include <stdio.h>
 +#include <stdlib.h>
 +#include <string.h>
 +#include <unistd.h>
@@ -174,10 +191,12 @@ index 0000000..17fd883
 +   uint8_t reserved[160 - 112];   /* the capset is 160 bytes on this host; GET_CAPS zero-pads what is shorter */
 +};
 +
-+/* One NativeAdreno handle: its size from BoAlloc, then the virtgpu resource BoMap made at its GPU address. */
++/* One NativeAdreno handle: its size from BoAlloc (or BoImport, with the caller's address), then the virtgpu resource BoMap made at
++ * its GPU address. */
 +struct dwv_bo {
 +   bool used;
 +   uint64_t size, iova;
++   uint64_t user_address;   /* BoImport: the caller's pages the blob is made of */
 +   uint32_t kernel_handle, resource_id;
 +   uint32_t metadata_bytes;
 +   char metadata[NativeAdrenoAbiMetadataBytes];
@@ -393,29 +412,44 @@ index 0000000..17fd883
 +   return h;
 +}
 +
-+/* GEM_NEW names the BO's address and blob id; the guest-alloc blob that carries it brings the pages. */
++/* GEM_NEW names the BO's address and blob id; the guest blob that carries it brings the pages: allocated by the kernel, or the
++ * caller's own for a BoImport (VK_EXT_external_memory_host). */
 +static kern_return_t
 +dwv_create(struct dwv_bo *bo, uint64_t iova)
 +{
-+   struct {
-+      struct droidvm_virtgpu_create_blob b;
++   struct gem_new {
 +      uint32_t header[4];
 +      uint64_t iova, size;
 +      uint32_t flags, blob_id;
++   };
++   struct {
++      struct droidvm_virtgpu_create_blob b;
++      struct gem_new ccmd;
 +   } request = {};
++   struct {
++      struct droidvm_virtgpu_create_blob_user b;
++      struct gem_new ccmd;
++   } user = {};
 +   const uint64_t blob_id = dwv.next_blob_id++;
-+   request.b = (struct droidvm_virtgpu_create_blob){
-+      DROIDVM_VIRTGPU_BLOB_MEM_HOST3D_GUEST,
-+      DROIDVM_VIRTGPU_BLOB_FLAG_MAPPABLE | DROIDVM_VIRTGPU_BLOB_FLAG_CREATE_GUEST_HANDLE, bo->size, blob_id, 40, 0};
-+   request.header[0] = DWV_CCMD_GEM_NEW;
-+   request.header[1] = 40;
-+   request.header[2] = ++dwv.seqno;
-+   request.iova = iova;
-+   request.size = bo->size;
-+   request.flags = DWV_MSM_BO_GUEST_ALLOC | DWV_MSM_BO_CACHED_COHERENT;
-+   request.blob_id = (uint32_t)blob_id;
++   const uint32_t flags = DROIDVM_VIRTGPU_BLOB_FLAG_MAPPABLE | DROIDVM_VIRTGPU_BLOB_FLAG_CREATE_GUEST_HANDLE;
++   struct gem_new *ccmd = bo->user_address ? &user.ccmd : &request.ccmd;
++   ccmd->header[0] = DWV_CCMD_GEM_NEW;
++   ccmd->header[1] = sizeof(*ccmd);
++   ccmd->header[2] = ++dwv.seqno;
++   ccmd->iova = iova;
++   ccmd->size = bo->size;
++   ccmd->flags = DWV_MSM_BO_GUEST_ALLOC | DWV_MSM_BO_CACHED_COHERENT;
++   ccmd->blob_id = (uint32_t)blob_id;
 +   struct droidvm_virtgpu_create_blob_reply reply = {};
-+   kern_return_t kr = vg_call(DROIDVM_VIRTGPU_CREATE_BLOB, &request, sizeof(request), &reply, sizeof(reply));
++   kern_return_t kr;
++   if (bo->user_address) {
++      user.b = (struct droidvm_virtgpu_create_blob_user){bo->user_address, bo->size, blob_id, flags, sizeof(user.ccmd)};
++      kr = vg_call(DROIDVM_VIRTGPU_CREATE_BLOB_USER, &user, sizeof(user), &reply, sizeof(reply));
++   } else {
++      request.b = (struct droidvm_virtgpu_create_blob){DROIDVM_VIRTGPU_BLOB_MEM_HOST3D_GUEST, flags, bo->size, blob_id,
++                                                       sizeof(request.ccmd), 0};
++      kr = vg_call(DROIDVM_VIRTGPU_CREATE_BLOB, &request, sizeof(request), &reply, sizeof(reply));
++   }
 +   if (kr != KERN_SUCCESS)
 +      return kr;
 +   bo->kernel_handle = reply.handle;
@@ -495,8 +529,34 @@ index 0000000..17fd883
 +   return kr;
 +}
 +
++/* TU_DARWIN_VIRTGPU_TRACE=1: one stderr line per BO call and its result. */
++static bool
++dwv_trace(void)
++{
++   static int trace = -1;
++   if (trace < 0) {
++      const char *value = getenv("TU_DARWIN_VIRTGPU_TRACE");
++      trace = value && *value == '1';
++   }
++   return trace;
++}
++
++static kern_return_t dwv_call_locked(uint32_t method, const void *in, size_t in_size, void *out, size_t out_size);
++
 +kern_return_t
 +dwv_call(uint32_t method, const void *in, size_t in_size, void *out, size_t out_size)
++{
++   kern_return_t kr = dwv_call_locked(method, in, in_size, out, out_size);
++   if (dwv_trace() && (method == NativeAdrenoMethodBoImport || kr != KERN_SUCCESS)) {
++      const uint64_t *words = (const uint64_t *)in;
++      fprintf(stderr, "tu-virtgpu: method %u in %zu [%#llx %#llx] -> 0x%x\n", method, in_size,
++              in_size >= 8 ? (unsigned long long)words[0] : 0ull, in_size >= 16 ? (unsigned long long)words[1] : 0ull, kr);
++   }
++   return kr;
++}
++
++static kern_return_t
++dwv_call_locked(uint32_t method, const void *in, size_t in_size, void *out, size_t out_size)
 +{
 +   kern_return_t kr = KERN_SUCCESS;
 +   switch (method) {
@@ -504,7 +564,8 @@ index 0000000..17fd883
 +      if (out_size != sizeof(NativeAdrenoAbiParams))
 +         return kIOReturnBadArgument;
 +      NativeAdrenoAbiParams *params = (NativeAdrenoAbiParams *)out;
-+      *params = (NativeAdrenoAbiParams){NativeAdrenoAbiVersion, 48, 48, 0, 1ull << NativeAdrenoAbiMaxBoBytesShift};
++      *params = (NativeAdrenoAbiParams){NativeAdrenoAbiVersion, 48, 48, NativeAdrenoParamsHostImport,
++                                        1ull << NativeAdrenoAbiMaxBoBytesShift};
 +      return KERN_SUCCESS;
 +   }
 +   case NativeAdrenoMethodGetDeviceInfo: {
@@ -558,7 +619,6 @@ index 0000000..17fd883
 +   case NativeAdrenoMethodBoCpuUnmap:
 +      return KERN_SUCCESS;
 +   case NativeAdrenoMethodBoCpuMap:   /* the backend maps through dwv_map */
-+   case NativeAdrenoMethodBoImport:   /* host memory is not offered yet (Query's flags) */
 +      return kIOReturnUnsupported;
 +   default:
 +      break;
@@ -579,6 +639,22 @@ index 0000000..17fd883
 +         break;
 +      }
 +      dwv.bos[handle] = (struct dwv_bo){.used = true, .size = req->bytes};
++      ((NativeAdrenoAbiBoAllocReply *)out)->handle = handle;
++      break;
++   }
++   case NativeAdrenoMethodBoImport: {
++      const NativeAdrenoAbiBoImport *req = (const NativeAdrenoAbiBoImport *)in;
++      if (in_size != sizeof(*req) || out_size != sizeof(NativeAdrenoAbiBoAllocReply) || !req->address || !req->bytes ||
++          ((req->address | req->bytes) & 4095) || req->bytes > (1ull << NativeAdrenoAbiMaxBoBytesShift)) {
++         kr = kIOReturnBadArgument;
++         break;
++      }
++      uint32_t handle = dwv_new_handle();
++      if (!handle) {
++         kr = kIOReturnNoResources;
++         break;
++      }
++      dwv.bos[handle] = (struct dwv_bo){.used = true, .size = req->bytes, .user_address = req->address};
 +      ((NativeAdrenoAbiBoAllocReply *)out)->handle = handle;
 +      break;
 +   }
