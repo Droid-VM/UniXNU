@@ -128,10 +128,10 @@ index b03c6ee..0c607a4 100644
     kern_return_t kr = dw_call(NativeAdrenoMethodBoCpuMap, &req, sizeof(req), &reply, sizeof(reply));
 diff --git a/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc b/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc
 new file mode 100644
-index 0000000..dcb483f
+index 0000000..9722361
 --- /dev/null
 +++ b/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc
-@@ -0,0 +1,625 @@
+@@ -0,0 +1,629 @@
 +/*
 + * Turnip's Darwin kernel backend over the guest's virtio GPU: the NativeAdreno ABI methods tu_knl_darwin.cc calls, served by a DRM
 + * native context (the virtgpu methods of NativeAdreno's user client, DroidVMVirtgpuABI.h) in the msm protocol the host's drm2kgsl
@@ -615,8 +615,12 @@ index 0000000..dcb483f
 +      info->va_start = dwv.va_start;
 +      info->va_size = dwv.va_size;
 +      info->highest_bank_bit = dwv.caps.highest_bank_bit;
-+      info->ubwc_swizzle = (uint32_t)dwv.caps.ubwc_swizzle;
-+      info->macrotile_mode = (uint32_t)dwv.caps.macrotile_mode;
++      /* drm2kgsl reports neither (KGSL has no property for them, and its GET_PARAM answers 0); KGSL programs this a7xx part as
++       * msm's sm8650 configuration, UBWC swizzle levels 2 and 3 and eight-channel macrotiles, which droidvm-gpu's driver gives
++       * Turnip too. Another pair misplaces texels wherever the CPU tiles or detiles an image (a host image copy: Core Image's
++       * readbacks had 16-pixel blocks swapped in every other 16-row band). */
++      info->ubwc_swizzle = dwv.caps.ubwc_swizzle ? (uint32_t)dwv.caps.ubwc_swizzle : 6;
++      info->macrotile_mode = dwv.caps.macrotile_mode ? (uint32_t)dwv.caps.macrotile_mode : 1;
 +      info->ubwc_version = 4;
 +      /* The client picks addresses (GEM_NEW's iova), and the host imports BO pages IO-coherent and write-back. */
 +      info->flags = NativeAdrenoDeviceClientIova | (dwv.caps.has_cached_coherent ? NativeAdrenoDeviceCachedCoherent : 0);
