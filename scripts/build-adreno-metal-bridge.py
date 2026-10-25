@@ -36,7 +36,10 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     '0006-optional-shader-cache-directory.patch',
     # An `_sRGB` extended-range form's blend the translator's fast-math model does not hold takes its rounded model (Metal's own
     # without fast math) instead of refusing the pipeline: NanoUniverse's starfield, the Astronomy wallpaper, had no pipeline.
-    '0007-srgb-extended-range-blend-rounded-model.patch']]
+    '0007-srgb-extended-range-blend-rounded-model.patch',
+    # `llvm.bitreverse` (what MSL's `reverse_bits` compiles to) lowers to the translator's own ReverseBits: GFXBench's Aztec
+    # Ruins and Car Chase sample with a bit-reversed (Hammersley) sequence, and their pipelines were refused (UnknownIntrinsic).
+    '0008-llvm-bitreverse.patch']]
 
 
 def git_tree(*steps):
