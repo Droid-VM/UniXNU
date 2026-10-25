@@ -1,6 +1,6 @@
 [submodule "drivers/ArmCpu"]
 	path = drivers/ArmCpu
-	url = https://github.com/UniXNU/ArmCpu.git
+	url = https://github.com/Droid-VM/ArmCpu.git
 [submodule "drivers/ArmDTPlatform"]
 	path = drivers/ArmDTPlatform
 	url = https://github.com/UniXNU/ArmDTPlatform.git
