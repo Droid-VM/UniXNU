@@ -35,7 +35,10 @@ PATCHES = [ROOT / 'drivers/NativeMetal/bridge/patches' / name for name in [
     '0007-srgb-extended-range-blend-rounded-model.patch',
     # `llvm.bitreverse` (what MSL's `reverse_bits` compiles to) lowers to the translator's own ReverseBits: GFXBench's Aztec
     # Ruins and Car Chase sample with a bit-reversed (Hammersley) sequence, and their pipelines were refused (UnknownIntrinsic).
-    '0008-llvm-bitreverse.patch']]
+    '0008-llvm-bitreverse.patch',
+    # Pooled memory blocks start at 4 MiB and grow with their pool (up to 64 MiB), rather than 64 MiB each from the first
+    # resource: on the iPadOS guest every block is wired guest memory, and its home screen's GPU clients held 2 GiB of them.
+    '0009-growing-memory-blocks.patch']]
 tree_diff = subprocess.check_output(['git', '-C', str(SOURCE), 'diff', 'HEAD', '--'], text=True)
 def canonical_diff(diff):
     # Independent patches touch disjoint files; Git orders the combined diff by
