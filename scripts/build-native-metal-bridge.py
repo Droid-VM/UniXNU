@@ -38,7 +38,11 @@ PATCHES = [ROOT / 'drivers/NativeMetal/bridge/patches' / name for name in [
     '0008-llvm-bitreverse.patch',
     # Pooled memory blocks start at 4 MiB and grow with their pool (up to 64 MiB), rather than 64 MiB each from the first
     # resource: on the iPadOS guest every block is wired guest memory, and its home screen's GPU clients held 2 GiB of them.
-    '0009-growing-memory-blocks.patch']]
+    '0009-growing-memory-blocks.patch',
+    # A `[[patch(quad, 0)]]` function (no control points: GFXBench Car Chase's Bezier car body) answers its patch type and 0, as
+    # Metal does, instead of being refused as unmeasured: the frontend took the refusal for no patch, so the pipeline lost the
+    # descriptor's tessellation state (winding, partitioning, the factors' step function) and the car drew black and torn.
+    '0010-patch-with-no-control-points.patch']]
 tree_diff = subprocess.check_output(['git', '-C', str(SOURCE), 'diff', 'HEAD', '--'], text=True)
 def canonical_diff(diff):
     # Independent patches touch disjoint files; Git orders the combined diff by
