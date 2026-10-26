@@ -1,0 +1,51 @@
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index 2a58921..592aa68 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -2249,6 +2249,10 @@ pmap_bootstrap(
+ 
+ 	pmap_max_asids = pmap_compute_max_asids();
+ #if HAS_16BIT_ASID
++	/* UniXNU: TCR_EL1.AS is already set (TCR_EL1_ASID); on a core with 8-bit ASIDs it is RES0, the ASIDs above 255 alias. */
++	if (((__builtin_arm_rsr64("ID_AA64MMFR0_EL1") >> 4) & 0xf) != 2) {
++		panic("pmap: HAS_16BIT_ASID, but ID_AA64MMFR0_EL1 0x%llx has no 16-bit ASIDs", __builtin_arm_rsr64("ID_AA64MMFR0_EL1"));
++	}
+ 	asid_chunk_size = MAX_HW_ASIDS;
+ #else
+ 	pmap_asid_plru = (pmap_max_asids > MAX_HW_ASIDS);
+diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
+index a6efc7f..b961837 100644
+--- a/osfmk/arm64/cpu.c
++++ b/osfmk/arm64/cpu.c
+@@ -858,8 +858,10 @@ cpu_data_init(cpu_data_t *cpu_data_ptr)
+ 	pmap_cpu_data_ptr->pv_free_spill_marker = NULL;
+ #if !CONFIG_SPTM
+ 	pmap_cpu_data_ptr->cpu_nested_pmap = (struct pmap *) NULL;
++#if !HAS_16BIT_ASID
+ 	bzero(&(pmap_cpu_data_ptr->cpu_sw_asids[0]), sizeof(pmap_cpu_data_ptr->cpu_sw_asids));
+ #endif
++#endif
+ #endif /* !XNU_MONITOR */
+ 	cpu_data_ptr->halt_status = CPU_NOT_HALTED;
+ #if __ARM_KERNEL_PROTECT__
+diff --git a/pexpert/pexpert/arm64/BCM2837.h b/pexpert/pexpert/arm64/BCM2837.h
+index 61afb61..4d0ba6f 100644
+--- a/pexpert/pexpert/arm64/BCM2837.h
++++ b/pexpert/pexpert/arm64/BCM2837.h
+@@ -5,6 +5,16 @@
+ #ifndef _PEXPERT_ARM_BCM2837_H
+ #define _PEXPERT_ARM_BCM2837_H
+ 
++/*
++ * UniXNU: 16-bit hardware ASIDs (TCR_EL1.AS), one per address space. With 8 bits the pmap gives 2048 address spaces 255
++ * hardware ASIDs and, when two share one, flushes that ASID from the switching CPU's TLB only (pmap_switch, cpu_sw_asids).
++ * That is sound on a physical CPU and not on a virtual one: a hypervisor moves a vCPU between cores, a core keeps the TLB
++ * entries another vCPU of the VM left there, and a process then translates with the entries of another process that has
++ * its hardware ASID (another task's stack guard, TSD, malloc and pthread data at the same address). Every ARMv8.2+ core has
++ * 16-bit ASIDs; pmap_bootstrap() checks ID_AA64MMFR0_EL1.
++ */
++#define HAS_16BIT_ASID 1
++
+ #define NO_MONITOR 1
+ #define NO_ECORE 1
+ 
