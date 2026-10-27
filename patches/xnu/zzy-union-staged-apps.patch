@@ -1,9 +1,9 @@
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
-index 0e1ac20..2abfef6 100644
+index 792427d..340eff3 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -7269,6 +7269,43 @@ native_gpu_addon_prepare(proc_t p, user_addr_t scratch)
- 	    "/System/Library/LaunchDaemons/org.blu-sharky.adrenoprobed.plist", &native_gpu_addon2_stage, &native_gpu_addon2_status);
+@@ -7818,6 +7818,43 @@ native_staged_apps_prepare(proc_t p, user_addr_t scratch, mount_t data_mount)
+ 	vnode_put(vp);
  }
  
 +/* The deletable system apps (Weather, Calendar, Notes, Maps, ...) ship in the OS volume's /private/var/staged_system_apps: a restore copies
@@ -12,10 +12,10 @@ index 0e1ac20..2abfef6 100644
 + * read-only union view over /Applications, mounted while /private/var still resolves to the OS volume (the Data mount covers it next).
 + * The apps then register as built-in system apps; their code is in the static trust cache with the rest of the OS. Never panics: a
 + * refused mount only records its status. */
-+volatile int native_staged_apps_stage = 0;
-+volatile int native_staged_apps_status = -1;
++volatile int native_staged_view_stage = 0;
++volatile int native_staged_view_status = -1;
 +static void
-+native_staged_apps_prepare(proc_t p, user_addr_t scratch)
++native_staged_view_prepare(proc_t p, user_addr_t scratch)
 +{
 +	uint32_t enabled = 0;
 +	if (!PE_parse_boot_argn("owner-staged-apps", &enabled, sizeof(enabled)) || enabled != 1) {
@@ -23,7 +23,7 @@ index 0e1ac20..2abfef6 100644
 +	}
 +	static const char source[] = "/private/var/staged_system_apps", point[] = "/Applications";
 +	native_gpu_addon_mount(p, scratch, 0x800, source, sizeof(source), point, sizeof(point), "/Applications/Preferences.app/Info.plist",
-+	    "/Applications/Weather.app/Info.plist", &native_staged_apps_stage, &native_staged_apps_status);
++	    "/Applications/Weather.app/Info.plist", &native_staged_view_stage, &native_staged_view_status);
 +}
 +
 +/* With boot-arg owner-tools-overlay=1 the owner's tools in the Data volume's /private/var/ngpu/bin also show, read-only, over
@@ -46,24 +46,24 @@ index 0e1ac20..2abfef6 100644
  static int
  native_owner_data_prepare(proc_t p, user_addr_t scratch)
  {
-@@ -7312,6 +7349,8 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
+@@ -7861,6 +7898,8 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
  	    (error = copyout("/private/var", request.path, 13)) ||
  	    (error = copyout(device_path, spec, strlen(device_path) + 1)) ||
  	    (error = copyout(payload, request.data, sizeof(payload)))) goto done;
 +	/* still the OS volume's /private/var */
-+	native_staged_apps_prepare(p, scratch);
++	native_staged_view_prepare(p, scratch);
  	native_owner_data_stage = 2;
  	error = mount(p, &request, &result);
  	if (error) goto done;
-@@ -7328,6 +7367,7 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
- 	    strcmp(vfs_statfs(data_mount)->f_fstypename, "apfs")) error = EINVAL;
+@@ -7878,6 +7917,7 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
  	if (!error) native_owner_data_stage = 4;
  	if (!error) native_gpu_addon_prepare(p, scratch);
+ 	if (!error) native_staged_apps_prepare(p, scratch, data_mount);
 +	if (!error) native_owner_tools_prepare(p, scratch);
  done:
  	if (data_root) vnode_put(data_root);
  	native_owner_data_status = error;
-@@ -8006,8 +8046,20 @@ process_signature(proc_t p, struct image_params *imgp)
+@@ -8556,8 +8596,20 @@ process_signature(proc_t p, struct image_params *imgp)
  	/* call the launch constraints hook */
  	os_reason_t launch_constraint_reason;
  	if ((error = mac_proc_check_launch_constraints(p, imgp, &launch_constraint_reason)) != 0) {
