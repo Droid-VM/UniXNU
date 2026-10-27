@@ -27,7 +27,7 @@
 	url = https://github.com/UniXNU/NativeKeyStoreEvents.git
 [submodule "drivers/NativeMetal"]
 	path = drivers/NativeMetal
-	url = https://github.com/UniXNU/NativeMetal.git
+	url = https://github.com/Droid-VM/NativeMetal.git
 [submodule "drivers/NativeMobileDisplay"]
 	path = drivers/NativeMobileDisplay
 	url = https://github.com/UniXNU/NativeMobileDisplay.git
