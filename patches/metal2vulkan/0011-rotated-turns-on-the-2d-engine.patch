@@ -1,0 +1,205 @@
+diff --git a/crates/metal2vulkan-runtime/src/rotated.rs b/crates/metal2vulkan-runtime/src/rotated.rs
+index 22af3ce..aba6041 100644
+--- a/crates/metal2vulkan-runtime/src/rotated.rs
++++ b/crates/metal2vulkan-runtime/src/rotated.rs
+@@ -51,6 +51,16 @@ use super::values::{CpuCacheMode, HazardTrackingMode, ResourceOptions, StorageMo
+ use super::Device;
+ use ash::vk;
+ use metal2vulkan::bind::RotateTexelsModule;
++use metal2vulkan::vk::DriverId;
++use std::ffi::{c_void, CStr};
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::LazyLock;
++
++/// Diagnostic (DroidVM): while /private/var/ngpu/debug/rot-noload exists when the process starts, a rotated texture's image is
++/// turned in from its plane once, at its first use, and never again: every later pass renders over the image its last pass
++/// left, which the plane holds turned unless something else wrote the plane since. Measures what the loads cost.
++static SKIP_LOADS: LazyLock<bool> =
++    LazyLock::new(|| std::path::Path::new("/private/var/ngpu/debug/rot-noload").exists());
+ 
+ /// Where a shape lies in the shape buffer, per direction: a multiple of every
+ /// `minStorageBufferOffsetAlignment`.
+@@ -123,6 +133,81 @@ pub(super) struct Frame {
+     pub(super) span: u64,
+ }
+ 
++/// DroidVM: the copy commands that turn on the Adreno 2D engine (the board's Turnip, `turnip-rotated-copy.patch`):
++/// `vkCmdCopyImageToBuffer2` and `vkCmdCopyBufferToImage2` with [`CopyRotation`] chained. Between the frame's image and the
++/// plane's bytes they replace the three steps of a turn (the bytes through the staging buffer, the kernel, the tight
++/// buffer, each after a full barrier), whose kernel reads one of its two linear buffers across its rows: a 1366x1024
++/// pass of CoreAnimation's rotated framebuffer cost 8.8 ms where an unrotated one took 0.5.
++#[derive(Clone, Copy)]
++pub(crate) struct TurnedCopyCommands {
++    to_buffer: vk::PFN_vkCmdCopyImageToBuffer2,
++    to_image: vk::PFN_vkCmdCopyBufferToImage2,
++}
++
++/// The board's Turnip's private structure (`tu_copy_rotation_droidvm`): chained to a copy's info, the 2D engine's
++/// rotation (`a6xx_rotation`), and the buffer an image of the region turned by it.
++#[repr(C)]
++struct CopyRotation {
++    s_type: vk::StructureType,
++    p_next: *const c_void,
++    rotation: u32,
++}
++
++const COPY_ROTATION: vk::StructureType = vk::StructureType::from_raw(1_000_999_001);
++const ROTATE_90: u32 = 1;
++const ROTATE_180: u32 = 2;
++const ROTATE_270: u32 = 3;
++
++/// The device's [`TurnedCopyCommands`]: on Turnip only, which the board builds with the structure (another driver would
++/// ignore it and copy unturned), and not while /private/var/ngpu/debug/rot-kernel exists when the process starts (the
++/// kernel's turns, for an A/B).
++///
++/// # Safety
++///
++/// `device` was made from `instance`. Turnip never writes its device's loader word (`loader_word.rs`: MoltenVK does), so
++/// `vkGetDeviceProcAddr` needs no restore first.
++pub(crate) unsafe fn turned_copy_commands(
++    instance: &ash::Instance,
++    device: &ash::Device,
++    driver: Option<DriverId>,
++) -> Option<TurnedCopyCommands> {
++    if driver != Some(DriverId::MESA_TURNIP)
++        || std::path::Path::new("/private/var/ngpu/debug/rot-kernel").exists()
++    {
++        return None;
++    }
++    let get = |names: [&CStr; 2]| {
++        names.into_iter().find_map(|name| {
++            // SAFETY: the caller's; a command the device does not have is null.
++            unsafe { instance.get_device_proc_addr(device.handle(), name.as_ptr()) }
++        })
++    };
++    let to_buffer = get([c"vkCmdCopyImageToBuffer2", c"vkCmdCopyImageToBuffer2KHR"])?;
++    let to_image = get([c"vkCmdCopyBufferToImage2", c"vkCmdCopyBufferToImage2KHR"])?;
++    // SAFETY: the device gave the commands of these names, whose core and KHR forms share their signatures.
++    unsafe {
++        Some(TurnedCopyCommands {
++            to_buffer: std::mem::transmute::<unsafe extern "system" fn(), vk::PFN_vkCmdCopyImageToBuffer2>(to_buffer),
++            to_image: std::mem::transmute::<unsafe extern "system" fn(), vk::PFN_vkCmdCopyBufferToImage2>(to_image),
++        })
++    }
++}
++
++/// A rotated texture's turns on the 2D engine ([`TurnedCopyCommands`]): the 2D engine's rotation of the store (the frame
++/// into the plane) and of the load, the plane's offset in its buffer and its rows in texels.
++struct HardwareTurns {
++    commands: TurnedCopyCommands,
++    store: u32,
++    load: u32,
++    offset: u64,
++    row_length: u32,
++}
++
++/// Diagnostic (DroidVM): while /private/var/ngpu/debug/rot-swap exists when the process starts, the 2D engine's quarter
++/// turns are the other way (ROTATE_90 for ROTATE_270): the hardware's sense, measured with gfxprobe rotbench.
++static SWAP_TURNS: LazyLock<bool> =
++    LazyLock::new(|| std::path::Path::new("/private/var/ngpu/debug/rot-swap").exists());
++
+ /// One direction of the kernel's moves: its shape, where it lies in the shape buffer, and the
+ /// dispatch's workgroups.
+ struct Move {
+@@ -153,6 +238,11 @@ pub(super) struct RotatedCopies {
+     apart: bool,
+     kernel: OwnedKernel,
+     sets: OwnedSets,
++    /// Whether a turn into the image was recorded ([`SKIP_LOADS`]).
++    loaded: AtomicBool,
++    /// The turns on the 2D engine, where the device has them and the frame takes them: a quarter or half turn (rotation 4
++    /// loads mirrored), 4-byte texels, and the plane's offset and pitch 64-byte aligned (the 2D engine's).
++    hardware: Option<HardwareTurns>,
+ }
+ 
+ impl RotatedCopies {
+@@ -286,6 +376,38 @@ impl RotatedCopies {
+             apart: loads_apart(rotation, [width, height]),
+             kernel,
+             sets,
++            loaded: AtomicBool::new(false),
++            // SAFETY: the device is live and was made from its instance (`turned_copy_commands`).
++            hardware: unsafe {
++                turned_copy_commands(
++                    &device.shared().instance.raw,
++                    device.shared().vk(),
++                    device.properties().description.driver_id,
++                )
++            }
++                .filter(|_| {
++                    (1..=3).contains(&rotation)
++                        && texel_bytes == 4
++                        && staging.into.src_offset % 64 == 0
++                        && row_pitch % 64 == 0
++                })
++                .map(|commands| {
++                    // Metal stores rotation 1 a quarter turn clockwise ((x, y) at (H - 1 - y, x)), 3 counterclockwise and 2
++                    // a half turn; a load is the store's inverse.
++                    let (cw, ccw) = if *SWAP_TURNS { (ROTATE_270, ROTATE_90) } else { (ROTATE_90, ROTATE_270) };
++                    let (store, load) = match rotation {
++                        1 => (cw, ccw),
++                        3 => (ccw, cw),
++                        _ => (ROTATE_180, ROTATE_180),
++                    };
++                    HardwareTurns {
++                        commands,
++                        store,
++                        load,
++                        offset: staging.into.src_offset,
++                        row_length: (row_pitch / texel_bytes) as u32,
++                    }
++                }),
+         })
+     }
+ 
+@@ -311,6 +433,50 @@ impl RotatedCopies {
+         turn: Turn,
+     ) {
+         let into = turn != Turn::Store;
++        if into && *SKIP_LOADS && self.loaded.swap(true, Ordering::Relaxed) {
++            return;
++        }
++        if let Some(hardware) = &self.hardware {
++            let turn = CopyRotation {
++                s_type: COPY_ROTATION,
++                p_next: std::ptr::null(),
++                rotation: if into { hardware.load } else { hardware.store },
++            };
++            let regions = [vk::BufferImageCopy2 {
++                buffer_offset: hardware.offset,
++                buffer_row_length: hardware.row_length,
++                buffer_image_height: 0,
++                image_subresource: self.regions[0].image_subresource,
++                image_offset: vk::Offset3D::default(),
++                image_extent: self.regions[0].image_extent,
++                ..Default::default()
++            }];
++            let general = vk::ImageLayout::GENERAL;
++            // SAFETY: the caller's contract; the region lies in the image and, turned, in the plane's bytes (planned when
++            // the texture was made), and the structure outlives the call that reads it.
++            unsafe {
++                Barrier::everything().record(device, command_buffer);
++                if into {
++                    let mut info = vk::CopyBufferToImageInfo2::default()
++                        .src_buffer(bytes)
++                        .dst_image(image)
++                        .dst_image_layout(general)
++                        .regions(&regions);
++                    info.p_next = (&turn as *const CopyRotation).cast();
++                    (hardware.commands.to_image)(command_buffer, &info);
++                } else {
++                    let mut info = vk::CopyImageToBufferInfo2::default()
++                        .src_image(image)
++                        .src_image_layout(general)
++                        .dst_buffer(bytes)
++                        .regions(&regions);
++                    info.p_next = (&turn as *const CopyRotation).cast();
++                    (hardware.commands.to_buffer)(command_buffer, &info);
++                }
++                Barrier::everything().record(device, command_buffer);
++            }
++            return;
++        }
+         let (step, shape, set) = match turn {
+             Turn::Load => (&self.moves[0], &self.moves[0].shape, self.sets.sets[0]),
+             Turn::Keep => (&self.moves[0], &self.keep, self.sets.sets[0]),
