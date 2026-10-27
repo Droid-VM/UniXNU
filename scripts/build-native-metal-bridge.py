@@ -96,7 +96,9 @@ manifest.write_text('\n'.join([
     # The runtime hashes every shader-cache key and entry; without asm, sha2 0.10 on aarch64 is the portable software rounds, not the
     # ARMv8 SHA-256 instructions every target CPU has (cpufeatures answers sha2 true on Apple platforms).
     'sha2 = { version = "0.10", features = ["asm"] }',
-    '[profile.release]', 'panic = "unwind"', 'debug = 1', '',
+    # The render server's display thread spends most of a frame in the runtime, much of it in small functions across the
+    # translator's crates: one optimisation unit with link-time optimisation lets them inline across crate boundaries.
+    '[profile.release]', 'panic = "unwind"', 'debug = 1', 'lto = "fat"', 'codegen-units = 1', '',
 ]))
 if args.manifest_only:
     print(manifest)
