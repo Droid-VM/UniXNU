@@ -174,5 +174,3 @@
 ## 维护设备记录 {#adding-a-device}
 
 按[记录指南](/zh/porting/records#publishing-and-reuse)发布设备配置与适配记录。
-
-[sheng 日志抓取示例](/zh/devices/sheng-unattended-test)

@@ -148,7 +148,7 @@
 4. 运行读取器，将原始区域和解码文本保存到按启动 ID 命名的目录，确认文件头、快照和写入状态。
 5. 返回设备 bootloader，在下一次测试前确认设备身份。
 
-[sheng 示例](/zh/devices/sheng-unattended-test#manual-cycle)给出 Linux 读取器命令；具有兼容 recovery 镜像的板型使用上面的 recovery 命令。
+设备仓库提供 Linux 读取器命令；具有兼容 recovery 镜像的板型使用上面的 recovery 命令。
 
 **结果：** 一次完整测试、可识别的证据目录和已验证的读取器返回路径。文件头缺失或属于旧启动时，检查写入器启动、区域范围和读取器命令。
 
@@ -160,6 +160,6 @@
 4. 超时后记录失败阶段，按板型文档进入 bootloader 或 recovery。保留本次镜像和部分证据。
 5. 每次修改一项内容后重复测试。在[适配记录](/zh/porting/records)中填写版本、参数、检查点、复位结果、读取器环境、输出目录和未解决错误。
 
-[sheng 自动测试示例](/zh/devices/sheng-unattended-test#automated-cycle)展示 fastboot 和 Linux 读取器。支持 recovery 访问的板型沿用相同脚本结构并替换为 ADB 命令。
+自动脚本沿用手动循环的顺序。支持 recovery 访问的板型使用相同结构并替换为 ADB 命令。
 
 **结果：** 每次测试都有可识别的证据目录和返回路径。继续完成其余[启动验证阶段](/zh/porting/bring-up)。

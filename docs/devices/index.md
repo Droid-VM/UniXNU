@@ -174,5 +174,3 @@ Follow [Build and boot](/building), [porting steps](/porting/steps) and [log cap
 ## Maintain device records {#adding-a-device}
 
 Publish device configuration and records using the [record guide](/porting/records#publishing-and-reuse).
-
-[sheng log-capture example](/devices/sheng-unattended-test)

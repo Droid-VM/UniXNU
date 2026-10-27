@@ -187,9 +187,8 @@ range and a tested route back to bootloader or recovery.
    with the boot ID, and confirm the header, snapshots and write status.
 5. Return to the board's bootloader and confirm its identity before the next run.
 
-The [sheng example](/devices/sheng-unattended-test#manual-cycle) shows the
-Linux reader commands, while the recovery commands above apply to any board
-with a compatible recovery image.
+The selected device repository supplies the Linux reader commands. The recovery
+commands above apply to any board with a compatible recovery image.
 
 **Result:** one complete test, an identifiable evidence directory and a verified
 reader return path. A missing or stale header points to writer startup, region
@@ -211,9 +210,8 @@ geometry or the selected reader command.
    result, reader environment, output directory and unresolved errors in the
    [porting record](/porting/records).
 
-The [sheng runner example](/devices/sheng-unattended-test#automated-cycle)
-shows fastboot and a Linux reader. A board with recovery access can use the same
-runner structure with ADB commands.
+The runner follows the same sequence as the manual cycle. A board with recovery
+access can use the same runner structure with ADB commands.
 
 **Result:** each test produces an identifiable evidence directory and a recorded
 return path. Continue the remaining [bring-up stages](/porting/bring-up).
