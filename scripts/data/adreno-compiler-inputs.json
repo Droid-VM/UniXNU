@@ -56,7 +56,8 @@
     "patches/mesa/turnip-builtin-shader-pack.patch",
     "patches/mesa/turnip-host-import-images.patch",
     "patches/mesa/turnip-darwin-virtgpu.patch",
-    "patches/mesa/turnip-rotated-copy.patch"
+    "patches/mesa/turnip-rotated-copy.patch",
+    "patches/mesa/turnip-darwin-queue-priority.patch"
   ],
   "integer_fma_reference": {
     "repository": "https://github.com/ucb-bar/berkeley-softfloat-3",

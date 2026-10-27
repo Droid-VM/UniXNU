@@ -1,0 +1,115 @@
+diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -246,8 +246,11 @@
+ static int
+ darwin_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
+ {
+-   /* The kernel client has queue 0 from open(); every submission rides the one shared ring. */
++   /* The kernel client has queue 0 from open(); every submission rides the one shared ring. Through the virtio GPU that ring is
++    * at the host's default priority, and a queue made with a higher global priority raises it for the process. */
+    queue->msm_queue_id = 0;
++   if (dwv_enabled())
++      dwv_set_priority(queue->priority);
+    return 0;
+ }
+ 
+@@ -1124,7 +1127,7 @@
+    device->is_perf_cntr_selectable = false;
+    device->has_cached_coherent_memory = !!(info->flags & NativeAdrenoDeviceCachedCoherent);
+    device->has_host_import = !!(dw.params.flags & NativeAdrenoParamsHostImport);
+-   device->submitqueue_priority_count = 1;
++   device->submitqueue_priority_count = dwv_enabled() ? dwv_priorities() : 1;
+ 
+    device->ubwc_config.highest_bank_bit = info->highest_bank_bit;
+    device->ubwc_config.bank_swizzle_levels = info->ubwc_swizzle;
+diff --git a/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc b/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc
+--- a/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc
+@@ -33,6 +33,7 @@
+    DWV_CCMD_GEM_SUBMIT = 7,
+    DWV_MSM_GET_PARAM = 0xc0186440,       /* DRM_IOCTL_MSM_GET_PARAM */
+    DWV_MSM_SUBMITQUEUE_NEW = 0xc00c644a, /* DRM_IOCTL_MSM_SUBMITQUEUE_NEW */
++   DWV_MSM_SUBMITQUEUE_CLOSE = 0x4004644b, /* DRM_IOCTL_MSM_SUBMITQUEUE_CLOSE */
+    DWV_MSM_PIPE_3D0 = 0x10,
+    DWV_MSM_PARAM_VA_START = 0x0e,
+    DWV_MSM_PARAM_VA_SIZE = 0x0f,
+@@ -74,7 +75,7 @@
+    pthread_mutex_t lock;     /* the ccmd sequence (one response area) and the handle table */
+    volatile uint8_t *shmem;
+    uint32_t shmem_handle, seqno;
+-   uint32_t queue_id, ring, submit_fence;
++   uint32_t queue_id, ring, submit_fence, priority;
+    uint64_t next_blob_id;
+    struct dwv_bo *bos;
+    uint32_t bo_capacity;
+@@ -253,14 +254,16 @@
+    }
+    if (kr == KERN_SUCCESS)
+       dwv.va_size = vg_get_param(DWV_MSM_PARAM_VA_SIZE, &kr);
+-   /* One submit queue, priority 0: the host's ring 1. Every submission rides it, so its fences are one increasing sequence, as the
+-    * NativeAdreno ABI's are. */
+-   struct { uint32_t flags, prio, id; } queue = {0, 0, 0};
++   /* One submit queue, at the lowest of the host's priorities (msm: 0 highest), its default: the host's ring priority + 1. Every
++    * submission rides it, so its fences are one increasing sequence, as the NativeAdreno ABI's are. A Vulkan queue asking for a
++    * higher priority moves it (dwv_set_priority). */
++   struct { uint32_t flags, prio, id; } queue = {0, dwv_priorities() - 1, 0};
+    if (kr == KERN_SUCCESS)
+       kr = vg_ioctl_simple(DWV_MSM_SUBMITQUEUE_NEW, &queue, sizeof(queue));
+    if (kr == KERN_SUCCESS) {
+       dwv.queue_id = queue.id;
+-      dwv.ring = 1;
++      dwv.priority = queue.prio;
++      dwv.ring = queue.prio + 1;
+       dwv.submit_fence = 0;
+       dwv.next_blob_id = 1;
+    }
+@@ -272,6 +275,36 @@
+    return kr;
+ }
+ 
++/* The submitqueue priorities the host offers (its capset; one when it names none). */
++uint32_t
++dwv_priorities(void)
++{
++   return dwv.caps.priorities ? dwv.caps.priorities : 1;
++}
++
++/* Moves the process's submit queue to PRIORITY (msm: 0 highest) when that is higher than the queue's and nothing has been
++ * submitted yet: a new queue at that priority, on its ring (priority + 1), replaces the old one. Once something was submitted the
++ * fences are that ring's sequence, and the queue stays. */
++kern_return_t
++dwv_set_priority(uint32_t priority)
++{
++   kern_return_t kr = KERN_SUCCESS;
++   pthread_mutex_lock(&dwv.lock);
++   if (dwv.shmem && priority < dwv.priority && !dwv.submit_fence) {
++      struct { uint32_t flags, prio, id; } queue = {0, priority, 0};
++      kr = vg_ioctl_simple(DWV_MSM_SUBMITQUEUE_NEW, &queue, sizeof(queue));
++      if (kr == KERN_SUCCESS) {
++         uint32_t old = dwv.queue_id;
++         vg_ioctl_simple(DWV_MSM_SUBMITQUEUE_CLOSE, &old, sizeof(old));
++         dwv.queue_id = queue.id;
++         dwv.priority = priority;
++         dwv.ring = priority + 1;
++      }
++   }
++   pthread_mutex_unlock(&dwv.lock);
++   return kr;
++}
++
+ void
+ dwv_close(void)
+ {
+diff --git a/src/freedreno/vulkan/tu_knl_darwin_virtgpu.h b/src/freedreno/vulkan/tu_knl_darwin_virtgpu.h
+--- a/src/freedreno/vulkan/tu_knl_darwin_virtgpu.h
++++ b/src/freedreno/vulkan/tu_knl_darwin_virtgpu.h
+@@ -15,6 +15,8 @@
+ bool dwv_enabled(void);
+ /* The DRM context, its msm shmem and its submit queue; closing the connection ends them all. */
+ kern_return_t dwv_open(void);
++uint32_t dwv_priorities(void);
++kern_return_t dwv_set_priority(uint32_t priority);
+ void dwv_close(void);
+ /* One NativeAdreno ABI method, as dw_call would make it. */
+ kern_return_t dwv_call(uint32_t method, const void *in, size_t in_size, void *out, size_t out_size);

@@ -52,7 +52,12 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     # a staging copy, a compute kernel and a tight-buffer copy (a 1366x1024 pass: 8.8 ms against 0.5 unrotated). Diagnostics
     # read at process start: /private/var/ngpu/debug/rot-kernel (the kernel's turns), rot-swap (the quarter turns the other
     # way), rot-noload (the image turned in once only).
-    '0011-rotated-turns-on-the-2d-engine.patch']]
+    '0011-rotated-turns-on-the-2d-engine.patch',
+    # The queues' global priority from the environment (METAL2VULKAN_QUEUE_PRIORITY), which the Metal plugin sets to high in the
+    # render server: on an iPad CoreAnimation asks for a high GPU priority on its queue (setGPUPriority:), but a Vulkan queue's
+    # priority is fixed when the device opens, before that call. The board's Turnip moves the process's ring to it
+    # (patches/mesa/turnip-darwin-queue-priority.patch), so the compositor's frames no longer wait behind an app's.
+    '0012-queue-global-priority.patch']]
 
 
 def git_tree(*steps):
