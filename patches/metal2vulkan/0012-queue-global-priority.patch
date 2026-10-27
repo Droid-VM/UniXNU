@@ -1,7 +1,8 @@
 diff --git a/crates/metal2vulkan-runtime/src/device/create.rs b/crates/metal2vulkan-runtime/src/device/create.rs
+index 76a0d07..49c9446 100644
 --- a/crates/metal2vulkan-runtime/src/device/create.rs
 +++ b/crates/metal2vulkan-runtime/src/device/create.rs
-@@ -1035,6 +1035,28 @@
+@@ -1035,6 +1035,28 @@ pub(super) unsafe fn timeline_conformant(
  
  /// Refuse a MoltenVK device of `description` running without Metal argument buffers
  /// (`argument_buffers.rs`).
@@ -30,7 +31,7 @@ diff --git a/crates/metal2vulkan-runtime/src/device/create.rs b/crates/metal2vul
  pub(super) fn argument_buffers_kept(description: &DeviceDescription) -> Result<(), Error> {
      use super::argument_buffers::{check, Facts};
      check(Facts::of(description).argument_buffers())
-@@ -1210,12 +1232,27 @@
+@@ -1210,12 +1232,27 @@ fn create_on(
              None => taken.push((family, 1)),
          }
      }
@@ -61,9 +62,10 @@ diff --git a/crates/metal2vulkan-runtime/src/device/create.rs b/crates/metal2vul
          .collect();
      // At the user-initiated class: MoltenVK compiles its command shaders as it makes the device.
 diff --git a/crates/metal2vulkan-runtime/src/enables.rs b/crates/metal2vulkan-runtime/src/enables.rs
+index 059f638..ae50703 100644
 --- a/crates/metal2vulkan-runtime/src/enables.rs
 +++ b/crates/metal2vulkan-runtime/src/enables.rs
-@@ -1280,7 +1280,7 @@
+@@ -1280,7 +1280,7 @@ impl Enables {
          Ok(())
      }
  
