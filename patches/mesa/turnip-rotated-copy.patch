@@ -1,0 +1,142 @@
+diff --git a/src/freedreno/vulkan/tu_clear_blit.cc b/src/freedreno/vulkan/tu_clear_blit.cc
+--- a/src/freedreno/vulkan/tu_clear_blit.cc
++++ b/src/freedreno/vulkan/tu_clear_blit.cc
+@@ -2559,12 +2559,37 @@
+       *height = DIV_ROUND_UP(*height, block_height);
+ }
+ 
++/* DroidVM (private): chained to a VkCopyImageToBufferInfo2 or a VkCopyBufferToImageInfo2, it turns the copy on the 2D
++ * engine (RB_A2D_BLT_CNTL's ROTATE): the buffer holds the image region turned by `rotation` (an a6xx_rotation:
++ * ROTATE_90, ROTATE_180 or ROTATE_270), an image of the region's extent with its width and height swapped for a quarter
++ * turn, bufferRowLength texels a row. metal2vulkan turns Metal's rotated framebuffer (CoreAnimation's) with it, where it
++ * ran a compute kernel between two staging buffers. Only a one-layer copy through the 2D engine whose buffer address and
++ * pitch are 64-byte aligned is turned; any other is copied unturned, and logged.
++ */
++#define TU_STRUCTURE_TYPE_COPY_ROTATION_DROIDVM ((VkStructureType) 1000999001)
++struct tu_copy_rotation_droidvm {
++   VkStructureType sType;
++   const void *pNext;
++   uint32_t rotation;
++};
++
++static uint32_t
++tu_copy_rotation(const void *pNext)
++{
++   for (const VkBaseInStructure *s = (const VkBaseInStructure *) pNext; s; s = s->pNext) {
++      if (s->sType == TU_STRUCTURE_TYPE_COPY_ROTATION_DROIDVM)
++         return ((const struct tu_copy_rotation_droidvm *) s)->rotation;
++   }
++   return ROTATE_0;
++}
++
+ template <chip CHIP>
+ static void
+ tu_copy_buffer_to_image(struct tu_cmd_buffer *cmd,
+                         struct tu_buffer *src_buffer,
+                         struct tu_image *dst_image,
+-                        const VkBufferImageCopy2 *info)
++                        const VkBufferImageCopy2 *info,
++                        uint32_t rotation)
+ {
+    struct tu_cs *cs = &cmd->cs;
+    uint32_t layers = MAX2(info->imageExtent.depth,
+@@ -2602,6 +2627,32 @@
+    uint32_t pitch = src_width * block_size;
+    uint32_t layer_size = src_height * pitch;
+ 
++   if (rotation != ROTATE_0) {
++      uint64_t src_va = vk_buffer_address(&src_buffer->vk, info->bufferOffset);
++      if (ops == &r2d_ops<CHIP> && layers == 1 && !(src_va & 63) && !(pitch & 63)) {
++         bool quarter = rotation == ROTATE_90 || rotation == ROTATE_270;
++         uint32_t width = quarter ? extent.height : extent.width;
++         uint32_t height = quarter ? extent.width : extent.height;
++         ops->setup(cmd, cs, src_format, dst_format, info->imageSubresource.aspectMask, rotation, false,
++                    dst_image->layout[0].ubwc, (VkSampleCountFlagBits) dst_image->layout[0].nr_samples,
++                    (VkSampleCountFlagBits) dst_image->layout[0].nr_samples);
++         struct fdl6_view dst;
++         tu_image_view_copy<CHIP>(&dst, dst_image, dst_format, &info->imageSubresource, offset.z);
++         ops->dst(cs, &dst, 0, src_format);
++         ops->src_buffer(cmd, cs, src_format, src_va, pitch, width, height, dst_format);
++         tu_cs_emit_regs(cs,
++            GRAS_A2D_DEST_TL(CHIP, .x = offset.x, .y = offset.y),
++            GRAS_A2D_DEST_BR(CHIP, .x = offset.x + extent.width - 1, .y = offset.y + extent.height - 1));
++         tu_cs_emit_regs(cs,
++            GRAS_A2D_SRC_XMIN(CHIP, 0), GRAS_A2D_SRC_XMAX(CHIP, width - 1),
++            GRAS_A2D_SRC_YMIN(CHIP, 0), GRAS_A2D_SRC_YMAX(CHIP, height - 1));
++         ops->run(cmd, cs);
++         ops->teardown(cmd, cs);
++         return;
++      }
++      mesa_logw("tu: copy rotation %u not taken: layers %u, buffer %#" PRIx64 ", pitch %u", rotation, layers, src_va, pitch);
++   }
++
+    ops->setup(cmd, cs, src_format, dst_format,
+               info->imageSubresource.aspectMask, blit_param, false, dst_image->layout[0].ubwc,
+               (VkSampleCountFlagBits) dst_image->layout[0].nr_samples,
+@@ -2683,9 +2734,10 @@
+ 
+    trace_start_copy_buffer_to_image(&cmd->trace, &cmd->cs, cmd, dst_image->vk.format);
+ 
++   uint32_t rotation = tu_copy_rotation(pCopyBufferToImageInfo->pNext);
+    for (unsigned i = 0; i < pCopyBufferToImageInfo->regionCount; ++i)
+       tu_copy_buffer_to_image<CHIP>(cmd, src_buffer, dst_image,
+-                              pCopyBufferToImageInfo->pRegions + i);
++                              pCopyBufferToImageInfo->pRegions + i, rotation);
+ 
+    if (dst_image->lrz_layout.lrz_total_size) {
+       tu_disable_lrz<CHIP>(cmd, &cmd->cs, dst_image);
+@@ -2789,7 +2841,8 @@
+                         struct tu_image *src_image,
+                         struct tu_buffer *dst_buffer,
+                         const VkBufferImageCopy2 *info,
+-                        bool *unaligned_store)
++                        bool *unaligned_store,
++                        uint32_t rotation)
+ {
+    struct tu_cs *cs = &cmd->cs;
+    uint32_t layers = MAX2(info->imageExtent.depth,
+@@ -2824,6 +2877,31 @@
+    uint32_t pitch = dst_width * block_size;
+    uint32_t layer_size = pitch * dst_height;
+ 
++   if (rotation != ROTATE_0) {
++      uint64_t dst_va = vk_buffer_address(&dst_buffer->vk, info->bufferOffset);
++      if (ops == &r2d_ops<CHIP> && layers == 1 && !(dst_va & 63) && !(pitch & 63)) {
++         bool quarter = rotation == ROTATE_90 || rotation == ROTATE_270;
++         uint32_t width = quarter ? extent.height : extent.width;
++         uint32_t height = quarter ? extent.width : extent.height;
++         ops->setup(cmd, cs, src_format, dst_format, VK_IMAGE_ASPECT_COLOR_BIT, rotation, false, false,
++                    VK_SAMPLE_COUNT_1_BIT, VK_SAMPLE_COUNT_1_BIT);
++         struct fdl6_view src;
++         tu_image_view_copy<CHIP>(&src, src_image, src_format, &info->imageSubresource, offset.z);
++         ops->src(cmd, cs, &src, 0, VK_FILTER_NEAREST, dst_format);
++         ops->dst_buffer(cs, dst_format, dst_va, pitch, src_format);
++         tu_cs_emit_regs(cs,
++            GRAS_A2D_DEST_TL(CHIP, .x = 0, .y = 0),
++            GRAS_A2D_DEST_BR(CHIP, .x = width - 1, .y = height - 1));
++         tu_cs_emit_regs(cs,
++            GRAS_A2D_SRC_XMIN(CHIP, offset.x), GRAS_A2D_SRC_XMAX(CHIP, offset.x + extent.width - 1),
++            GRAS_A2D_SRC_YMIN(CHIP, offset.y), GRAS_A2D_SRC_YMAX(CHIP, offset.y + extent.height - 1));
++         ops->run(cmd, cs);
++         ops->teardown(cmd, cs);
++         return;
++      }
++      mesa_logw("tu: copy rotation %u not taken: layers %u, buffer %#" PRIx64 ", pitch %u", rotation, layers, dst_va, pitch);
++   }
++
+    handle_buffer_unaligned_store<CHIP>(cmd,
+                                        vk_buffer_address(&dst_buffer->vk, info->bufferOffset),
+                                        layer_size * layers, unaligned_store);
+@@ -2891,10 +2969,11 @@
+    trace_start_copy_image_to_buffer(&cmd->trace, &cmd->cs, cmd, src_image->vk.format);
+ 
+    bool unaligned_store = false;
++   uint32_t rotation = tu_copy_rotation(pCopyImageToBufferInfo->pNext);
+    for (unsigned i = 0; i < pCopyImageToBufferInfo->regionCount; ++i)
+       tu_copy_image_to_buffer<CHIP>(cmd, src_image, dst_buffer,
+                               pCopyImageToBufferInfo->pRegions + i,
+-                              &unaligned_store);
++                              &unaligned_store, rotation);
+ 
+    after_buffer_unaligned_buffer_store<CHIP>(cmd, unaligned_store);
+ 

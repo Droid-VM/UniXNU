@@ -42,7 +42,13 @@ PATCHES = [ROOT / 'drivers/NativeMetal/bridge/patches' / name for name in [
     # A `[[patch(quad, 0)]]` function (no control points: GFXBench Car Chase's Bezier car body) answers its patch type and 0, as
     # Metal does, instead of being refused as unmeasured: the frontend took the refusal for no patch, so the pipeline lost the
     # descriptor's tessellation state (winding, partitioning, the factors' step function) and the car drew black and torn.
-    '0010-patch-with-no-control-points.patch']]
+    '0010-patch-with-no-control-points.patch',
+    # A rotated texture's turns between its pass's frame and its plane (CoreAnimation's framebuffer, rotation 3 in landscape)
+    # on the Adreno 2D engine, through the board's Turnip (patches/mesa/turnip-rotated-copy.patch): one copy each way instead of
+    # a staging copy, a compute kernel and a tight-buffer copy (a 1366x1024 pass: 8.8 ms against 0.5 unrotated). Diagnostics
+    # read at process start: /private/var/ngpu/debug/rot-kernel (the kernel's turns), rot-swap (the quarter turns the other
+    # way), rot-noload (the image turned in once only).
+    '0011-rotated-turns-on-the-2d-engine.patch']]
 tree_diff = subprocess.check_output(['git', '-C', str(SOURCE), 'diff', 'HEAD', '--'], text=True)
 def canonical_diff(diff):
     # Independent patches touch disjoint files; Git orders the combined diff by
