@@ -92,6 +92,9 @@ def official_alias(ctx, module, spec):
     allowed = {repository}
     if legacy:
         allowed.add('github.com/unixnu/' + legacy.lower())
+    # Droid-VM's forks of these components, named after the component or its legacy name: their sources include one another by
+    # the legacy directory names (Adreno740's NativeAdrenoAccelerator.cpp reads ../NativeMetal/), as the official ones do.
+    allowed |= {'github.com/droid-vm/' + name.lower() for name in (spec['id'], legacy) if name}
     return source_identity(ctx, module) in allowed
 
 
