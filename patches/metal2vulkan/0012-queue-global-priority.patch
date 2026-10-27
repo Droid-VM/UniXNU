@@ -1,0 +1,74 @@
+diff --git a/crates/metal2vulkan-runtime/src/device/create.rs b/crates/metal2vulkan-runtime/src/device/create.rs
+--- a/crates/metal2vulkan-runtime/src/device/create.rs
++++ b/crates/metal2vulkan-runtime/src/device/create.rs
+@@ -1035,6 +1035,28 @@
+ 
+ /// Refuse a MoltenVK device of `description` running without Metal argument buffers
+ /// (`argument_buffers.rs`).
++/// The global priority METAL2VULKAN_QUEUE_PRIORITY asks for (low, medium, high, realtime) and the
++/// name of the extension `physical` offers it through (VK_KHR_global_priority, or the EXT);
++/// `None` without either.
++fn queue_global_priority(
++    instance: &InstanceShared,
++    physical: vk::PhysicalDevice,
++) -> Option<(vk::QueueGlobalPriorityKHR, &'static CStr)> {
++    let priority = match std::env::var("METAL2VULKAN_QUEUE_PRIORITY").ok()?.as_str() {
++        "low" => vk::QueueGlobalPriorityKHR::LOW,
++        "medium" => vk::QueueGlobalPriorityKHR::MEDIUM,
++        "high" => vk::QueueGlobalPriorityKHR::HIGH,
++        "realtime" => vk::QueueGlobalPriorityKHR::REALTIME,
++        _ => return None,
++    };
++    // SAFETY: `physical` was enumerated from the instance.
++    let offered = unsafe { instance.raw.enumerate_device_extension_properties(physical) }.ok()?;
++    [c"VK_KHR_global_priority", c"VK_EXT_global_priority"]
++        .into_iter()
++        .find(|name| offered.iter().any(|e| e.extension_name_as_c_str() == Ok(*name)))
++        .map(|name| (priority, name))
++}
++
+ pub(super) fn argument_buffers_kept(description: &DeviceDescription) -> Result<(), Error> {
+     use super::argument_buffers::{check, Facts};
+     check(Facts::of(description).argument_buffers())
+@@ -1210,12 +1232,27 @@
+             None => taken.push((family, 1)),
+         }
+     }
++    // The queues' global priority, the process's against every other user of the GPU, where the
++    // process asks for one (METAL2VULKAN_QUEUE_PRIORITY: low, medium, high or realtime) and the
++    // device offers VK_KHR_global_priority (or the EXT): unset or unoffered, the driver's default.
++    let mut global = match queue_global_priority(instance, physical) {
++        Some((priority, name)) => {
++            enables.push_name(name.to_owned());
++            vec![vk::DeviceQueueGlobalPriorityCreateInfoKHR::default().global_priority(priority); taken.len()]
++        }
++        None => Vec::new(),
++    };
++    let mut global = global.iter_mut();
+     let queues: Vec<vk::DeviceQueueCreateInfo<'_>> = taken
+         .iter()
+         .map(|&(family, count)| {
+-            vk::DeviceQueueCreateInfo::default()
++            let info = vk::DeviceQueueCreateInfo::default()
+                 .queue_family_index(family)
+-                .queue_priorities(&priorities[..count])
++                .queue_priorities(&priorities[..count]);
++            match global.next() {
++                Some(priority) => info.push_next(priority),
++                None => info,
++            }
+         })
+         .collect();
+     // At the user-initiated class: MoltenVK compiles its command shaders as it makes the device.
+diff --git a/crates/metal2vulkan-runtime/src/enables.rs b/crates/metal2vulkan-runtime/src/enables.rs
+--- a/crates/metal2vulkan-runtime/src/enables.rs
++++ b/crates/metal2vulkan-runtime/src/enables.rs
+@@ -1280,7 +1280,7 @@
+         Ok(())
+     }
+ 
+-    fn push_name(&mut self, name: CString) {
++    pub(crate) fn push_name(&mut self, name: CString) {
+         if !self.names.contains(&name) {
+             self.names.push(name);
+         }
