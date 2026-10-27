@@ -1,0 +1,37 @@
+--- a/pexpert/gen/bootargs.c
++++ b/pexpert/gen/bootargs.c
+@@ -187,13 +187,23 @@
+ 	return arg_found;
+ }
+ 
++/*
++ * UniXNU: boot arguments a board builds into its kernel, the switches it always sets, so the boot
++ * loader's command line (DarwinBoot keeps at most 1023 bytes) carries only what changes between
++ * boots. An argument on the command line wins; one absent from it is looked up here (a switch the
++ * board sets is turned off with name=0 on the command line). A board that defines none gets this
++ * empty one.
++ */
++__attribute__((weak)) char PE_builtin_boot_args[] = "";
++
+ boolean_t
+ PE_parse_boot_argn(
+ 	const char      *arg_string,
+ 	void            *arg_ptr,
+ 	int                     max_len)
+ {
+-	return PE_parse_boot_argn_internal(PE_boot_args(), arg_string, arg_ptr, max_len, FALSE);
++	return PE_parse_boot_argn_internal(PE_boot_args(), arg_string, arg_ptr, max_len, FALSE) ||
++	       PE_parse_boot_argn_internal(PE_builtin_boot_args, arg_string, arg_ptr, max_len, FALSE);
+ }
+ 
+ boolean_t
+@@ -213,7 +223,8 @@
+ 	char            *arg_ptr,
+ 	int                     strlen)
+ {
+-	return PE_parse_boot_argn_internal(PE_boot_args(), arg_string, arg_ptr, strlen, TRUE);
++	return PE_parse_boot_argn_internal(PE_boot_args(), arg_string, arg_ptr, strlen, TRUE) ||
++	       PE_parse_boot_argn_internal(PE_builtin_boot_args, arg_string, arg_ptr, strlen, TRUE);
+ }
+ 
+ #if defined(CONFIG_XNUPOST)
