@@ -338,15 +338,13 @@ PLUGIN_REPLACED = [
      '            fclose(flags);\n'
      '        }\n'
      '        setenv("TU_DEBUG", "nocb", 0);\n'),
-    ('// Whether NativeAdrenoMetal.clients names this process (names separated by blanks, commas or new lines; "*" names every process).\n',
-     '// Whether NativeAdrenoMetal.clients names this process (names separated by blanks, commas or new lines; "*" names every process,\n'
-     '// a name ending in "*" every process whose name begins with the rest, "*X*" every process whose name holds X).\n'),
-    ('        if (!strcmp(name, "*") || !strcmp(name, self)) return true;\n',
-     '        if (!strcmp(name, "*") || !strcmp(name, self)) return true;\n'
-     '        else if (const size_t length = strlen(name); length > 1 && name[length - 1] == \'*\') {\n'
-     '            name[length - 1] = 0;\n'
-     '            if (name[0] == \'*\' ? strstr(self, name + 1) != nullptr : !strncmp(name, self, length - 1)) return true;\n'
-     '        }\n'),
+    ('// and GPU service processes).\n',
+     '// and GPU service processes; "*X*" names every process whose name holds X).\n'),
+    ('        if (nameLength && name[nameLength - 1] == \'*\' && !strncmp(name, self, nameLength - 1)) return true;\n',
+     '        if (nameLength > 2 && name[0] == \'*\' && name[nameLength - 1] == \'*\') {\n'
+     '            name[nameLength - 1] = 0;\n'
+     '            if (strstr(self, name + 1)) return true;\n'
+     '        } else if (nameLength && name[nameLength - 1] == \'*\' && !strncmp(name, self, nameLength - 1)) return true;\n'),
     ('    if (!device) clientFailure(port, usable ? "no-device" : "no-cachedir", lastError);\n',
      '    if (!device && !usable) {\n'
      '        setenv("METAL2VULKAN_SHADER_CACHE_OPTIONAL", "1", 1);\n'
