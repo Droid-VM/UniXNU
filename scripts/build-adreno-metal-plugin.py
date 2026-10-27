@@ -42,7 +42,7 @@ exe = bundle / 'NativeAdrenoMetal'
 # - setDepthClipMode: (render encoder): VectorKit sets it on every encoder (Maps aborted on the unrecognized selector). The runtime has
 #   no depth clamp, so Clip, Metal's default, is what it draws; Clamp is drawn as Clip and said once.
 ADDED_METHODS = [
-    ('- (void)setLineWidth:(float)width {[self check:nmb_render_set_line_width(self.handle,width) what:"setLineWidth"];}\n',
+    ('- (void)setLineWidth:(float)width {ENCODE([self check:nmb_render_set_line_width(self.handle,width) what:"setLineWidth"]);}\n',
      'setDepthClipMode',
      '- (void)setDepthClipMode:(MTLDepthClipMode)mode {\n'
      ' static std::atomic<bool> told{false};\n'
