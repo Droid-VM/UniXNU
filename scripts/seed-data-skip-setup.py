@@ -40,8 +40,12 @@ def write_network(var):
     """Seed a SystemConfiguration Ethernet service on en0 set to DHCP, so configd/IPConfiguration brings the guest's
     virtio-net interface (UniXNU-droidvm package/DroidVMVirtioEthernet.cpp, an IOEthernetController) up and leases an address
     from the br-wifi network it is bridged to. configd brings an interface up only for a service in the current set, and none
-    is created for a new Ethernet interface on its own. The NetworkInterfaces.plist entry, which InterfaceNamer matches by the
-    MAC (the VM's --net mac), is what names the interface en0 for that service; with another MAC it would come up as en1, down."""
+    is created for a new Ethernet interface on its own. The NetworkInterfaces.plist entry is what names the interface en0 for
+    that service. It is a BUILT-IN entry, as the interface is (DroidVMVirtioNetIf.cpp's nub), so it holds for any MAC: a VM's
+    virtual NIC gets a new one whenever the VM is made again, and configd's InterfaceNamer gives a built-in interface it does
+    not know by its MAC the unit of the one built-in entry of its type that is not present (lookupMatchingInterface, configd
+    1300's "updating database w/new interface"), rewriting the entry with the new MAC. A non-built-in entry matches only its
+    own MAC, and another came up as en1, down. The MAC below is a placeholder."""
     import uuid
     scdir = var / 'preferences/SystemConfiguration'
     scdir.mkdir(parents=True, exist_ok=True)
@@ -64,7 +68,7 @@ def write_network(var):
     interfaces, ifile = load('NetworkInterfaces.plist')
     interfaces.setdefault('__VERSION__', 20191120)
     interfaces['Interfaces'] = [{
-        'Active': True, 'BSD Name': 'en0', 'IOBuiltin': False, 'IOInterfaceNamePrefix': 'en',
+        'Active': True, 'BSD Name': 'en0', 'IOBuiltin': True, 'IOInterfaceNamePrefix': 'en',
         'IOInterfaceType': 6, 'IOInterfaceUnit': 0, 'IOMACAddress': bytes([0x02, 0x00, 0x00, 0xaa, 0xbb, 0x01]),
         'SCNetworkInterfaceInfo': {'UserDefinedName': 'Ethernet'}, 'SCNetworkInterfaceType': 'Ethernet'}]
     ifile.write_bytes(plistlib.dumps(interfaces, fmt=plistlib.FMT_BINARY)); os.chmod(ifile, 0o644)
