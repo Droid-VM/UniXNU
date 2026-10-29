@@ -859,7 +859,25 @@ fi
 # objects (MakeInc.kernel, PRE_LTO) passes LDFLAGS_KERNEL_LTO but not the deployment flags, and the compiler driver then links for macOS.
 # RELEASE exports only all-kpi.exp, which names Apple's private classes (IOUnifiedAddressTranslator, the IOMMU pmap calls) that no
 # public source defines; the reference exports every global instead, as DEVELOPMENT does, which also keeps every function a kext calls.
+# The board's instruments (the owner chain, the offline probes: every XNU_<NAME> toggle of a per-object *_CFLAGS_ADD) are
+# DEVELOPMENT-only by design and the original has none of them, so the reference is built with each turned off.
 if [ "${XNU_FILESET_REFERENCE:-0}" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then
+  # The board's archives are compiled from the DEVELOPMENT kernel's records, with its minimal UBSan checks, and a RELEASE kernel
+  # has no UBSan runtime: the handlers they call are empty functions in the reference, which is never booted.
+  REFERENCE_STUBS=$ROOT/build/xnu/fileset-reference-ubsan.o
+  printf '%s\n' "$KERNEL_EXTRA_ARCHIVES" | tr ' ,' '\n\n' | grep '\.a$' | while read -r ARCHIVE; do
+    [ -f "$ARCHIVE" ] && nm -u "$ARCHIVE" 2>/dev/null | grep '^___ubsan_handle_.*_minimal$' || true
+  done | sort -u | sed -e 's/^_//' -e 's/.*/void &(void) {}/' > "$ROOT/build/xnu/fileset-reference-ubsan.c"
+  xcrun clang -target "$XNU_ARCH_STRING-apple-ios$IOS_VERSION" -c -mkernel -fno-sanitize=all \
+    "$ROOT/build/xnu/fileset-reference-ubsan.c" -o "$REFERENCE_STUBS"
+  REFERENCE_MAKE_ARGS=()
+  for ARG in "${EXTRA_MAKE_ARGS[@]}"; do
+    case "$ARG" in
+      *_CFLAGS_ADD=*) REFERENCE_MAKE_ARGS+=("$(printf '%s' "$ARG" | perl -pe 's/(-DXNU_[A-Z0-9_]+)=1(?![0-9])/$1=0/g')") ;;
+      LD_KERNEL_ARCHIVES=*) REFERENCE_MAKE_ARGS+=("$ARG $REFERENCE_STUBS") ;;
+      *) REFERENCE_MAKE_ARGS+=("$ARG") ;;
+    esac
+  done
   make -C .cache/xnu-work "${XNU_BUILD_TARGET:-build}" SDKROOT="${XNU_SDKROOT:-iphoneos}" ARCH_CONFIGS=ARM64 \
     MACHINE_CONFIGS=BCM2837 KERNEL_CONFIGS=RELEASE \
     ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG="$XNU_ARCH_STRING" LARGE_MEMORY_DEFINE=-UARM_LARGE_MEMORY \
@@ -870,7 +888,7 @@ if [ "${XNU_FILESET_REFERENCE:-0}" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then
     BUILD_LTO=1 BOUND_CHECKS=0 BUILD_WERROR=0 MAKEJOBS=-j"${JOBS:-4}" \
     LDFLAGS_KERNEL_LTO="-Wl,-mllvm,-inline-threshold=100 -miphoneos-version-min=$IOS_VERSION" \
     LDFLAGS_KERNEL_ONLY_CONFIG_RELEASEARM64=-rdynamic \
-    CFLAGS_EXTRA="$EXTRA_CFLAGS" "${EXTRA_MAKE_ARGS[@]}" ${XNU_HOST_MAKE_ARGS[@]+"${XNU_HOST_MAKE_ARGS[@]}"} \
+    CFLAGS_EXTRA="$EXTRA_CFLAGS" "${REFERENCE_MAKE_ARGS[@]}" ${XNU_HOST_MAKE_ARGS[@]+"${XNU_HOST_MAKE_ARGS[@]}"} \
     OBJROOT="$ROOT/build/xnu/fileset-reference-obj" SYMROOT="$ROOT/build/xnu/fileset-reference-sym" \
     DSTROOT="$ROOT/build/xnu/fileset-reference-dst"
   mkdir -p build/xnu/fileset-reference
