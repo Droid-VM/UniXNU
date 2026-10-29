@@ -24,16 +24,6 @@ index 7febaca6..5bc65a1e 100644
  #endif
  
  	throttle_init();
-@@ -778,7 +780,9 @@ bsd_init(void)
- 
- #if defined(XNU_SHENG_PMGR) && XNU_SHENG_PMGR
- 	extern void sheng_pmgr_run(void);
-+	boot_progress_stage("original PMGR nub start");
- 	sheng_pmgr_run();
-+	boot_progress_stage("original PMGR nub returned");
- #endif
- 
- 	/*
 @@ -1017,7 +1021,9 @@ bsd_init(void)
  #endif
  
