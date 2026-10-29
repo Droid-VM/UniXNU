@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Check the translator source the native Metal bridge builds from against upstream, by git alone.
 
-1. The pin (scripts/data/gpu-metal-vulkan-inputs.json) is a commit of the upstream branch it names (master when it names none); with
-   --latest, that branch's tip (fetched now).
+1. The pin (scripts/data/gpu-metal-vulkan-inputs.json) is a commit of upstream's master; with --latest, its tip (fetched now).
 2. The checkout (.cache/gpu-reference/metal2vulkan) is at the pin.
 3. The recorded patches (the list build-adreno-metal-bridge.py applies) apply in order to the pin's own tree, in a scratch index, with no
    three-way merge and no fuzz.
@@ -21,10 +20,10 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--source', type=Path, default=ROOT / '.cache/gpu-reference/metal2vulkan')
-parser.add_argument('--latest', action='store_true', help="also require the pin to be its upstream branch's tip, fetched now")
+parser.add_argument('--latest', action='store_true', help="also require the pin to be upstream master's tip, fetched now")
 args = parser.parse_args()
 inputs = json.loads((ROOT / 'scripts/data/gpu-metal-vulkan-inputs.json').read_text())['translator']
-pin, branch, source = inputs['commit'], inputs.get('branch', 'master'), args.source
+pin, source = inputs['commit'], args.source
 
 
 def git(*argv, env=None, check=True):
@@ -49,13 +48,13 @@ if sorted(names) != on_disk:
     fail('the build lists %s, the directory holds %s' % (names, on_disk))
 patches = [directory / name for name in names]
 
-git('fetch', '-q', 'origin', '+refs/heads/%s:refs/remotes/origin/%s' % (branch, branch))
-tip = git('rev-parse', 'origin/' + branch).stdout.strip()
-if git('merge-base', '--is-ancestor', pin, 'origin/' + branch, check=False).returncode:
-    fail('pin %s is no commit of upstream %s' % (pin, branch))
-behind = int(git('rev-list', '--count', '%s..origin/%s' % (pin, branch)).stdout)
+git('fetch', '-q', 'origin', 'master')
+tip = git('rev-parse', 'origin/master').stdout.strip()
+if git('merge-base', '--is-ancestor', pin, 'origin/master', check=False).returncode:
+    fail('pin %s is no commit of upstream master' % pin)
+behind = int(git('rev-list', '--count', '%s..origin/master' % pin).stdout)
 if args.latest and pin != tip:
-    fail('pin %s is %d commits behind upstream %s %s' % (pin[:12], behind, branch, tip[:12]))
+    fail('pin %s is %d commits behind upstream master %s' % (pin[:12], behind, tip[:12]))
 head = git('rev-parse', 'HEAD').stdout.strip()
 if head != pin:
     fail('checkout at %s, pin %s' % (head, pin))
@@ -83,7 +82,7 @@ for name, digest in inputs['files'].items():
     blob = subprocess.run(['git', '-C', str(source), 'show', '%s:%s' % (pin, name)], capture_output=True)
     if blob.returncode or hashlib.sha256(blob.stdout).hexdigest() != digest:
         fail('pinned file %s differs from the pin record' % name)
-print('upstream %s %s, pin %s (%d commits behind), checkout %s' % (branch, tip[:12], pin[:12], behind,
+print('upstream master %s, pin %s (%d commits behind), checkout %s' % (tip[:12], pin[:12], behind,
       'patched' if current == patched else 'unpatched'))
 for line in git('diff', '--numstat', pinned, patched).stdout.splitlines():
     added, removed, path = line.split('\t')

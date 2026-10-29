@@ -1,5 +1,5 @@
 diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
-index 7e1f246..4b7d2cd 100644
+index 80edd55..8b226ac 100644
 --- a/src/freedreno/vulkan/tu_knl_darwin.cc
 +++ b/src/freedreno/vulkan/tu_knl_darwin.cc
 @@ -314,8 +314,11 @@ darwin_queue_wait_fence(struct tu_queue *queue, uint32_t fence, uint64_t timeout
@@ -15,7 +15,7 @@ index 7e1f246..4b7d2cd 100644
     return 0;
  }
  
-@@ -1631,7 +1634,7 @@ tu_knl_darwin_load(struct tu_instance *instance)
+@@ -1592,7 +1595,7 @@ tu_knl_darwin_load(struct tu_instance *instance)
     device->is_perf_cntr_selectable = false;
     device->has_cached_coherent_memory = !!(info->flags & NativeAdrenoDeviceCachedCoherent);
     device->has_host_import = !!(dw.params.flags & NativeAdrenoParamsHostImport);

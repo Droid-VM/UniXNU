@@ -45,14 +45,7 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     '0016-refuse-rebinds.patch',
     # A read-only source of shader-cache entries behind the directory (the pipelines compiled ahead on the host, read on demand from the
     # userdata import region): an entry the directory lacks is asked of it, and nothing is copied into the directory.
-    '0017-shader-cache-fallback-source.patch',
-    # A heap texture's own-device answer rounded up to a multiple of its alignment, as Metal's answers are: a heap sized as the sum of
-    # its textures' answers then holds them (iconservicesagent's Core Image heaps ran out: OutOfMemory(Heap)).
-    '0018-heap-texture-size-a-multiple-of-its-alignment.patch',
-    # The runtime's live device memory in bytes by kind (pooled, placed, empty kept, dedicated, imported), for the frontend's MEM row.
-    '0019-memory-census-bytes.patch',
-    # The call stacks that allocated device memory of 4 MiB or more, by bytes, for the frontend's MA rows.
-    '0020-allocation-sites.patch']] + [ROOT / 'patches/metal2vulkan' / name for name in [
+    '0017-shader-cache-fallback-source.patch']] + [ROOT / 'patches/metal2vulkan' / name for name in [
     # The board's own, on top. A rotated texture's turns between its pass's frame and its plane (CoreAnimation's framebuffer, rotation 3
     # in landscape) on the Adreno 2D engine, through the board's Turnip (patches/mesa/turnip-rotated-copy.patch): one copy each way instead
     # of a staging copy, a compute kernel and a tight-buffer copy (a 1366x1024 pass: 8.8 ms against 0.5 unrotated). Diagnostics read at
