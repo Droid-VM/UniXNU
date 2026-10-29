@@ -173,7 +173,9 @@ def build(ctx, kernel=None):
         shutil.copyfile(policies, payloads / 'kernel.macho.vroot')
     if data:
         shutil.copyfile(data, payloads / 'scratch-data.img')
-    if ctx.schema_version == 2:
+    # A schema 2 board generates the ADT from its hardware DTS, unless it names its own tool ([payload.adt] tool), as a virtual
+    # machine whose devices the boot loader takes from the firmware's FDT does.
+    if ctx.schema_version == 2 and not adt.get('tool'):
         from .devicetree import compile_hardware, generate
         dtb = compile_hardware(ctx)
         (payloads / 'kernel.macho.adt').write_bytes(generate(
@@ -194,6 +196,8 @@ def build(ctx, kernel=None):
             command.append('--trust-cache')
         if addon:
             command.append('--gpu-addon')
+        if policies:
+            command.append('--root-policies')
         if adt.get('ipad_identity'):
             command.append('--ipad-identity')
         if data and adt.get('persistent_data'):
