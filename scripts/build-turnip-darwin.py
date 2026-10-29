@@ -98,7 +98,7 @@ if args.builtin_pack:
 options += ['-Dtu-builtin-source-id=' + source_id, '-Dtu-builtin-pack-header=' + pack_header]
 # The pipeline cache's identity (VkPhysicalDeviceProperties::pipelineCacheUUID) from the compiler's source alone, the same for every
 # target: Mesa's own on Darwin is the library file's mtime (disk_cache_get_function_timestamp), which differs per install and per build,
-# so a cache compiled ahead on the host (scripts/make-pipeline-cache.py) would never match the tablet's driver.
+# so the pipelines a boot compiled into the persistent Data cache would miss after every image rebuild of the same compiler.
 build_id = hashlib.sha256(json.dumps(dict(mesa_revision=pins['mesa']['commit'], source_diff_sha256=profile['source_diff_sha256'],
                                           extra_sources=source_extras), sort_keys=True).encode()).hexdigest()[:40]
 options += ['-Dtu-build-id=' + build_id]
