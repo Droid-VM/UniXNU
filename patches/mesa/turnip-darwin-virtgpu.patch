@@ -131,7 +131,7 @@ new file mode 100644
 index 0000000..9722361
 --- /dev/null
 +++ b/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc
-@@ -0,0 +1,629 @@
+@@ -0,0 +1,639 @@
 +/*
 + * Turnip's Darwin kernel backend over the guest's virtio GPU: the NativeAdreno ABI methods tu_knl_darwin.cc calls, served by a DRM
 + * native context (the virtgpu methods of NativeAdreno's user client, DroidVMVirtgpuABI.h) in the msm protocol the host's drm2kgsl
@@ -150,6 +150,7 @@ index 0000000..9722361
 +
 +#include <IOKit/IOKitLib.h>
 +#include <mach/mach.h>
++#include <os/log.h>
 +
 +#include "NativeAdrenoABI.h"
 +#include "DroidVMVirtgpuABI.h"
@@ -512,8 +513,15 @@ index 0000000..9722361
 +   for (uint32_t i = 0; i < req->buffer_count; i++) {
 +      const struct dwv_bo *bo = dwv_lookup(req->buffers[i].handle);
 +      if (!bo || !bo->resource_id || req->buffers[i].iova < bo->iova ||
-+          req->buffers[i].iova + req->buffers[i].bytes > bo->iova + bo->size)
++          req->buffers[i].iova + req->buffers[i].bytes > bo->iova + bo->size) {
++         /* Turnip takes the refusal for a lost device; say which buffer of the submission it was. */
++         os_log_error(OS_LOG_DEFAULT, "dwv: submit refused: buffer %u of %u, handle %llu (%s), resource %u, bo iova 0x%llx size 0x%llx, "
++                      "buffer iova 0x%llx bytes 0x%llx, table %u", i, req->buffer_count, (unsigned long long)req->buffers[i].handle,
++                      bo ? "known" : "unknown", bo ? bo->resource_id : 0, bo ? (unsigned long long)bo->iova : 0ull,
++                      bo ? (unsigned long long)bo->size : 0ull, (unsigned long long)req->buffers[i].iova,
++                      (unsigned long long)req->buffers[i].bytes, dwv.bo_capacity);
 +         return kIOReturnBadArgument;
++      }
 +      uint32_t index = 0;
 +      while (index < nr_bos && ccmd.bos[index].handle != bo->resource_id)
 +         index++;
@@ -582,6 +590,8 @@ index 0000000..9722361
 +dwv_call(uint32_t method, const void *in, size_t in_size, void *out, size_t out_size)
 +{
 +   kern_return_t kr = dwv_call_locked(method, in, in_size, out, out_size);
++   if (kr != KERN_SUCCESS && kr != kIOReturnBusy && kr != kIOReturnTimeout)
++      os_log_error(OS_LOG_DEFAULT, "dwv: method %u (in %zu, out %zu) failed: 0x%x", method, in_size, out_size, kr);
 +   if (dwv_trace() && (method == NativeAdrenoMethodBoImport || kr != KERN_SUCCESS)) {
 +      const uint64_t *words = (const uint64_t *)in;
 +      fprintf(stderr, "tu-virtgpu: method %u in %zu [%#llx %#llx] -> 0x%x\n", method, in_size,

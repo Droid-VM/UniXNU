@@ -103,6 +103,10 @@ manifest.write_text('\n'.join([
     'sha2 = { version = "0.10", features = ["asm"] }',
     # The bridge's global allocator (NativeMetalBridge.rs).
     'mimalloc = { version = "=0.1.43", default-features = false }',
+    # mimalloc's own version 2, not the 3 libmimalloc-sys 0.1.49 builds by default: 3 keeps each thread's heap in the fixed TSD slots
+    # 108 and 109 on Apple platforms, which are Swift's (__PTK_FRAMEWORK_SWIFT_KEY8/9) -- Settings' wallpaper pages (RenderBox) and
+    # PosterBoard crashed in mi_thread_init, and Metal processes whose Swift wrote those slots corrupted. 2 uses a plain __thread.
+    'libmimalloc-sys = { version = "=0.1.49", default-features = false, features = ["v2"] }',
     # The render server's display thread spends most of a frame in the runtime, much of it in small functions across the
     # translator's crates: one optimisation unit with link-time optimisation lets them inline across crate boundaries.
     '[profile.release]', 'panic = "unwind"', 'debug = 1', 'lto = "fat"', 'codegen-units = 1', '',
