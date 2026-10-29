@@ -92,11 +92,11 @@ sdk = run(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
 binding_objects = [OUT / 'original-bindings.o']
 if FILESET:
     # As for the Legacy display (build-gop-legacy-display-27.py): original functions are reached through owned stubs in kernel text
-    # (signed and moved like native code) whose branch lands on the original after the collection slide, less the measured move of the
-    # native kernel (native-slide); the metaclass is data, reached through the GOT at its plain address.
+    # (signed and moved like native code); the metaclass is data, reached through the GOT at its plain address. A stub branches
+    # through an absolute literal (ldr x16 / br x16; the original's bti c or pacibsp accepts it), which the fileset emitter neither
+    # signs nor moves, so it lands on the original after the collection slide wherever the native code is placed. A PC-relative
+    # branch would move with the native kernel's code and need its measured move (native-slide) taken off first.
     slide = int(plan['collection_slide'], 16)
-    native_slide_file = ROOT / 'build/native-legacy-display/native-slide'
-    native_slide = int(native_slide_file.read_text(), 16) if native_slide_file.exists() else 0
     text, addresses = '.text\n.p2align 2\n', ''
     for n, a in sorted(bindings.items()):
         if n not in undefined:
@@ -104,8 +104,8 @@ if FILESET:
         if n.endswith('gMetaClassE'):
             addresses += f'.globl {n}\n.set {n}, {a + slide:#x}\n'
         else:
-            addresses += f'.globl {n}.original\n.set {n}.original, {(a + slide - native_slide) & ((1 << 64) - 1):#x}\n'
-            text += f'.globl {n}\n{n}:\n bti c\n b {n}.original\n'
+            addresses += f'.globl {n}.original\n.set {n}.original, {(a + slide) & ((1 << 64) - 1):#x}\n'
+            text += f'.globl {n}\n.p2align 3\n{n}:\n bti c\n ldr x16, 1f\n br x16\n1: .quad {n}.original\n'
     asm.write_text(text)
     (OUT / 'original-addresses.S').write_text(addresses)
     run(['xcrun', 'clang', '-target', TRIPLE, '-isysroot', sdk, '-c', OUT / 'original-addresses.S', '-o', OUT / 'original-addresses.o'])
