@@ -13,13 +13,15 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--output', type=Path, default=ROOT / 'build/owner-data-fixture')
+parser.add_argument('--launchd-sha256', default='8cec9a3c44a443b08e977ccc5d577850316ad428c575dc01f09b018dbd5b6a25',
+                    help='the supplied OS\'s /sbin/launchd (default: 21H461\'s); the caller pins it for another build')
 args = parser.parse_args()
 fixture = args.output.resolve()
 image = fixture / 'owner-data-32.cdr'
 if image.exists():
     raise SystemExit('Refuse to overwrite an existing Data seed')
 source = ROOT / '.cache/firmware/target-volumes/os-mount'
-if hashlib.sha256((source / 'sbin/launchd').read_bytes()).hexdigest() != '8cec9a3c44a443b08e977ccc5d577850316ad428c575dc01f09b018dbd5b6a25':
+if hashlib.sha256((source / 'sbin/launchd').read_bytes()).hexdigest() != args.launchd_sha256:
     raise SystemExit('Require the unchanged supplied original OS mount')
 fixture.mkdir(parents=True, exist_ok=True)
 subprocess.run(['hdiutil', 'create', '-size', '32m', '-layout', 'NONE', '-fs', 'APFS',
