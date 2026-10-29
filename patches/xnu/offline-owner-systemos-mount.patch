@@ -99,8 +99,8 @@
 +	    native_verified_block_root_authorized(root_device);
 +	if (!root_authorized) goto done;
 +	native_owner_cache_stage = 1;
-+	if (!native_verified_block_volume_device(volume, &selected, device_path,
-+	    sizeof(device_path))) goto done;
++	for (int waited = 0; !native_verified_block_volume_device(volume, &selected, device_path,
++	    sizeof(device_path)); waited++) { if (waited == 200) goto done; delay(50 * 1000); }   /* published late: up to 10 s */
 +	strlcpy(native_owner_cache_device_path, device_path, sizeof(native_owner_cache_device_path));
 +	native_owner_cache_selected_device = selected;
 +	native_owner_cache_stage = 2;
