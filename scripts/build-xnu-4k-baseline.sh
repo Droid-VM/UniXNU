@@ -853,3 +853,26 @@ if [ "${XNU_SOURCE_CORECRYPTO14:-0}" = 1 ] && [ "$CRYPTO_BOOTSTRAP_MODE" = sourc
   python3 scripts/seal-source-crypto-kernel.py \
     build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf
 fi
+# The fileset prelink's naming reference (XnuPrelink emit_prelink.py --fileset-reference): the same patched source as a RELEASE
+# kernel with link-time optimisation, as the original kernelcache's kernel is built, so its function order and shapes match the
+# stripped original where the DEVELOPMENT kernel's do not. Only its symbols are used; it is never booted. xnu's ld -r of the LTO
+# objects (MakeInc.kernel, PRE_LTO) passes LDFLAGS_KERNEL_LTO but not the deployment flags, and the compiler driver then links for macOS.
+# RELEASE exports only all-kpi.exp, which names Apple's private classes (IOUnifiedAddressTranslator, the IOMMU pmap calls) that no
+# public source defines; the reference exports every global instead, as DEVELOPMENT does, which also keeps every function a kext calls.
+if [ "${XNU_FILESET_REFERENCE:-0}" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then
+  make -C .cache/xnu-work "${XNU_BUILD_TARGET:-build}" SDKROOT="${XNU_SDKROOT:-iphoneos}" ARCH_CONFIGS=ARM64 \
+    MACHINE_CONFIGS=BCM2837 KERNEL_CONFIGS=RELEASE \
+    ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG="$XNU_ARCH_STRING" LARGE_MEMORY_DEFINE=-UARM_LARGE_MEMORY \
+    ARM64_LINK_ADDR=0xfffffff007004000 ARM64_PLKSEG_ADDR=0xfffffff004004000 \
+    DEPLOYMENT_TARGET_FLAGS="-miphoneos-version-min=$IOS_VERSION -DXNU_TARGET_OS_IOS" \
+    DEPLOYMENT_LINKER_FLAGS="-Wl,-ios_version_min,$IOS_VERSION" \
+    RC_DARWIN_KERNEL_VERSION="$XNU_DARWIN" RC_ProjectSourceVersion="$XNU_VERSION" \
+    BUILD_LTO=1 BOUND_CHECKS=0 BUILD_WERROR=0 MAKEJOBS=-j"${JOBS:-4}" \
+    LDFLAGS_KERNEL_LTO="-Wl,-mllvm,-inline-threshold=100 -miphoneos-version-min=$IOS_VERSION" \
+    LDFLAGS_KERNEL_ONLY_CONFIG_RELEASEARM64=-rdynamic \
+    CFLAGS_EXTRA="$EXTRA_CFLAGS" "${EXTRA_MAKE_ARGS[@]}" ${XNU_HOST_MAKE_ARGS[@]+"${XNU_HOST_MAKE_ARGS[@]}"} \
+    OBJROOT="$ROOT/build/xnu/fileset-reference-obj" SYMROOT="$ROOT/build/xnu/fileset-reference-sym" \
+    DSTROOT="$ROOT/build/xnu/fileset-reference-dst"
+  mkdir -p build/xnu/fileset-reference
+  cp build/xnu/fileset-reference-obj/RELEASE_ARM64_BCM2837/mach.release.bcm2837.unstripped.noctf build/xnu/fileset-reference/
+fi
