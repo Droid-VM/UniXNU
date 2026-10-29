@@ -443,7 +443,11 @@ if [ "$BOARD_LAUNCH_POLICY" = 1 ] && [ "$OWNER_DATA_MOUNT" != 1 ]; then
   exit 1
 fi
 OWNER_DATA_HEADER=$ROOT/build/xnu/owner-data-volume.h
-python3 - "$OWNER_DATA_HEADER" "$OWNER_DATA_MOUNT" "$NATIVE_RAM_BLOCK" "${XNU_OWNER_DATA_VOLUME_UUID:-}" "${XNU_OWNER_CACHE_VOLUME_UUID:-}" "${XNU_OWNER_ROOT_VOLUME_UUID:-}" "$OWNER_BOOT_MANIFEST" <<'PY_DATA_UUID'
+# Only the xnu-12377 series publishes the boot manifest under the OS profile's root volume UUID (offline-owner-systemos-mount);
+# xnu-10063's names the 21H461 OS volume itself, so an iPadOS 17 profile carries none.
+MANIFEST_NEEDS_ROOT_UUID=0
+case "$XNU_TAG" in xnu-10063*) ;; *) MANIFEST_NEEDS_ROOT_UUID=$OWNER_BOOT_MANIFEST ;; esac
+python3 - "$OWNER_DATA_HEADER" "$OWNER_DATA_MOUNT" "$NATIVE_RAM_BLOCK" "${XNU_OWNER_DATA_VOLUME_UUID:-}" "${XNU_OWNER_CACHE_VOLUME_UUID:-}" "${XNU_OWNER_ROOT_VOLUME_UUID:-}" "$MANIFEST_NEEDS_ROOT_UUID" <<'PY_DATA_UUID'
 from pathlib import Path
 import sys
 import uuid
