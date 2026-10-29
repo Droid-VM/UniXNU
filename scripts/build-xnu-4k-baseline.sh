@@ -864,11 +864,13 @@ fi
 if [ "${XNU_FILESET_REFERENCE:-0}" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then
   # The board's archives are compiled from the DEVELOPMENT kernel's records, with its minimal UBSan checks, and a RELEASE kernel
   # has no UBSan runtime: the handlers they call are empty functions in the reference, which is never booted. The same holds for
-  # the DEVELOPMENT allocator's call-site registration (kalloc_data's __zone_site_register startup entry).
+  # the DEVELOPMENT allocator's call-site registration (kalloc_data's __zone_site_register startup entry), and the static-if key of
+  # MACH_ASSERT's assert() (mach_assert_jump_key, a data object: RELEASE has no MACH_ASSERT).
   REFERENCE_STUBS=$ROOT/build/xnu/fileset-reference-ubsan.o
   printf '%s\n' "$KERNEL_EXTRA_ARCHIVES" | tr ' ,' '\n\n' | grep '\.a$' | while read -r ARCHIVE; do
-    [ -f "$ARCHIVE" ] && nm -u "$ARCHIVE" 2>/dev/null | grep -E '^(___ubsan_handle_.*_minimal|___zone_site_register)$' || true
-  done | sort -u | sed -e 's/^_//' -e 's/.*/void &(void) {}/' > "$ROOT/build/xnu/fileset-reference-ubsan.c"
+    [ -f "$ARCHIVE" ] && nm -u "$ARCHIVE" 2>/dev/null | grep -E '^(___ubsan_handle_.*_minimal|___zone_site_register|_mach_assert_jump_key)$' || true
+  done | sort -u | sed -e 's/^_//' -e '/_jump_key$/ s/.*/unsigned long long &[4];/' -e '/_jump_key\[/! s/.*/void &(void) {}/' \
+    > "$ROOT/build/xnu/fileset-reference-ubsan.c"
   xcrun clang -target "$XNU_ARCH_STRING-apple-ios$IOS_VERSION" -c -mkernel -fno-sanitize=all \
     "$ROOT/build/xnu/fileset-reference-ubsan.c" -o "$REFERENCE_STUBS"
   REFERENCE_MAKE_ARGS=()
