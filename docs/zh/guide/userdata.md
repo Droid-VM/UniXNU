@@ -2,7 +2,7 @@
 
 userdata 镜像为 XNU 提供根文件系统。它保存目标 IPSW 中未修改的 `OS` 和 `Cryptex1,SystemOS` 磁盘镜像，并在前面加一个 manifest。
 
-准备选定的 IPSW 及设备 GPT 数据。Linux 上安装提供 `lzfse` 的 [Linux 工具链](/zh/guide/requirements#linux)。扩大 Data 种子（第 4 步）需要 macOS 的 `hdiutil` 和 `diskutil`。先在[构建流程](/zh/building)中选定设备并保存本地输入。
+准备选定的 IPSW 及设备 GPT 数据。Linux 上安装提供 `lzfse` 的 [Linux 工具链](/zh/guide/requirements#linux)。扩大 Data 种子（第 4 步）需要 macOS 的 `hdiutil` 和 `diskutil`。AEA 加密的镜像（如 iPadOS 26）需要 macOS 的 `aea` 和 `ipsw` 工具。先在[构建流程](/zh/building)中选定设备并保存本地输入。
 
 ## 1. 核对分区 {#分区}
 
@@ -13,13 +13,21 @@ userdata 镜像为 XNU 提供根文件系统。它保存目标 IPSW 中未修改
 first_lba = 0x2f3840
 last_lba = 0x3d0abfa
 lba_bytes = 4096
-windows = [
-  { name = "OS", component = "OS" },
-  { name = "SystemOS", component = "Cryptex1,SystemOS" },
-]
 ```
 
 `first_lba` 和 `last_lba` 来自设备上名为 `userdata` 的 GPT 条目，`lba_bytes` 是分区逻辑块大小。
+
+OS 配置列出磁盘镜像：
+
+```toml
+[userdata]
+windows = [
+  { name = "OS", component = "OS" },
+  { name = "SystemOS", component = "Cryptex1,SystemOS", optional = true },
+]
+```
+
+IPSW 没有某个 `optional = true` 的窗口时跳过它。
 
 镜像大小为各窗口按 1 MiB 对齐后的总和，加上 1 MiB 头部区域。步骤拒绝超过分区容量的镜像。
 
@@ -30,7 +38,7 @@ windows = [
 ./unixnu build userdata --ipsw /path/to/restore.ipsw
 ```
 
-步骤按 `[userdata] windows` 提取 IPSW 组件，在 macOS 上用 `hdiutil`、在 Linux 上用 `scripts/unixnu/udif.py` 读取每个磁盘镜像，写出原始镜像到 `out/<device>/<os_profile>/<config>/userdata/userdata-root.img`。
+步骤按 `[userdata] windows` 提取 IPSW 组件，在 macOS 上解密 AEA 镜像，在 macOS 上用 `hdiutil`、在 Linux 上用 `scripts/unixnu/udif.py` 读取每个磁盘镜像，写出原始镜像到 `out/<device>/<os_profile>/<config>/userdata/userdata-root.img`。
 
 报告 `userdata-root.json` 记录窗口偏移、大小、哈希、分区容量和刷写命令。
 

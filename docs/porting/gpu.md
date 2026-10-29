@@ -79,14 +79,14 @@ smoothness. Adreno740 and ArmSmmu4K use these rules; keep them when porting:
 
 | Operation | Rule |
 | --- | --- |
-| Object lookup | Each client holds up to 16384 objects and finds them through a handle index. |
-| Allocation | BOs come from a contiguous write-combined pool the board reserves (1 GiB on sheng), and from scattered pages when it is full. |
+| Object lookup | A client's objects are limited by memory and found through a handle index. |
+| Allocation | BOs come from system memory: a pageable `IOBufferMemoryDescriptor` with no task and the write-combined cache mode, wired by `prepare()`. The VM sets the page attribute in one batch and restores it on free; client views map that descriptor. Only a caller that asks for contiguous memory gets a contiguous kernel allocation. |
 | Map of owned memory | `ArmSmmu4KLiveMapContextBatchExclusive`: no alias check against the existing ranges. |
-| Map of imported memory | The same call when every mapped import shares its cache class and its pages overlap neither the pool nor an owned mapping; otherwise the fully checked batch map. |
+| Map of imported memory | The same call when every mapped import shares its cache class and none of its pages is in a BO of this driver (a page bitmap over DRAM); otherwise the fully checked batch map. |
 | Unmap | Up to 512 pages: one TLBIVAL per page. Larger: invalidate the ASID. |
 | Submission | No TLB invalidation. A map fills only invalid leaves, an unmap invalidates its own pages, and the upper tables never change. A stalled fence still invalidates. |
 
-The boot log's `[vm map]`, `[vm unmap]`, `[vm kinds]` and `[bo pool]` rows give
+The boot log's `[vm map]`, `[vm unmap]`, `[vm kinds]` and `[bo memory]` rows give
 the count and time of each operation. Compare them before and after a change.
 
 With `NativeAdrenoClient`, implement one bounded submission in this order:

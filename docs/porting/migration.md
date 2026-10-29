@@ -1,5 +1,12 @@
 # Migrate a device port
 
+The sheng 23F84 source runtime now has a dedicated UFS build entry,
+`build-sheng-source-storage.py`, and a `RootPolicies` firmware handoff.
+`SourceStorage.cpp` loads the original storage family and APFS before deferred
+source-class registration. The board uses the actual 23F84 root UUID. These
+runtime changes are implementation work awaiting build and device qualification;
+the earlier source archive checks do not cover them.
+
 ## Why migrate
 
 Format 2 lets devices reuse SoC support, OS profiles and component build recipes.
@@ -464,3 +471,56 @@ verification results.
 - [Driver adaptation](/porting/drivers): complete each subsystem's board inputs and integration.
 - [Bring-up order](/porting/bring-up): record checkpoints using the built images.
 - [Debugging](/guide/debugging): investigate failed builds and boot stages.
+
+## Public-source storage and input builds {#source-drivers}
+
+For the `ipados-26.5.2-23F84` profile, `build-sheng-source-drivers.py` compiles
+ShengUfs, ShengHidInput and the board input transport using the prepared XNU
+12377 C/C++ recipes. The profile pins IOStorageFamily 337.100.1 and IOHIDFamily
+2238.120.5 from Apple's [macOS 26.5 source manifest](https://github.com/apple-oss-distributions/distribution-macOS/blob/83390100289cedfe669c31a96c94326d31afa1ed/release.json).
+Apple's [iOS 26.5 manifest](https://github.com/apple-oss-distributions/distribution-iOS/blob/f92ef8bfffdb54c4aa4709717e3609f1647f59ed/release.json)
+does not publish these families. The public macOS pins are source inputs, not
+proof of compatibility with the stripped iPadOS binaries.
+
+From UniXNU, with a prepared kernel tree, clean source checkouts at the profile
+pins and extracted Novatek firmware in the device cache, run:
+
+```sh
+python3 scripts/build-sheng-source-drivers.py \
+  --tree out/sheng/ipados-26.5.2-23F84/sheng_ipados26/tree \
+  --device ../UniXNU-sheng \
+  --storage-source out/driver-sources/IOStorageFamily \
+  --hid-source out/driver-sources/IOHIDFamily \
+  --with-storage-family
+```
+
+Obtain the source checkouts from the `git`, `ref` and `commit` entries in the
+OS profile. `--touch-firmware` can select another extracted firmware file.
+The builder rejects an incorrect source revision, a modified source checkout,
+a mismatched kernel object target or empty firmware. Each object is checked for
+arm64e and the iOS deployment version; commands, dependency hashes, compiler
+warnings, firmware identity and remaining imports are recorded under
+`build/sheng-source-drivers` in the target tree.
+
+`--with-storage-family` builds the 14 public kernel C++ sources plus the IIG
+implementation generated with Apple's DriverKit SDK. Apple source warnings are
+recorded and do not become errors. The input transport archive includes board
+touch/buttons, GENI SPI, Novatek protocol/contact processing and firmware,
+without requiring the legacy display builder. HID uses `IOHIDDevice.h` and
+`kIOHIDReportTypeInput`; this source mode does not install the Darwin 23 virtual
+table edge-event patch. The original HID builder rejects arm64e/iOS 26.
+
+These are relocatable archives, not a boot image. The report keeps
+`link_qualified`, `runtime_qualified` and `edge_gestures_qualified` false.
+HID diagnostics/startup, verified-root policy/crypto linkage, metaclass
+registration, target-family dependencies and retained APFS consumers still
+need integration. Do not register source and original copies of the same
+IOKit class together. The public HID checkout lacks `IOHIDEventTypes.h` and
+`IOHIDEventStructDefs.h`; its device implementation also requires private
+reporting/analytics headers. A successful input-device compile does not mean
+the full IOHIDFamily can be built from this release alone.
+
+Storage header preparation now validates the selected source commit on each
+archive build and replaces its generated header tree, preventing an earlier
+OS profile's headers from surviving a source switch. Existing iOS 17 ABI and
+device evidence must remain labeled with that OS version.

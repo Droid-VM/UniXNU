@@ -17,3 +17,5 @@ The catalog records implementation scope, hardware and OS requirements, board de
 ```
 
 [Component catalog](/reference/components)
+
+For the iPadOS 26 source-build path and its current linking/runtime limits, see [public-source driver builds](/porting/migration#source-drivers). Historical iOS 17 device results do not qualify this path.

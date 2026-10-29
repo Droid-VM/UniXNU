@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """Stage the owner-built Adreno Metal plugin into a copy of a packed Data seed.
 
-  add-gpu-plugin-data.py [--publish] [--clients NAME,...] BASE.dbr OUTPUT.dbr
+  add-gpu-plugin-data.py [--publish] BASE.dbr OUTPUT.dbr
 
 With --publish the seed also carries /private/var/ngpu/addons/NativeAdrenoMetal.publish: the plugin then returns the native Metal device to the original
 discovery in backboardd (NativeAdrenoMetalPlugin.mm), so the render server composites through it. Without the file the plugin only runs its tests.
-With --clients the seed also carries /private/var/ngpu/addons/NativeAdrenoMetal.clients: the processes besides backboardd that get their own native
-Metal device ("*" = every process); any other process keeps the software renderer.
 
 Adds /private/var/ngpu/addons/NativeAdrenoMetal.bundle, /private/var/ngpu/bin/adrenoprobed and /private/var/ngpu/daemons/*.plist (from build/adreno-metal-plugin, see build-adreno-metal-plugin.py). The
 kernel's boot-time addon mount (sheng-gpu-addon=1) presents that directory as a read-only union view over
@@ -31,13 +29,6 @@ BUNDLE = ROOT / 'build/adreno-metal-plugin/NativeAdrenoMetal.bundle'
 def main():
     args = [a for a in sys.argv[1:] if a != '--publish']
     publish = len(args) != len(sys.argv) - 1
-    clients = None
-    if '--clients' in args:
-        at = args.index('--clients')
-        clients = [name for name in args[at + 1].split(',') if name]
-        del args[at:at + 2]
-        if not clients or any(not all(c.isalnum() or c in '._-*' for c in name) for name in clients):
-            sys.exit('--clients takes process names separated by commas')
     if len(args) != 2:
         sys.exit(__doc__)
     base, output = Path(args[0]).resolve(), Path(args[1]).resolve()
@@ -70,9 +61,6 @@ def main():
             for directory in (mount / 'ngpu', mount / 'ngpu/addons'):
                 os.chmod(directory, 0o755)
             shutil.copytree(BUNDLE, target, symlinks=False)
-            if clients:
-                (mount / 'ngpu/addons/NativeAdrenoMetal.clients').write_text('\n'.join(clients) + '\n')
-                os.chmod(mount / 'ngpu/addons/NativeAdrenoMetal.clients', 0o644)
             marker = mount / 'ngpu/addons/NativeAdrenoMetal.publish'
             if publish:
                 marker.write_text('1\n')
@@ -111,7 +99,7 @@ def main():
         if raw.read_bytes()[32:36] != b'NXSB':
             sys.exit('The edited image is no APFS container any more')
         metadata = packed_ramdisk.pack(raw, output)
-    report = dict(base_sha256=packed_ramdisk.inspect(base)[0]['sha256'], output=metadata, publish=publish, clients=clients,
+    report = dict(base_sha256=packed_ramdisk.inspect(base)[0]['sha256'], output=metadata, publish=publish,
                   plugin=json.loads((ROOT / 'build/adreno-metal-plugin/trust.json').read_text()))
     output.with_suffix('.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report, indent=2))

@@ -287,7 +287,7 @@ def platform_node(name, table):
     return node(name, properties, children)
 
 
-def generate(dtb, config, *, unique_chip_id=None, data=False, trust=False, addon=False):
+def generate(dtb, config, *, unique_chip_id=None, data=False, trust=False, addon=False, root_policies=False):
     root = read_fdt(Path(dtb).read_bytes())
     entries = list(root.walk())
     handles = {}
@@ -305,7 +305,8 @@ def generate(dtb, config, *, unique_chip_id=None, data=False, trust=False, addon
     dram_base, dram_size = registers(memory[0])[0]
     if payload.get('dram_size') is not None and int(str(payload['dram_size']), 0) != dram_size:
         raise Error('payload.dram_size differs from the hardware DTS')
-    chosen = [('random-seed', os.urandom(64)), ('dram-base', struct.pack('<Q', dram_base)),
+    # xnu-12377 takes 4 x 64 seed bytes on ARM and panics with fewer; older kernels read the first 64.
+    chosen = [('random-seed', os.urandom(256)), ('dram-base', struct.pack('<Q', dram_base)),
               ('dram-size', struct.pack('<Q', dram_size)), *empty_nvram_proxy()]
     if unique_chip_id:
         seed = int(str(unique_chip_id), 16)
@@ -335,6 +336,7 @@ def generate(dtb, config, *, unique_chip_id=None, data=False, trust=False, addon
     mappings = [('PackedRAMDisk' if options.get('packed_data_ramdisk') else 'RAMDisk', bytes(16))] if data else []
     mappings += [('TrustCache', bytes(16))] if trust else []
     mappings += [('GpuAddon', bytes(16))] if addon else []
+    mappings += [('RootPolicies', bytes(16))] if root_policies else []
     children = [node('chosen', chosen, [node('memory-map', mappings), node('manifest-properties')])]
     cpus = next((entry for entry in root.children if entry.name == 'cpus'), None)
     if cpus is None:

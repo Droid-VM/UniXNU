@@ -25,8 +25,12 @@ def load(ctx, allow_fetch=False):
     if Path(os_name).name != os_name or os_name in ('.', '..'):
         raise Error('[board] os_profile must be a profile directory name')
     ctx.soc = feeds.resolve_soc(ctx, soc_name, allow_fetch)
-    ctx.profile_roots = {'arch': ctx.root / 'profiles/arch/arm64', 'soc': ctx.soc.path,
-                         'os': ctx.root / 'profiles/os' / os_name, 'device': ctx.device}
+    os_root = ctx.root / 'profiles/os' / os_name
+    arch_name = load_toml(os_root / 'profile.toml').get('os', {}).get('arch', 'arm64')
+    if arch_name not in ('arm64', 'arm64e'):
+        raise Error(f'{os_name}: [os] arch must be arm64 or arm64e')
+    ctx.profile_roots = {'arch': ctx.root / 'profiles/arch' / arch_name, 'soc': ctx.soc.path,
+                         'os': os_root, 'device': ctx.device}
     ctx.profile_files = [ctx.profile_roots['arch'] / 'profile.toml', ctx.soc.path / 'soc.toml',
                          ctx.profile_roots['os'] / 'profile.toml', ctx.device / 'board.toml']
     result = {}

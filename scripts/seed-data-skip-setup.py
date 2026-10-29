@@ -2,7 +2,7 @@
 """Make a Data seed that boots to SpringBoard instead of Setup: the preference changes github.com/dipa-studio/ios-sweet
 (tools/sweet-root-tweaks.py) established on hardware, applied to a copy of an existing packed Data seed.
 
-  seed-data-skip-setup.py BASE.dbr OUTPUT.dbr [--no-auto-dim]
+  seed-data-skip-setup.py BASE.dbr OUTPUT.dbr [--no-auto-dim] [--build=BUILD]
 
 BASE is a DBRDISK1 packed APFS container (drivers/DarwinBoot/Test/packed_ramdisk.py format). It is expanded to a raw image, attached
 read-write on this Mac, the preference files below are merged into /private/var/mobile/Library/Preferences, and the result is packed
@@ -13,6 +13,8 @@ again. The volume UUID is unchanged. Nothing is written to Git or to the OS inpu
   com.apple.springboard            BKNoWatchdogs, FBLaunchWatchdogExceptions{com.apple.purplebuddy: 100}, MCForceShowCloudConfigurationUI false
   com.apple.migration              LastSystemVersion (no data migration on every boot)
 and the container directories under /private/var/containers that on a device live on the data volume.
+--build names the OS build the seed boots (default 21H461): LastSystemVersion must equal it, or the system migrates its data on
+the first boot (the progress bar under the Apple logo).
 --no-auto-dim also sets com.apple.springboard SBDisableAutoDim, SBDontDimOrLockOnAC and SBDisableIdleSleep (as UniXNU-qemu's
 build-os-root.py does): a board without input would otherwise turn its display off about 30 seconds after SpringBoard starts
 and put the system to sleep.
@@ -76,8 +78,12 @@ def write_network(var):
 
 
 def main():
+    global BUILD
     no_auto_dim = '--no-auto-dim' in sys.argv[1:]
-    positional = [arg for arg in sys.argv[1:] if arg != '--no-auto-dim']
+    for arg in sys.argv[1:]:
+        if arg.startswith('--build='):
+            BUILD = arg.split('=', 1)[1]
+    positional = [arg for arg in sys.argv[1:] if arg != '--no-auto-dim' and not arg.startswith('--build=')]
     if len(positional) != 2:
         sys.exit(__doc__)
     base, output = Path(positional[0]).resolve(), Path(positional[1]).resolve()

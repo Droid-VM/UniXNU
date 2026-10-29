@@ -16,6 +16,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from . import kernel as kernel_step
 from .util import Error, expand, log, run, sha256_file, tool
 
 EPOCH = 315532800   # 1980-01-01, the first FAT timestamp; keeps the volume reproducible
@@ -38,8 +39,12 @@ def check_args(arguments):
     return line
 
 
-def check_native_root(kernel, arguments):
-    """Refuse the known bare-metal AMFI panic before the volume is written."""
+def check_native_root(kernel, arguments, vmm_present=False):
+    """Refuse the known bare-metal AMFI panic before the volume is written.
+
+    A board whose device tree declares vmm-present has no PMGR for AMFI to wait for; it needs no PMGR stand-in."""
+    if vmm_present:
+        return
     values = {}
     for argument in arguments:
         key, separator, value = argument.partition('=')
@@ -97,7 +102,7 @@ def build(ctx, kernel=None):
     arguments = [item for item in spec.get('kernel_args', []) if item.split('=', 1)[0] not in names] + extra
     line = check_args(arguments)
     log(f'kernel args: {line}')
-    check_native_root(kernel, arguments)
+    check_native_root(kernel, arguments, bool(ctx.board.get('adt', {}).get('defaults', {}).get('u32', {}).get('vmm-present')))
     owner_trust = getattr(args, 'owner_trust_cache', None)
     trust = expand(owner_trust or args.trust_cache) if (owner_trust or getattr(args, 'trust_cache', None)) else None
     if trust:
@@ -118,6 +123,19 @@ def build(ctx, kernel=None):
     addon = expand(args.gpu_addon) if getattr(args, 'gpu_addon', None) else None
     if addon and (not addon.is_file() or addon.read_bytes()[:8] != b'NGPUADD2'):
         raise Error(f'GPU addon not found or not made by scripts/make-gpu-addon.py: {addon}')
+    policy_path = spec.get('root_policies')
+    policies = expand(policy_path.format(tree=ctx.tree, out=ctx.work)) if policy_path else None
+    if policies:
+        if ctx.schema_version != 2:
+            raise Error('Root-policy handoff requires a format 2 device tree')
+        if not policies.is_file() or not 32 <= policies.stat().st_size <= 128 * 1024 * 1024:
+            raise Error(f'Root-policy bundle missing or outside handoff bounds: {policies}')
+        with policies.open('rb') as stream:
+            policy_header = stream.read(32)
+        if (policy_header[:8] != b'VROOTB01' or int.from_bytes(policy_header[8:16], 'little') != 1 or
+                not 1 <= int.from_bytes(policy_header[16:24], 'little') <= 16 or
+                int.from_bytes(policy_header[24:32], 'little') != policies.stat().st_size):
+            raise Error(f'Invalid root-policy bundle header: {policies}')
     seed = getattr(args, 'unique_chip_id', None) or os.environ.get('UNIXNU_UNIQUE_CHIP_ID')
     adt = spec.get('adt', {})
     if adt.get('unique_chip_id') == 'required' and not seed:
@@ -142,17 +160,25 @@ def build(ctx, kernel=None):
                 probe.append('--reset-before')
         run(['python3', ctx.tree / 'scripts/patch-xnu-entry-probe.py', payloads / 'kernel.macho', *screen, *probe],
             cwd=ctx.tree, env=dict(os.environ, UNIXNU_UEFI=str(ctx.uefi or '')), log_file=ctx.logs / 'payload-patch.log')
+        # The probes rewrite instructions inside __text, which the source corecrypto POST hashes.
+        if b'_source_corecrypto14_bootstrap\0' in Path(kernel).read_bytes():
+            boot_args = ' '.join([line, *spec.get('install', {}).get('confirm_args', [])])
+            run(['python3', ctx.tree / 'scripts/seal-source-crypto-kernel.py', payloads / 'kernel.macho', '--kernel-args', boot_args],
+                cwd=ctx.tree, env=dict(os.environ, **kernel_step.version_env({}, ctx)), log_file=ctx.logs / 'payload-seal.log')
     if trust:
         shutil.copyfile(trust, payloads / 'kernel.macho.trustcache')
     if addon:
         shutil.copyfile(addon, payloads / 'kernel.macho.gpuaddon')
+    if policies:
+        shutil.copyfile(policies, payloads / 'kernel.macho.vroot')
     if data:
         shutil.copyfile(data, payloads / 'scratch-data.img')
     if ctx.schema_version == 2:
         from .devicetree import compile_hardware, generate
         dtb = compile_hardware(ctx)
         (payloads / 'kernel.macho.adt').write_bytes(generate(
-            dtb, ctx.board, unique_chip_id=seed, data=bool(data), trust=bool(trust), addon=bool(addon)))
+            dtb, ctx.board, unique_chip_id=seed, data=bool(data), trust=bool(trust), addon=bool(addon),
+            root_policies=bool(policies)))
     else:
         command = ['python3', ctx.tree / adt['tool'], '--output', payloads / 'kernel.macho.adt', '--dram-size', str(spec['dram_size'])]
         for key, flag in (('owned_memory_size', '--owned-memory-size'), ('root_match_volume_uuid', '--root-match-volume-uuid'),
@@ -191,7 +217,8 @@ def build(ctx, kernel=None):
     install = spec.get('install')
     if install:
         if not data:
-            raise Error('board.toml [payload.install] needs a Data seed: pass --data-ramdisk FILE')
+            # A bring-up OS may have no seed yet: the entry still boots with the confirmation's arguments.
+            log('payload: [payload.install] without --data-ramdisk; the install entry carries no Data seed')
         titles, extra = install.get('confirm_titles', []), install.get('confirm_args', [])
         if not install.get('confirm') or not titles or len(titles) != len(extra):
             raise Error('board.toml [payload.install] needs confirm and equally long confirm_titles and confirm_args')

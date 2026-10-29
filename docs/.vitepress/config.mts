@@ -51,6 +51,7 @@ function taskSidebars(prefix: string, zh: boolean) {
       item('Device repository', '设备仓库', 'porting/device-repository'),
       item('Component selection', '选择组件', 'reference/components'),
       item('Select and add SoC support', '选择与添加 SoC 支持', 'porting/soc-support'),
+      item('arm64e OS profiles', 'arm64e OS 配置', 'porting/arm64e'),
     ]),
     group('2. Describe hardware', '2. 描述硬件', [
       item('Device tree', '设备树', 'porting/device-tree'),

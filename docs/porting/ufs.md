@@ -106,10 +106,6 @@ replace inherited arrays. The sheng selection includes:
 first_lba = 3094592
 last_lba = 64007162
 lba_bytes = 4096
-windows = [
-  { name = "OS", component = "OS" },
-  { name = "SystemOS", component = "Cryptex1,SystemOS" },
-]
 
 [payload.adt]
 root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
@@ -148,3 +144,5 @@ python3 scripts/porting-record.py check --device ../UniXNU-sheng
 ## Next step
 
 [Adapt display and brightness](/porting/display) after the root path is ready. The [driver checklist](/porting/drivers) covers the remaining subsystems.
+
+For the iPadOS 26 source-build path and its current linking/runtime limits, see [public-source driver builds](/porting/migration#source-drivers). Historical iOS 17 device results do not qualify this path.

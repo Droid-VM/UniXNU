@@ -4,8 +4,10 @@ import argparse
 import json
 import tomllib
 from pathlib import Path
-import struct
 import subprocess
+import sys
+
+from kernel_target import ARCH, TRIPLE, check_object
 
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
@@ -20,6 +22,10 @@ parser.add_argument('--verified-root-bundle', action='store_true', help='Select 
 parser.add_argument('--negative-verified-block', action='store_true', help='Negative own-buffer control: corrupt only the completed DMA snapshot')
 args = parser.parse_args()
 identifier = aliases.get(args.component, args.component)
+if identifier == 'ShengUfs' and ARCH == 'arm64e':
+    if any((args.negative_aes_kat, args.verified_root, args.verified_root_bundle, args.negative_verified_block)):
+        parser.error('The source UFS runtime always uses the authenticated policy bundle of the OS profile')
+    raise SystemExit(subprocess.call([sys.executable, ROOT / 'scripts/build-sheng-source-storage.py', '--tree', ROOT]))
 metadata = catalog.get(identifier, {})
 runtime = metadata.get('legacy_name', identifier)
 args.component = runtime
@@ -103,20 +109,8 @@ result = subprocess.run(command, cwd=record['directory'], stdout=subprocess.PIPE
 (out / 'compile.log').write_text(result.stdout)
 if result.returncode:
     raise SystemExit(result.stdout[-3500:])
-data = destination.read_bytes()
-magic, cpu, subtype, kind, count, size = struct.unpack_from('<6I', data)
-if (magic, cpu, subtype, kind) != (0xfeedfacf, 0x100000c, 0, 1):
-    raise SystemExit('Unexpected platform object architecture')
-offset = 32
-deployment = None
-for _ in range(count):
-    cmd, length = struct.unpack_from('<II', data, offset)
-    if cmd == 0x32:
-        deployment = struct.unpack_from('<II', data, offset + 8)
-    offset += length
-if deployment != (2, 0x110000):
-    raise SystemExit(f'Unexpected platform deployment {deployment}')
+check_object(destination.read_bytes(), component)
 archive = out / ('lib' + identifier + '.a')
 archive.unlink(missing_ok=True)
 subprocess.run(['xcrun', 'ar', 'rcs', archive, destination], check=True)
-print(f'{identifier}: -Werror build and actual ARM64/iOS 17 object audit passed')
+print(f'{identifier}: -Werror build and {TRIPLE} object audit passed')

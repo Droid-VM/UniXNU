@@ -94,7 +94,7 @@ cpu = node('cpu0', [('state', b'running\0'), ('reg', struct.pack('<I', 0)),
 tree = node('device-tree', [('model', b'qemu-entry-fixture\0'),
                           *([('#address-cells', struct.pack('<I', 2)), ('#size-cells', struct.pack('<I', 2))] if virtio_nodes else []),
                           *([('compatible', args.platform_compatible.encode() + b'\0')] if args.armvirt else [])], [
-    node('chosen', [('random-seed', os.urandom(64)),
+    node('chosen', [('random-seed', os.urandom(256)),
                     # This fixture's writable Data lives only in the owned
                     # RAMDisk. Publish its actual nonpersistent lifetime via
                     # XNU's standard hw.ephemeral_storage device-tree input.

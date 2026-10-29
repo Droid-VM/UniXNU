@@ -12,6 +12,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'kits/XnuPrelink'))
 import native_prelink as np
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from kernel_target import TRIPLE
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--component', choices=['VirtioMmioBlock', 'RamBlock', 'NativeVirtioBlock', 'NativeRamBlock'], default='VirtioMmioBlock')
 parser.add_argument('--directory', type=Path, default=ROOT / 'build/virtio-mmio-block')
@@ -78,7 +80,7 @@ if any(re.search(r'IOBlockStorageDeviceD[01]Ev$', n) for n in undefined):
 bindings = {name: possible[name] for name in undefined}
 assembly = out / 'original-bindings.S'
 assembly.write_text(''.join(f'.globl {name}\n.set {name}, {value:#x}\n' for name, value in sorted(bindings.items())))
-subprocess.run(['xcrun', 'clang', '-target', 'arm64-apple-ios17.0', '-Werror', '-Wno-incompatible-sysroot',
+subprocess.run(['xcrun', 'clang', '-target', TRIPLE, '-Werror', '-Wno-incompatible-sysroot',
                 '-c', assembly, '-o', out / 'original-bindings.o'], check=True)
 archive = out / ('lib' + canonical + '.a')
 archive.unlink(missing_ok=True)

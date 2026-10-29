@@ -24,3 +24,5 @@ ShengUfs 为 SM8550 上的 sheng 提供 UFS 存储路径，管理主机控制器
 ShengUfs 由 sheng 设备仓库作为子模块提供。阅读 [UFS 移植指南](/zh/porting/ufs)，
 按[设备存储记录](/zh/devices/sheng#storage)维护控制器、时钟、PHY、SMMU、DMA、
 分区和完成条件。
+
+iPadOS 26 的源码构建方法及当前链接、运行时限制见[公开源码驱动构建](/zh/porting/migration#source-drivers)。历史 iOS 17 真机结果不代表该路径已通过验证。

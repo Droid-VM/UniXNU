@@ -1,0 +1,13 @@
+{
+  "kernelcache_sha256": "38e6d9fa5f789b8228f4617ef4c6d2a3fd8ab564abdc9b62920f1db53fc1780a",
+  "collection_slide": "0x1f000000000",
+  "metaclass": "0xfffffe000bb3f290",
+  "instance_bytes": 136,
+  "virtual_entries": 168,
+  "operational_overrides": [],
+  "metadata_overrides": [0, 1, 7],
+  "protected_compatible_constructor_aliases": ["0xfffffe000a14d990", "0xfffffe000a14d9c8"],
+  "nondeleting_destructor": "0xfffffe000a14da00",
+  "get_meta_class": "0xfffffe000a14da70",
+  "evidence": "IOGPUFamily static initializer at 0xfffffe000a14da80 constructs IOAcceleratorES::gMetaClass with size 0x88. vtable 0xfffffe000832f2e8 (+0x10 address point) has 168 IOService entries; only slots 0, 1 (destructors 0xfffffe000a14da08, 0xfffffe000a14da10) and 7 (getMetaClass) differ from IOService's. Both constructors call IOService::IOService(const OSMetaClass *) and store the signed vtable (DA, 0xcda1); the nondeleting destructor tail-calls IOService::~IOService."
+}

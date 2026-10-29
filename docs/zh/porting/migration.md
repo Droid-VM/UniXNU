@@ -354,3 +354,48 @@ npm --prefix docs run build
 - [驱动适配](/zh/porting/drivers)：补齐各子系统的板级输入和集成。
 - [启动验证顺序](/zh/porting/bring-up)：使用生成的镜像记录检查点。
 - [调试](/zh/guide/debugging)：调查构建失败和启动停留阶段。
+
+## 存储与输入的公开源码构建 {#source-drivers}
+
+`ipados-26.5.2-23F84` 配置可通过 `build-sheng-source-drivers.py`，使用已准备好的
+XNU 12377 C/C++ 编译参数构建 ShengUfs、ShengHidInput 和板级输入传输代码。
+配置固定了 Apple [macOS 26.5 源码清单](https://github.com/apple-oss-distributions/distribution-macOS/blob/83390100289cedfe669c31a96c94326d31afa1ed/release.json)
+中的 IOStorageFamily 337.100.1 与 IOHIDFamily 2238.120.5。
+Apple 的 [iOS 26.5 清单](https://github.com/apple-oss-distributions/distribution-iOS/blob/f92ef8bfffdb54c4aa4709717e3609f1647f59ed/release.json)
+未发布这两个 Family。macOS 公开源码版本用于构建，不代表已证明与去除符号的
+原版 iPadOS 二进制兼容。
+
+准备好内核构建树、与配置固定提交一致的干净源码检出，以及设备缓存中的
+Novatek 固件后，在 UniXNU 中运行：
+
+```sh
+python3 scripts/build-sheng-source-drivers.py \
+  --tree out/sheng/ipados-26.5.2-23F84/sheng_ipados26/tree \
+  --device ../UniXNU-sheng \
+  --storage-source out/driver-sources/IOStorageFamily \
+  --hid-source out/driver-sources/IOHIDFamily \
+  --with-storage-family
+```
+
+源码地址、标签和提交见 OS 配置中的 `git`、`ref`、`commit`。
+`--touch-firmware` 可指定其他已提取固件。构建器拒绝错误源码提交、修改过的源码、
+目标不匹配的内核对象或空固件。每个对象均检查 arm64e 和 iOS 部署版本；编译命令、
+依赖文件哈希、警告、固件身份和剩余导入保存在目标树的 `build/sheng-source-drivers`。
+
+`--with-storage-family` 编译 14 个公开内核 C++ 源文件，并使用 Apple DriverKit SDK
+生成、编译 IIG 实现；Apple 源码的警告会记录，但不作为错误。
+输入传输 archive 包含板级触控、按键、GENI SPI、Novatek 协议、触点处理和固件，
+无需调用旧显示驱动构建器。HID 使用 `IOHIDDevice.h` 和 `kIOHIDReportTypeInput`；
+源码模式不安装 Darwin 23 固定虚表槽号的边缘事件补丁。旧 HID 构建器拒绝 arm64e/iOS 26。
+
+这些产物是可重定位 archive，尚不是启动镜像。报告中的 `link_qualified`、
+`runtime_qualified` 和 `edge_gestures_qualified` 均为 false。HID 诊断与启动、
+根卷策略与加密对象、元类注册、目标 Family 依赖及保留的 APFS 调用方仍需接入。
+不要同时注册源码版与原版的同名 IOKit 类。公开 HID 源码缺少 `IOHIDEventTypes.h`、
+`IOHIDEventStructDefs.h`，设备实现还依赖私有报告与分析头文件；输入设备编译成功
+不代表仅凭此次公开发布就能构建整个 IOHIDFamily。
+
+存储头文件准备过程会在每次 archive 构建时验证所选提交并替换生成的头文件目录，
+避免切换源码后继续使用旧 OS 的缓存。原有 iOS 17 ABI 与真机证据继续标注其实际 OS 版本。
+
+23F84 新增 `build-sheng-source-storage.py` 和 `SourceStorage.cpp`，连接延迟注册的公开存储基类、原版 IOStorageFamily/APFS 与 UFS。签名根策略通过独立的 `RootPolicies` 固件交接传入。用户要求停止测试后，这批新增实现尚未构建或运行，不能沿用此前源码编译结果证明运行时迁移完成。

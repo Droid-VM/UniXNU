@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
-"""Build the matching Darwin 23 pthread kernel component and its real registration."""
+"""Build the pthread kernel component of the selected OS profile and its real registration."""
 import json
+import os
+import shutil
 from pathlib import Path
-import struct
 import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
+from kernel_target import TRIPLE, check_object
 from xnu_symbols import kernel_names
 SOURCE = ROOT / 'refer/libpthread'
-REVISION = 'c0e60fb5ecfc54cf379c261d3f9572cc22ded891'
+# The OS profile pins the source; without it, the Darwin 23 revision.
+REVISION = os.environ.get('UNIXNU_LIBPTHREAD_COMMIT', 'c0e60fb5ecfc54cf379c261d3f9572cc22ded891')
 if subprocess.check_output(['git', '-C', SOURCE, 'rev-parse', 'HEAD'], text=True).strip() != REVISION:
     raise SystemExit('Unexpected libpthread source revision')
 if subprocess.check_output(['git', '-C', SOURCE, 'status', '--porcelain'], text=True):
     raise SystemExit('The libpthread reference must remain immutable')
 WORK = ROOT / '.cache/libpthread-work'
+if WORK.exists() and subprocess.check_output(['git', '-C', WORK, 'rev-parse', 'HEAD'], text=True).strip() != REVISION:
+    shutil.rmtree(WORK)
 if not WORK.exists():
     subprocess.run(['git', 'clone', '--shared', SOURCE, WORK], check=True)
 for patch in sorted((ROOT / 'patches/libpthread').glob('*.patch')):
@@ -47,7 +52,7 @@ def compile_one(source, destination, namespace=None):
             index += 1
     else:
         framework = ROOT / '.cache/fakeroot/System/Library/Frameworks/Kernel.framework/Versions/A'
-        command = ['xcrun', '--sdk', 'iphoneos', 'clang', '-target', 'arm64-apple-ios17.0',
+        command = ['xcrun', '--sdk', 'iphoneos', 'clang', '-target', TRIPLE,
                    '-isysroot', sdk, '-mkernel', '-ffreestanding', '-fno-builtin', '-fno-stack-check',
                    '-std=gnu11', '-fblocks', '-O2', '-mno-implicit-float',
                    '-DKERNEL=1', '-DKERNEL_PRIVATE=1', '-DXNU_KERNEL_PRIVATE=1',
@@ -62,19 +67,7 @@ def compile_one(source, destination, namespace=None):
     destination.with_suffix('.log').write_text(result.stdout)
     if result.returncode:
         raise SystemExit(result.stdout[-4500:])
-    data = destination.read_bytes()
-    if struct.unpack_from('<4I', data) != (0xfeedfacf, 0x100000c, 0, 1):
-        raise SystemExit('Unexpected pthread object architecture')
-    offset = 32
-    deployment = None
-    for _ in range(struct.unpack_from('<I', data, 16)[0]):
-        cmd, length = struct.unpack_from('<II', data, offset)
-        if cmd == 0x32:
-            deployment = struct.unpack_from('<II', data, offset + 8)
-        offset += length
-    if deployment != (2, 0x110000):
-        raise SystemExit(f'Unexpected pthread deployment: {deployment}')
-
+    check_object(destination.read_bytes(), destination.name)
 
 def names(path, mode, global_only=True):
     result = subprocess.check_output(['xcrun', 'nm', *(['-g'] if global_only else []), mode, '-j', path], text=True)
@@ -100,7 +93,7 @@ imports = set().union(*(names(path, '-u') for path in objects)) - definitions
 # The component is statically linked: os_log's DSO identity is the real
 # executable Mach-O header, synthesized by the Mach-O executable linker.
 missing = sorted(imports - kernel_names - {'___dso_handle'})
-report = {'revision': REVISION, 'sources': 3, 'ordinary_arm64_ios17_audited': True,
+report = {'revision': REVISION, 'sources': 3, 'target': TRIPLE, 'target_audited': True,
           'namespace_collisions_isolated': sorted(collisions), 'missing_kernel_names': missing,
           'linker_synthesized_symbols': ['___dso_handle'],
           'registration_observed': False}

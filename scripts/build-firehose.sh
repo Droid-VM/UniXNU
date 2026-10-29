@@ -2,6 +2,9 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
+# The kernel slice and deployment target follow the selected architecture and OS profiles.
+ARCH=${UNIXNU_XNU_ARCH:-arm64}
+IOS_VERSION=${UNIXNU_IOS_VERSION:-17.0}
 if [ ! -d .cache/libdispatch-work/.git ]; then
   git clone --shared refer/libdispatch .cache/libdispatch-work
 fi
@@ -28,7 +31,7 @@ if [ "$(uname -s)" = Linux ]; then
   FAKEROOT=$ROOT/.cache/fakeroot
   WORK=.cache/libdispatch-work
   mkdir -p build/firehose/obj "$FAKEROOT/usr/local/lib/kernel" "$FAKEROOT/usr/local/include/kernel/os"
-  xcrun --sdk iphoneos clang -target arm64-apple-ios17.0 -std=gnu11 -Os -g \
+  xcrun --sdk iphoneos clang -target "$ARCH-apple-ios$IOS_VERSION" -std=gnu11 -Os -g \
     -mkernel -nostdinc -Wno-packed \
     -DKERNEL=1 -DDISPATCH_USE_DTRACE=0 -DOS_ATOMIC_CONFIG_MEMORY_ORDER_DEPENDENCY=1 \
     -DOS_ATOMIC_CONFIG_STARVATION_FREE_ONLY=0 \
@@ -45,7 +48,7 @@ if [ "$(uname -s)" = Linux ]; then
 else
   xcodebuild install -project .cache/libdispatch-work/libdispatch.xcodeproj \
     -target libfirehose_kernel -configuration Release -sdk iphoneos -jobs "${JOBS:-4}" \
-    ARCHS=arm64 VALID_ARCHS=arm64 ONLY_ACTIVE_ARCH=NO IPHONEOS_DEPLOYMENT_TARGET=17.0 \
+    ARCHS="$ARCH" VALID_ARCHS="$ARCH" ONLY_ACTIVE_ARCH=NO IPHONEOS_DEPLOYMENT_TARGET="$IOS_VERSION" \
     CODE_SIGNING_ALLOWED=NO GCC_TREAT_WARNINGS_AS_ERRORS=NO \
     OBJROOT="$ROOT/build/firehose/obj" SYMROOT="$ROOT/build/firehose/sym" \
     DSTROOT="$ROOT/.cache/fakeroot" FAKEROOT_DIR="$ROOT/.cache/fakeroot"

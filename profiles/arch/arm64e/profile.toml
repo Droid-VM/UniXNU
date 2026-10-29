@@ -1,0 +1,11 @@
+[arch]
+name = "arm64e"
+page_size = 4096
+
+[components]
+include = ["ArmDTPlatform", "ArmCpu", "XnuPrelink"]
+
+[kernel]
+config_fragments = ["arch:configs/common.config"]
+patch_series = ["arch:patches/xnu/series", "os:patches/xnu/series"]
+archives = []

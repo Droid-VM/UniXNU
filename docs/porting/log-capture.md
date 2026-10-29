@@ -167,6 +167,14 @@ that board record.
 **Result:** one reader environment, one matching decoder, an identified storage
 range and a tested route back to bootloader or recovery.
 
+For the sheng iPadOS 27 native source path, enable sheng-log=1 boot-ui-trace=1
+when diagnosing a user-space stall. The source storage archive includes
+BootProcessWorker.c, which captures process stacks separately from the log
+writer so a user-page fault cannot stop log persistence. Add
+boot-ui-focus3=chronod to retain its stacks alongside backboardd and SpringBoard.
+The arm64e sampler strips return-address PAC before validating and encoding
+frames. An empty stack section alone is not evidence that the processes stopped.
+
 ## 5. Complete one manual capture cycle {#manual-cycle}
 
 1. Build a test payload with logging enabled and rebuild the boot image.

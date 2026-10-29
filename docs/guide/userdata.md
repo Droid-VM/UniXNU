@@ -2,7 +2,7 @@
 
 The userdata image supplies the root file system to XNU. It holds the unchanged `OS` and `Cryptex1,SystemOS` disk images from the target IPSW behind a manifest that the kernel reads.
 
-Prepare the selected IPSW and the device GPT values. On Linux, install the [Linux toolchain](/guide/requirements#linux), which provides `lzfse`. Growing the Data seed (step 4) needs macOS `hdiutil` and `diskutil`. Select the device and save local inputs using [Build and boot](/building) first.
+Prepare the selected IPSW and the device GPT values. On Linux, install the [Linux toolchain](/guide/requirements#linux), which provides `lzfse`. Growing the Data seed (step 4) needs macOS `hdiutil` and `diskutil`. AEA encrypted images, such as those of iPadOS 26, need macOS `aea` and the `ipsw` tool. Select the device and save local inputs using [Build and boot](/building) first.
 
 ## 1. Check partition geometry {#partition}
 
@@ -13,13 +13,21 @@ Prepare the selected IPSW and the device GPT values. On Linux, install the [Linu
 first_lba = 0x2f3840
 last_lba = 0x3d0abfa
 lba_bytes = 4096
-windows = [
-  { name = "OS", component = "OS" },
-  { name = "SystemOS", component = "Cryptex1,SystemOS" },
-]
 ```
 
 `first_lba` and `last_lba` come from the GPT entry named `userdata` on the device. `lba_bytes` is the logical block size of the partition.
+
+The OS profile lists the disk images:
+
+```toml
+[userdata]
+windows = [
+  { name = "OS", component = "OS" },
+  { name = "SystemOS", component = "Cryptex1,SystemOS", optional = true },
+]
+```
+
+A window with `optional = true` is skipped when the IPSW does not have it.
 
 The image size is the sum of the windows, each aligned to 1 MiB, plus the 1 MiB header region. The step rejects an image larger than the partition.
 
@@ -30,7 +38,7 @@ The image size is the sum of the windows, each aligned to 1 MiB, plus the 1 MiB 
 ./unixnu build userdata --ipsw /path/to/restore.ipsw
 ```
 
-The step extracts the IPSW components named in `[userdata] windows`, reads each disk image with `hdiutil` on macOS or `scripts/unixnu/udif.py` on Linux, and writes a raw image to `out/<device>/<os_profile>/<config>/userdata/userdata-root.img`.
+The step extracts the IPSW components named in `[userdata] windows`, decrypts AEA images on macOS, reads each disk image with `hdiutil` on macOS or `scripts/unixnu/udif.py` on Linux, and writes a raw image to `out/<device>/<os_profile>/<config>/userdata/userdata-root.img`.
 
 The report `userdata-root.json` records the window offsets, sizes and hashes, the partition capacity and the flash command.
 

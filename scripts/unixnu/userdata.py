@@ -7,12 +7,17 @@ It holds the unchanged OS and SystemOS disk images of the IPSW, byte for byte, b
     0x100000  window "OS"        the whole attached OS disk image, 1 MiB aligned
     ....      window "SystemOS"  the whole attached SystemOS disk image, 1 MiB aligned
 
-Manifest (little endian): "SHNGROOT", u32 version=1, u32 count, u64 image_bytes, then `count` 128-byte entries
-{char name[32], u64 offset, u64 size, u32 block_size=512, u32 flags(1=read-only), u8 sha256[32], 40 reserved},
-and at byte 4064 the SHA-256 of bytes 0..4063.
+    ....      data objects (--object NAME=FILE[:OFFSET]), each 1 MiB aligned
 
-The images come from the IPSW (a local file or a remote URL, see ipsw.py) and are checked against the pins of
-board.toml. The raw disk of each disk image is read without mounting: attached read-only with hdiutil on macOS,
+Manifest (little endian): "SHNGROOT", u32 version, u32 count, u64 image_bytes, then `count` 128-byte entries
+{char name[32], u64 offset, u64 size, u32 block_size, u32 flags, u8 sha256[32], 40 reserved},
+and at byte 4064 the SHA-256 of bytes 0..4063. A window has block_size 512 and flags 1 (read-only block device).
+Version 2 adds data objects with block_size 4096 and flags 3: the kernel reads them itself and never publishes
+them as block devices (the hash tables of header-only root policies, firmware). Version 1 holds windows only.
+
+The OS profile lists the windows ([userdata] windows; optional ones are skipped when the IPSW lacks them) and the
+device sets the partition geometry. The images come from the IPSW (a local file or a remote URL, see ipsw.py),
+are decrypted when the IPSW ships them as AEA, and are checked against the pins of board.toml. The raw disk of each disk image is read without mounting: attached read-only with hdiutil on macOS,
 decoded by udif.py on other hosts. Nothing is flashed: the report prints the fastboot command, to be run by the user.
 """
 import contextlib
@@ -23,6 +28,7 @@ import plistlib
 import re
 import struct
 import subprocess
+from pathlib import Path
 
 from . import udif
 from .ipsw import Ipsw
@@ -85,18 +91,45 @@ def build(ctx, dry_run=False):
         tool('hdiutil', 'the disk images are attached with macOS hdiutil')
     source = Ipsw(ctx)
     capacity = (spec['last_lba'] - spec['first_lba'] + 1) * spec.get('lba_bytes', 4096)
+    windows = []
+    for window in spec.get('windows', []):
+        try:
+            source.member(window['component'])
+        except Error:
+            if not window.get('optional'):
+                raise
+            log(f'userdata: {window["name"]} skipped, {window["component"]} is not in this IPSW')
+            continue
+        windows.append(window)
+    if not windows:
+        raise Error('[userdata] windows selects no disk image; the OS profile defines them')
     if dry_run:
-        for window in spec['windows']:
+        for window in windows:
             name, size, _ = source.info(window['component'])
             log(f'userdata: {window["name"]} would be extracted from {name} ({size >> 20} MiB)')
         log('userdata: dry run, nothing extracted or written')
         return None
-    sources = [(window['name'], source.extract(window['component'])) for window in spec['windows']]
+    sources = [(window['name'], source.disk_image(window['component'])) for window in windows]
     layout, cursor = [], MIB
     for name, dmg in sources:
         size = image_size(dmg)
         layout.append((name, cursor, size))
         cursor += (size + MIB - 1) // MIB * MIB
+    objects = []
+    for spec_text in getattr(ctx.args, 'object', None) or []:
+        name, sep, rest = spec_text.partition('=')
+        file_text, _, skip_text = rest.partition(':')
+        path = Path(file_text).expanduser()
+        if not sep or not name or len(name.encode()) > 31 or not path.is_file():
+            raise Error(f'--object {spec_text}: expected NAME=FILE[:OFFSET] with an existing file and a name under 32 bytes')
+        skip = int(skip_text, 0) if skip_text else 0
+        size = path.stat().st_size - skip
+        if skip < 0 or size <= 0:
+            raise Error(f'--object {spec_text}: offset outside the file')
+        objects.append((name, cursor, size, path, skip))
+        cursor += (size + MIB - 1) // MIB * MIB
+    if len(layout) + len(objects) > 8 or len(layout) > 4 or len(objects) > 4:
+        raise Error('the root manifest holds at most 4 windows and 4 data objects')
     total = cursor
     log(f'userdata: image {total} bytes ({total / 2**30:.2f} GiB) in a partition of {capacity} bytes')
     if total > capacity:
@@ -121,16 +154,29 @@ def build(ctx, dry_run=False):
                 raise Error(f'{dmg.name}: {done} bytes of raw disk, expected {size}')
             entries.append((name, offset, size, digest.digest()))
             log(f'userdata: {name} {size} bytes at {offset:#x} sha256 {digest.hexdigest()}')
+        object_entries = []
+        for name, offset, size, path, skip in objects:
+            with path.open('rb') as handle:
+                handle.seek(skip)
+                data = handle.read(size)
+            if len(data) != size:
+                raise Error(f'{path}: short read for object {name}')
+            target.seek(offset)
+            target.write(data)
+            object_entries.append((name, offset, size, hashlib.sha256(data).digest()))
+            log(f'userdata: object {name} {size} bytes at {offset:#x} from {path.name}')
         header = bytearray(4096)
         header[0:8] = b'SHNGROOT'
-        struct.pack_into('<IIQ', header, 8, 1, len(entries), total)
-        for index, (name, offset, size, digest) in enumerate(entries):
-            struct.pack_into('<32sQQII32s40s', header, 24 + 128 * index, name.encode(), offset, size, 512, 1, digest, bytes(40))
+        struct.pack_into('<IIQ', header, 8, 2 if object_entries else 1, len(entries) + len(object_entries), total)
+        rows = [(e, 512, 1) for e in entries] + [(e, 4096, 3) for e in object_entries]
+        for index, ((name, offset, size, digest), block, flags) in enumerate(rows):
+            struct.pack_into('<32sQQII32s40s', header, 24 + 128 * index, name.encode(), offset, size, block, flags, digest, bytes(40))
         header[4064:4096] = hashlib.sha256(bytes(header[:4064])).digest()
         target.seek(0)
         target.write(header)
     data = {'image_bytes': total, 'image_sha256': sha256_file(image), 'manifest_sha256': hashlib.sha256(bytes(header)).hexdigest(),
             'windows': [{'name': n, 'offset': o, 'size': s, 'sha256': d.hex()} for n, o, s, d in entries],
+            'objects': [{'name': n, 'offset': o, 'size': s, 'sha256': d.hex()} for n, o, s, d in object_entries],
             'userdata_bytes': capacity, 'flash_command': f'fastboot flash userdata {image}',
             'source': 'remote' if source.remote else 'local', 'hardware_tested': False}
     report.write_text(json.dumps(data, indent=2) + '\n')

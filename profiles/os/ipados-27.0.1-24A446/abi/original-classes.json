@@ -1,0 +1,56 @@
+{
+  "kernelcache_sha256": "38e6d9fa5f789b8228f4617ef4c6d2a3fd8ab564abdc9b62920f1db53fc1780a",
+  "addresses": "original kernelcache VAs; add the prelink collection slide for the linked kernel",
+  "classes": {
+    "IOMobileFramebufferLegacy": {
+      "bundle": "com.apple.iokit.IOMobileGraphicsFamily",
+      "size": "0x1dd8",
+      "vtable": "0xfffffe0008368e48",
+      "slots": 379,
+      "base_slots": 168,
+      "meta_class": "0xfffffe000bb494d0",
+      "constructor": "0xfffffe000a288c74",
+      "destructor": "0xfffffe000a288cac",
+      "pure_virtual": "0xfffffe000b5a7f7c",
+      "slot": {
+        "isMainDisplay": 186, "getDotPitch": 190, "supportedFrameInfo": 216, "getDisplayDimensions": 261,
+        "startHardware": 305, "kickSwapQueue": 307, "completeCurrentSwap": 312, "validateSwap": 313,
+        "getRefreshAttributes": 319, "collectCompletionReports": 358
+      },
+      "pure_slots": [214, 216, 257, 258, 324, 325, 358, 359, 366],
+      "field": {
+        "current_swap": "0x1a40", "pending_head": "0x1a48", "pending_tail": "0x1a50", "vsync_clients": "0x1ab8",
+        "display_width": "0x1bf0", "display_height": "0x1bf4"
+      },
+      "function": {
+        "vsync_notify": "0xfffffe000a292ad4",
+        "set_refresh_properties": "0xfffffe000a296ca8"
+      }
+    },
+    "IOMFBSwapIORequest": {
+      "field": {
+        "source_rects": "0x11", "destination_rects": "0x51", "layers_updated": "0x3d8", "layers_disabled": "0x3dc",
+        "background": "0x3e0", "options": "0x3e4", "destination_width": "0x3f0", "destination_height": "0x3f4",
+        "surfaces": "0xb80", "queue_next": "0xd38", "queue_previous": "0xd40", "request_id": "0x3d4"
+      }
+    },
+    "IOSurface": {
+      "bundle": "com.apple.iokit.IOSurface",
+      "function": {
+        "descriptor": "0xfffffe000a4330a4", "width": "0xfffffe000a4331a8", "height": "0xfffffe000a4331b4",
+        "stride": "0xfffffe000a4331cc", "allocation": "0xfffffe000a42ffe8", "format": "0xfffffe000a433190",
+        "planes": "0xfffffe000a4331fc"
+      }
+    },
+    "IOHIDDevice": {
+      "bundle": "com.apple.iokit.IOHIDFamily",
+      "size": "0xd0",
+      "vtable": "0xfffffe00083494f8",
+      "slots": 207,
+      "base_slots": 168,
+      "meta_class": "0xfffffe000bb40ff8",
+      "constructor": "0xfffffe000a1b5574",
+      "destructor": "0xfffffe000a1b55ac"
+    }
+  }
+}

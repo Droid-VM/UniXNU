@@ -272,10 +272,10 @@ index dd27052..c229871 100644
  VkResult tu_knl_drm_msm_load(struct tu_instance *instance,
 diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
 new file mode 100644
-index 0000000..5d629cc
+index 0000000..0209408
 --- /dev/null
 +++ b/src/freedreno/vulkan/tu_knl_darwin.cc
-@@ -0,0 +1,1570 @@
+@@ -0,0 +1,1609 @@
 +/*
 + * Native Darwin kernel backend for Turnip: talks to the NativeAdreno IOKit user client (NativeAdrenoABI.h, version 1).
 + * Modelled on tu_knl_kgsl.cc (no libdrm) and tu_knl_drm_msm.cc (the client chooses GPU addresses).
@@ -354,7 +354,7 @@ index 0000000..5d629cc
 + * cannot be had (then the allocation is tried again). */
 +static volatile uint32_t darwin_memory_pressure;   /* bumped by the memory-pressure source; each device flushes once per change */
 +struct darwin_cached_bo {
-+   uint64_t handle, iova, size, stamp;
++   uint64_t handle, iova, size, stamp, freed_s;   /* freed_s: monotonic seconds when it entered the cache */
 +   void *mapping;
 +   uint32_t token;
 +   bool read_only;
@@ -386,7 +386,7 @@ index 0000000..5d629cc
 +   uint64_t enqueued, reaped, pressure_waits;
 +   struct darwin_cached_bo *cache;
 +   unsigned cache_count, cache_capacity;
-+   uint64_t cache_bytes, cache_stamp;
++   uint64_t cache_bytes, cache_stamp, cache_cleaned_s;
 +   uint32_t pressure_seen;
 +   struct darwin_bo_cache_stats cache_stats;
 +   struct darwin_va va;
@@ -844,8 +844,8 @@ index 0000000..5d629cc
 +      retire->cache = cache;
 +      retire->cache_capacity = capacity;
 +   }
-+   retire->cache[retire->cache_count++] = {bo->handle, bo->iova, bo->size, ++retire->cache_stamp, bo->mapping, bo->token,
-+                                           bo->read_only};
++   retire->cache[retire->cache_count++] = {bo->handle, bo->iova, bo->size, ++retire->cache_stamp,
++                                           (uint64_t)(os_time_get_nano() / 1000000000), bo->mapping, bo->token, bo->read_only};
 +   retire->cache_bytes += bo->size;
 +   if (retire->cache_bytes > retire->cache_stats.bytes_peak)
 +      retire->cache_stats.bytes_peak = retire->cache_bytes;
@@ -890,15 +890,26 @@ index 0000000..5d629cc
 +   return any;
 +}
 +
-+/* Called under retire->lock: once per memory-pressure notification the whole cache goes back. */
++/* Called under retire->lock: once per memory-pressure notification the whole cache goes back, and otherwise every BO not reused
++ * within a second of entering it, as freedreno's own BO cache keeps a freed BO (freedreno_bo_cache.c, fd_bo_cache_cleanup: "keep things
++ * in cache for at least 1 second", at most once a second). Without the second rule the cache held every BO the render server ever freed
++ * once the kernel stopped refusing allocations (untagged-7c2c611f: backboardd held 3099 MiB, the system's memory ran out). */
 +static void
 +darwin_cache_trim(struct tu_device *dev, struct darwin_retire_state *retire)
 +{
 +   const uint32_t pressure = p_atomic_read(&darwin_memory_pressure);
-+   if (pressure == retire->pressure_seen)
++   if (pressure != retire->pressure_seen) {
++      retire->pressure_seen = pressure;
++      darwin_cache_flush(dev, retire);
 +      return;
-+   retire->pressure_seen = pressure;
-+   darwin_cache_flush(dev, retire);
++   }
++   const uint64_t now = (uint64_t)(os_time_get_nano() / 1000000000);
++   if (now == retire->cache_cleaned_s)
++      return;
++   retire->cache_cleaned_s = now;
++   for (unsigned i = retire->cache_count; i-- > 0;)
++      if (now - retire->cache[i].freed_s > 1)
++         darwin_cache_evict(dev, retire, i);
 +}
 +
 +/* The process's memory-pressure source, made once: libdispatch delivers the kernel's memorystatus levels to it. */
@@ -986,12 +997,13 @@ index 0000000..5d629cc
 +
 +static VkResult
 +darwin_map_failure(struct tu_device *dev, uint64_t handle, uint64_t iova,
-+                   uint64_t size, kern_return_t map_error)
++                   uint64_t size, kern_return_t map_error, bool own_iova = true)
 +{
 +   NativeAdrenoAbiBoFree release = {.handle = handle};
 +   kern_return_t cleanup = dw_call(NativeAdrenoMethodBoFree, &release, sizeof(release), NULL, 0);
 +   if (cleanup == KERN_SUCCESS) {
-+      darwin_free_iova(dev, iova, size);
++      if (own_iova)   /* a lazy BO's range is its sparse VMA's, which frees it */
++         darwin_free_iova(dev, iova, size);
 +      return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY, "BoMap failed: 0x%x", map_error);
 +   }
 +   /* A failed map may have modified tables. Unknown cleanup never authorizes
@@ -1014,9 +1026,6 @@ index 0000000..5d629cc
 +               const char *name)
 +{
 +   MESA_TRACE_FUNC();
-+   if (lazy_vma)
-+      return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
-+
 +   VkResult collected = darwin_collect_retired(dev);
 +   if (collected != VK_SUCCESS)
 +      return collected;
@@ -1024,7 +1033,8 @@ index 0000000..5d629cc
 +   struct darwin_retire_state *retire = (struct darwin_retire_state *)dev->darwin_retire;
 +   /* TU_DARWIN_BO_CACHE=0 turns the cache off (the host checks of the release paths need every free to reach the kernel). */
 +   static const bool cache_enabled = debug_get_bool_option("TU_DARWIN_BO_CACHE", true);
-+   const bool cacheable = cache_enabled && !(flags & TU_BO_ALLOC_REPLAYABLE);
++   /* A lazy BO lies at its sparse VMA's range (darwin_sparse_vma_init) and goes back with that range, never to the cache. */
++   const bool cacheable = cache_enabled && !(flags & TU_BO_ALLOC_REPLAYABLE) && !lazy_vma;
 +   const bool read_only = !!(flags & TU_BO_ALLOC_GPU_READ_ONLY);
 +   uint64_t alloc_size = cacheable ? darwin_size_class(size) : size;
 +
@@ -1050,7 +1060,11 @@ index 0000000..5d629cc
 +   }
 +
 +   for (bool flushed = false; !reused;) {
-+      VkResult result = darwin_allocate_iova(dev, alloc_size, client_iova, flags, &iova);
++      VkResult result = VK_SUCCESS;
++      if (lazy_vma)
++         iova = lazy_vma->msm.iova;
++      else
++         result = darwin_allocate_iova(dev, alloc_size, client_iova, flags, &iova);
 +      if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !flushed) {
 +         flushed = true;
 +         pthread_mutex_lock(&retire->lock);
@@ -1066,8 +1080,9 @@ index 0000000..5d629cc
 +      NativeAdrenoAbiBoAllocReply reply = {};
 +      kern_return_t kr = dw_call(NativeAdrenoMethodBoAlloc, &alloc, sizeof(alloc), &reply, sizeof(reply));
 +      if (kr != KERN_SUCCESS) {
-+         darwin_free_iova(dev, iova, alloc_size);
-+         if (!flushed) {   /* the kernel pool may be held by cached BOs */
++         if (!lazy_vma)
++            darwin_free_iova(dev, iova, alloc_size);
++         if (!flushed) {   /* memory may be held by cached BOs */
 +            flushed = true;
 +            pthread_mutex_lock(&retire->lock);
 +            bool any = darwin_cache_flush(dev, retire);
@@ -1088,7 +1103,7 @@ index 0000000..5d629cc
 +      NativeAdrenoAbiBoMapReply mapped = {};
 +      kr = dw_call(NativeAdrenoMethodBoMap, &map, sizeof(map), &mapped, sizeof(mapped));
 +      if (kr != KERN_SUCCESS) {
-+         return darwin_map_failure(dev, reply.handle, iova, alloc_size, kr);
++         return darwin_map_failure(dev, reply.handle, iova, alloc_size, kr, !lazy_vma);
 +      }
 +      handle = reply.handle;
 +      break;
@@ -1117,6 +1132,10 @@ index 0000000..5d629cc
 +      bo->map = cached_mapping;
 +      bo->darwin_token = cached_token;
 +      bo->never_unmap = true;
++   }
++   if (lazy_vma) {
++      lazy_vma->msm.backs_lazy_bo = true;   /* the range now goes back with the BO */
++      bo->lazy = true;
 +   }
 +
 +   tu_dump_bo_init(dev, bo);
@@ -1722,17 +1741,37 @@ index 0000000..5d629cc
 +   return VK_SUCCESS;
 +}
 +
++/* Lazily allocated memory (VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT), as the msm backend gives it with a settable GPU address
++ * (msm_sparse_vma_init, msm_bo_init): the memory is a GPU range alone until a pass needs its bytes (tu_allocate_transient_attachments: a
++ * sysmem pass, a load or store, LRZ), when a BO is made at that range. A transient attachment a GMEM pass neither loads nor stores never
++ * gets one: Metal's memoryless textures, which Core Animation's render server uses for its intermediate targets, take no memory, as on
++ * Apple's GPUs (untagged-feaf29203: twelve 3048x2032 RGBA16F textures, 758 MiB, held as memory of their own without it). A BO made at
++ * the range owns it from then on and hands it back with itself, after its last submission (darwin_release_native); otherwise the VMA
++ * hands it back. */
 +static VkResult
 +darwin_sparse_vma_init(struct tu_device *dev, struct vk_object_base *base,
 +                       struct tu_sparse_vma *out_vma, uint64_t *out_iova,
 +                       enum tu_sparse_vma_flags flags, uint64_t size, uint64_t client_iova)
 +{
-+   return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
++   if (flags & TU_SPARSE_VMA_MAP_ZERO)
++      return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);   /* no null mapping: sparse residency is not offered */
++   out_vma->flags = flags;
++   out_vma->msm.size = size;
++   out_vma->msm.backs_lazy_bo = false;
++   VkResult result = darwin_allocate_iova(dev, size, client_iova,
++                                          (flags & TU_SPARSE_VMA_REPLAYABLE) ? TU_BO_ALLOC_REPLAYABLE : TU_BO_ALLOC_NO_FLAGS,
++                                          &out_vma->msm.iova);
++   if (result != VK_SUCCESS)
++      return result;
++   *out_iova = out_vma->msm.iova;
++   return VK_SUCCESS;
 +}
 +
 +static void
 +darwin_sparse_vma_finish(struct tu_device *dev, struct tu_sparse_vma *vma)
 +{
++   if (!vma->msm.backs_lazy_bo)
++      darwin_free_iova(dev, vma->msm.iova, vma->msm.size);
 +}
 +
 +static const struct tu_knl darwin_knl_funcs = {
@@ -1808,7 +1847,7 @@ index 0000000..5d629cc
 +   device->has_set_iova = !!(info->flags & NativeAdrenoDeviceClientIova);
 +   device->va_start = info->va_start;
 +   device->va_size = info->va_size;
-+   device->has_lazy_bos = false;
++   device->has_lazy_bos = true;   /* darwin_sparse_vma_init */
 +   device->has_sparse = false;
 +   device->has_sparse_prr = false;
 +   device->has_raytracing = false;

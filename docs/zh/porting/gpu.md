@@ -69,14 +69,14 @@ sheng 配方把这些 kit、ArmSmmu4K 和板级投票链接到 `libAdreno740.a`�
 
 | 操作 | 规则 |
 | --- | --- |
-| 对象查找 | 每个客户端最多 16384 个对象，通过 handle 索引查找。 |
-| 分配 | BO 来自板级预留的连续 write-combined 池（sheng 为 1 GiB），池满时使用分散页。 |
+| 对象查找 | 客户端的对象数只受内存限制，通过 handle 索引查找。 |
+| 分配 | BO 来自系统内存：不带 task、缓存模式为 write-combined 的可分页 `IOBufferMemoryDescriptor`，由 `prepare()` 锁定。VM 一次批量设置页属性，释放时恢复；客户端视图映射该描述符。只有要求连续内存的调用方才走连续的内核分配。 |
 | 映射自有内存 | `ArmSmmu4KLiveMapContextBatchExclusive`：不与已有区间做别名检查。 |
-| 映射导入内存 | 已映射的导入都属同一缓存类别，且其页不与池或自有映射重叠时，使用同一调用；否则使用完整检查的批量映射。 |
+| 映射导入内存 | 已映射的导入都属同一缓存类别，且其页都不在本驱动的 BO 中（覆盖 DRAM 的页位图）时，使用同一调用；否则使用完整检查的批量映射。 |
 | 解除映射 | 不超过 512 页时每页一次 TLBIVAL，更多时按 ASID 失效。 |
 | 提交 | 不做 TLB 失效。映射只填写无效叶子，解除映射会失效自己的页，上层页表不变。fence 卡住时仍会失效。 |
 
-启动日志的 `[vm map]`、`[vm unmap]`、`[vm kinds]` 和 `[bo pool]` 行给出每种操作的
+启动日志的 `[vm map]`、`[vm unmap]`、`[vm kinds]` 和 `[bo memory]` 行给出每种操作的
 次数和耗时。修改前后对比这些行。
 
 使用 `NativeAdrenoClient` 接口时，按以下顺序实现一次有界提交：

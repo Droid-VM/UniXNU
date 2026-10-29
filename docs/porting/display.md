@@ -63,6 +63,14 @@ the corresponding error path on timeout or failure.
 **Expected result:** XNU publishes the display, presents frames and completes
 swaps. Record requested refresh and measured frame timing separately.
 
+The 24A446 adapter supplies the default surface through the original IOSurfaceRoot
+factory and validates its backing memory and geometry before transferring ownership
+to the display family. The family's `create_default_fb_surface()` slot returns void;
+its residual return register is not an object pointer. A captured 300-second boot
+completed three swaps without a kernel panic and displayed the Apple logo.
+Home-screen startup remains unverified; capture the display-server and SpringBoard
+wait chains before treating a stationary logo as a framebuffer transfer failure.
+
 ### Read the display pipes {#dpu-pipes}
 
 Before changing what the display fetches, read how firmware left it.

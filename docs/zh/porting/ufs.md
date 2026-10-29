@@ -94,10 +94,6 @@ PHY、复位、时钟和电源序列。
 first_lba = 3094592
 last_lba = 64007162
 lba_bytes = 4096
-windows = [
-  { name = "OS", component = "OS" },
-  { name = "SystemOS", component = "Cryptex1,SystemOS" },
-]
 
 [payload.adt]
 root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
@@ -134,3 +130,5 @@ python3 scripts/porting-record.py check --device ../UniXNU-sheng
 ## 下一步
 
 根卷路径就绪后[适配显示与亮度](/zh/porting/display)，其他子系统见[驱动清单](/zh/porting/drivers)。
+
+iPadOS 26 的源码构建方法及当前链接、运行时限制见[公开源码驱动构建](/zh/porting/migration#source-drivers)。历史 iOS 17 真机结果不代表该路径已通过验证。

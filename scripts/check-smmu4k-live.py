@@ -45,11 +45,13 @@ counts = re.search(r'(\d+) native4K lower/upper mapping profiles, (\d+) I/O/cach
 if not counts or int(counts[1]) != 3264:
     raise SystemExit('Expected independent profile coverage absent')
 pairs = re.search(r'(\d+) dual-region native4K profiles and (\d+) dual-region failure/alias/isolation controls', host.stdout)
-if not pairs or tuple(map(int,pairs.groups())) != (1632,339):
+if not pairs or tuple(map(int,pairs.groups())) != (1632,342):
     raise SystemExit('Expected dual-region coverage absent')
 batches = re.search(r'(\d+) batched scattered-page map/unmap transactions', host.stdout)
-if not batches or int(batches[1]) != 174:
+if not batches or int(batches[1]) != 185:
     raise SystemExit('Expected batched update coverage absent')
+if not re.search(r'PASS: 6 on-demand table controls', host.stdout):
+    raise SystemExit('Expected on-demand table coverage absent')
 alias_test = out / 'test-alias'
 subprocess.run(['xcrun', 'clang', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
                 '-DARM_SMMU4K_TEST_COVERAGE', '-fsanitize-coverage=trace-pc-guard',

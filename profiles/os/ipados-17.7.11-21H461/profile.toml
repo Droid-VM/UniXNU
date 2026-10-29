@@ -102,3 +102,7 @@
 
 ["adt"."defaults"."u32"]
 "kern.maxvnodes" = 66560
+
+[userdata]
+# Disk images of this OS, in window order; the device sets the partition geometry.
+windows = [{ name = "OS", component = "OS" }, { name = "SystemOS", component = "Cryptex1,SystemOS", optional = true }]

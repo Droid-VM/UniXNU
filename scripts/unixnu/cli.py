@@ -26,6 +26,7 @@ def common():
     p.add_argument('--uefi', metavar='DIR', help='Mu-Silicium checkout for the device (uefi-sheng); or UNIXNU_UEFI')
     p.add_argument('--edk2', metavar='DIR', help='Mu_Basecore checkout; or UNIXNU_EDK2')
     p.add_argument('--kernelcache', metavar='FILE', help='original decompressed kernelcache; or UNIXNU_KERNELCACHE')
+    p.add_argument('--skip-prelink', action='store_true', help='kernel/prelink: copy the built native kernel to kernel.macho without adding kernelcache kexts')
     p.add_argument('--skip-preflight', action='store_true', help='skip the board preflight scripts of the firmware step')
     p.add_argument('--kernel', metavar='FILE', help='prelinked kernel Mach-O for the payload (default: the kernel step output)')
     p.add_argument('--kernel-arg', action='append', metavar='NAME[=VALUE]', help='extra kernel boot argument (repeatable)')
@@ -37,6 +38,9 @@ def common():
     p.add_argument('--unique-chip-id', metavar='HEX', help='platform seed for the device tree; or UNIXNU_UNIQUE_CHIP_ID')
     p.add_argument('--ipsw', metavar='PATH_OR_URL', help='the target IPSW: a local file or an https URL (default: url of board.toml [ipsw]); or UNIXNU_IPSW')
     p.add_argument('--dry-run', action='store_true', help='userdata: check sizes and pins, write nothing')
+    p.add_argument('--object', action='append', default=[], metavar='NAME=FILE[:OFFSET]',
+                   help='userdata: add a data object the kernel reads itself (policy table, firmware), '
+                        'the bytes of FILE from OFFSET on (repeatable)')
     p.add_argument('--target', choices=('DEBUG', 'RELEASE'), help='EDK II build target')
     return p
 

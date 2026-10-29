@@ -50,6 +50,11 @@ GPU 交接使用 `NGPSwap.sequence` 跟踪待处理帧，复制完成后用相�
 
 **预期结果：** XNU 发布显示服务、呈现画面并完成交换。分别记录请求刷新率和测得的帧时序。
 
+24A446 适配通过原版 IOSurfaceRoot 工厂创建默认 surface，核对内存和尺寸后将引用交给显示框架。
+框架的 `create_default_fb_surface()` 槽返回 void，返回寄存器中的残值不是对象指针。
+一次 300 秒启动记录中，三次交换均完成，没有内核 panic，屏幕显示苹果标志。
+桌面启动尚未通过验证；应先抓取显示服务和 SpringBoard 的等待链，再判断静止标志是否由帧传输故障造成。
+
 ### 读取显示管线 {#dpu-pipes}
 
 修改显示控制器的取图来源前，先读取固件留下的状态。sheng 上由 `DisplayTimingProbe.cpp` 完成：

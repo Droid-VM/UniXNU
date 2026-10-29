@@ -2,8 +2,9 @@
 """Compile XNU's minimal executable-root filesystem for offline tests."""
 import json
 from pathlib import Path
-import struct
 import subprocess
+
+from kernel_target import check_object
 
 ROOT = Path(__file__).resolve().parents[1]
 recipe = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/vfs_conf.o.json'
@@ -34,18 +35,7 @@ for name in ('mockfs_fsnode', 'mockfs_vfsops', 'mockfs_vnops'):
     (out / (name + '.log')).write_text(result.stdout + result.stderr)
     if result.returncode:
         raise SystemExit(result.stderr[-4500:])
-    data = destination.read_bytes()
-    if struct.unpack_from('<4I', data) != (0xfeedfacf, 0x100000c, 0, 1):
-        raise SystemExit('Mockfs requires ordinary ARM64 output')
-    offset = 32
-    deployment = None
-    for _ in range(struct.unpack_from('<I', data, 16)[0]):
-        cmd, length = struct.unpack_from('<II', data, offset)
-        if cmd == 0x32:
-            deployment = struct.unpack_from('<II', data, offset + 8)
-        offset += length
-    if deployment != (2, 0x110000):
-        raise SystemExit(f'Unexpected mockfs deployment: {deployment}')
+    check_object(destination.read_bytes(), destination.name)
     objects.append(destination)
 archive = out / 'libmockfs_fixture.a'
 archive.unlink(missing_ok=True)

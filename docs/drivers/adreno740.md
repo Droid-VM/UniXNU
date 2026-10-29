@@ -75,12 +75,12 @@ The GPU path covers discovery, command encoding, pipeline archives, IOSurface im
 
 | Item | Behavior |
 | --- | --- |
-| Objects per client | Up to 16384, found through a handle index |
-| Owned BOs | From the board's contiguous pool (1 GiB on sheng), else scattered pages. Mapped without the alias check against existing ranges |
-| Imported memory | Mapped without that check when every mapped import shares its cache class and it overlaps neither the pool nor an owned mapping; otherwise fully checked |
+| Objects per client | Limited by memory, found through a handle index |
+| Owned BOs | System memory, as Metal resources: pageable memory with no kernel mapping, wired by `prepare()`. The VM zero-fills the pages and sets the write-combined attribute in one batch, and restores it on free. Client views map the BO's own descriptor. No fixed pool. Mapped without the alias check against existing ranges |
+| Imported memory | Mapped without that check when every mapped import shares its cache class and none of its pages is in a BO of this driver (a page bitmap over DRAM); otherwise fully checked |
 | Unmap | Up to 512 pages invalidated one by one, larger unmaps by ASID |
 | Submission | No TLB invalidation; a stalled fence still invalidates |
-| Boot log rows | `[vm map]`, `[vm unmap]`, `[vm kinds]`, `[bo pool]` |
+| Boot log rows | `[vm map]`, `[vm unmap]`, `[vm kinds]`, `[bo memory]` |
 
 ## Shader compilation
 

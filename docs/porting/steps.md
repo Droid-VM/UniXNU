@@ -43,6 +43,8 @@ or create a shared repository. Check resources, platform operations and componen
 dependencies, then pin the source in the device configuration.
 A new OS profile needs the [XNU and patch inputs](/xnu/source-and-patches) and
 [prelink ABI work](/concepts/prelink) before hardware drivers can be qualified.
+An arm64e OS such as iPadOS 26 applies only to supported devices; see
+[arm64e OS profiles](/porting/arm64e).
 
 **Result:** selected repositories and exact source revisions, with unresolved
 hardware or ABI work recorded.

@@ -26,7 +26,10 @@ def kernel_names(root, global_only=True):
     filelist = root / OBJ / 'link.filelist'
     if not filelist.is_file():
         raise SystemExit('No XNU symbol names: run a kernel pass first (it writes link.filelist)')
-    names = defined_names([line.strip() for line in filelist.read_text().splitlines() if line.strip()], global_only)
+    # A pass whose compile failed leaves its filelist naming objects it did not produce; the next pass rebuilds them and its
+    # link sees them, so only the objects that exist are read here.
+    objects = [line.strip() for line in filelist.read_text().splitlines() if line.strip()]
+    names = defined_names([path for path in objects if Path(path).is_file()], global_only)
     # The link also exports aliases (all-alias.exp: "_real _alias") that no object defines under that name.
     aliases = root / OBJ / 'all-alias.exp'
     if aliases.is_file():

@@ -1,0 +1,127 @@
+diff --git a/osfmk/prng/prng_random.c b/osfmk/prng/prng_random.c
+index 504b3fa..310719a 100644
+--- a/osfmk/prng/prng_random.c
++++ b/osfmk/prng/prng_random.c
+@@ -502,3 +502,122 @@ random_bool_gen_bits(struct bool_gen * bg, unsigned int * buffer, unsigned int c
+ 	}
+ 	return rbits;
+ }
++
++/* Internal source-provider verification; no replacement callbacks or skipped POST. */
++#if defined(XNU_SOURCE_CORECRYPTO14)
++#include <kern/startup.h>
++#include <mach/kmod.h>
++#include <mach-o/loader.h>
++
++extern struct mach_header_64 _mh_execute_header;
++extern kern_return_t corecrypto_kext_start(kmod_info_t *, void *);
++SECURITY_READ_ONLY_LATE(kern_return_t) source_corecrypto14_status = KERN_FAILURE;
++
++/*
++ * A boot kernel collection that carries the original corecrypto makes it the only provider: it is
++ * started here, before anything needs crypto, and OSKext's later start of the same module returns
++ * this result. Registering two providers would leave the second one's PRNG context uninitialized.
++ */
++static SECURITY_READ_ONLY_LATE(kmod_info_t *) source_corecrypto14_original_kmod;
++static unsigned source_corecrypto14_original_state;
++
++kmod_info_t *source_corecrypto14_original(void);
++kern_return_t source_corecrypto14_start_once(kmod_info_t *module, void *data);
++
++kmod_info_t *
++source_corecrypto14_original(void)
++{
++	static const char identifier[] = "com.apple.kec.corecrypto";
++	static bool searched;
++	struct mach_header_64 *kc = (struct mach_header_64 *)PE_get_kc_header(KCKindPrimary);
++
++	if (searched || kc == NULL || kc->filetype != MH_FILESET) {
++		return source_corecrypto14_original_kmod;
++	}
++	searched = true;
++	struct load_command *lc = (struct load_command *)(kc + 1);
++	for (uint32_t i = 0; i < kc->ncmds; i++, lc = (struct load_command *)((uintptr_t)lc + lc->cmdsize)) {
++		struct fileset_entry_command *entry = (struct fileset_entry_command *)lc;
++		if (lc->cmd != LC_FILESET_ENTRY ||
++		    strcmp((const char *)entry + entry->entry_id.offset, identifier) != 0) {
++			continue;
++		}
++		/* The module has no symbols; its kmod_info is the one data record that names it. */
++		struct mach_header_64 *mh = (struct mach_header_64 *)entry->vmaddr;
++		struct load_command *sc = (struct load_command *)(mh + 1);
++		kmod_info_t *found = NULL;
++		for (uint32_t j = 0; j < mh->ncmds; j++, sc = (struct load_command *)((uintptr_t)sc + sc->cmdsize)) {
++			struct segment_command_64 *seg = (struct segment_command_64 *)sc;
++			if (sc->cmd != LC_SEGMENT_64 || !(seg->initprot & VM_PROT_WRITE) || seg->filesize < sizeof(kmod_info_t)) {
++				continue;
++			}
++			for (uintptr_t at = seg->vmaddr; at + sizeof(kmod_info_t) <= seg->vmaddr + seg->filesize; at += 4) {
++				kmod_info_t *candidate = (kmod_info_t *)at;
++				if (candidate->info_version == KMOD_INFO_VERSION &&
++				    strncmp(candidate->name, identifier, sizeof(candidate->name)) == 0) {
++					if (found != NULL) {
++						panic("original corecrypto: more than one kmod_info");
++					}
++					found = candidate;
++				}
++			}
++		}
++		if (found == NULL || found->start == NULL) {
++			panic("original corecrypto: no kmod_info in its boot collection entry");
++		}
++		source_corecrypto14_original_kmod = found;
++	}
++	return source_corecrypto14_original_kmod;
++}
++
++kern_return_t
++source_corecrypto14_start_once(kmod_info_t *module, void *data)
++{
++	unsigned expected = 0;
++
++	if (module == NULL || module != source_corecrypto14_original()) {
++		panic("original corecrypto: unexpected module %p", module);
++	}
++	if (!__atomic_compare_exchange_n(&source_corecrypto14_original_state, &expected, 1, false,
++	    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
++		if (expected == 1) {
++			panic("original corecrypto: recursive initialization");
++		}
++		return source_corecrypto14_status;
++	}
++	source_corecrypto14_status = module->start(module, data);
++	__atomic_store_n(&source_corecrypto14_original_state, source_corecrypto14_status == KERN_SUCCESS ? 2 : 3,
++	    __ATOMIC_RELEASE);
++	return source_corecrypto14_status;
++}
++
++static void
++source_corecrypto14_bootstrap(void)
++{
++	static kmod_info_t info = {
++		.info_version = KMOD_INFO_VERSION,
++		.name = "source-corecrypto14-evaluation",
++		.version = "14.0",
++	};
++	uint32_t mode = 0;
++
++	if (PE_parse_boot_argn("fips_mode", &mode, sizeof(mode)) && mode != 0) {
++		panic("source corecrypto verification requires complete default POST");
++	}
++	kmod_info_t *original = source_corecrypto14_original();
++	if (original != NULL) {
++		source_corecrypto14_status = source_corecrypto14_start_once(original, NULL);
++		if (source_corecrypto14_status != KERN_SUCCESS) {
++			panic("original corecrypto initialization failed: %d", source_corecrypto14_status);
++		}
++		return;
++	}
++	info.address = (vm_address_t)&_mh_execute_header;
++	source_corecrypto14_status = corecrypto_kext_start(&info, NULL);
++	if (source_corecrypto14_status != KERN_SUCCESS) {
++		panic("source corecrypto initialization failed: %d", source_corecrypto14_status);
++	}
++}
++/* PE_init_iokit hashes the platform UUID through the crypto KPIs before EARLY_BOOT runs. */
++STARTUP(SYSCTL, STARTUP_RANK_LAST, source_corecrypto14_bootstrap);
++#endif

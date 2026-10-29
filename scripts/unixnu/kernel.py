@@ -1,10 +1,16 @@
 """XNU kernel: build from the patched Apple source, then prelink against the original kernelcache."""
 import os
+import hashlib
+import json
 import platform
 import shlex
+import shutil
+import struct
+import tempfile
 from pathlib import Path
 
 from . import components, ipsw, patches
+from .config import load_toml
 from .util import Error, expand, log, run, sha256_file, tool
 
 
@@ -23,7 +29,7 @@ def xnu_env(ctx):
 def version_env(modules, ctx=None):
     """Source versions of the Apple references, from feeds.toml, for the kernel scripts."""
     env = {}
-    for name, prefix in (('xnu', 'XNU'), ('libplatform', 'LIBPLATFORM'), ('libdispatch', 'LIBDISPATCH'), ('AvailabilityVersions', 'AVAILABILITYVERSIONS')):
+    for name, prefix in (('xnu', 'XNU'), ('libplatform', 'LIBPLATFORM'), ('libdispatch', 'LIBDISPATCH'), ('AvailabilityVersions', 'AVAILABILITYVERSIONS'), ('libpthread', 'LIBPTHREAD'), ('IOStorageFamily', 'IOSTORAGEFAMILY')):
         module = modules.get(('refer', name))
         entry = module.source if module and module.source else {}
         if entry.get('ref'):
@@ -44,6 +50,22 @@ def version_env(modules, ctx=None):
                 env[variable] = profile[key]
         if profile.get('xnu_version'):
             env['UNIXNU_XNU_TAG'] = 'xnu-' + profile['xnu_version']
+        if profile.get('ios_version'):
+            env['UNIXNU_IOS_VERSION'] = profile['ios_version']
+        # The root images of the OS: volume UUIDs and image digests the kernel and the storage builder check.
+        root = ctx.board.get('root', {})
+        for key, variable in (('os_volume_uuid', 'XNU_OWNER_ROOT_VOLUME_UUID'),
+                              ('systemos_volume_uuid', 'XNU_OWNER_CACHE_VOLUME_UUID'),
+                              ('os_image_sha256', 'UNIXNU_ROOT_OS_SHA256'),
+                              ('systemos_image_sha256', 'UNIXNU_ROOT_SYSTEMOS_SHA256')):
+            if root.get(key):
+                env[variable] = root[key]
+        if root.get('os_volume_uuid'):
+            env['UNIXNU_ROOT_OS_UUID'] = root['os_volume_uuid']
+        if root.get('systemos_volume_uuid'):
+            env['UNIXNU_ROOT_SYSTEMOS_UUID'] = root['systemos_volume_uuid']
+        env['UNIXNU_IPSW_BUILD'] = ctx.board.get('ipsw', {}).get('build', '')
+        env['UNIXNU_XNU_ARCH'] = load_toml(ctx.profile_roots['arch'] / 'profile.toml').get('arch', {}).get('name', 'arm64')
     return env
 
 
@@ -180,8 +202,9 @@ def build(ctx, modules):
         except Error:
             if not record.is_file():
                 raise
-    storage = ctx.tree / 'build/storage-abi/include/IOKit/storage'
-    if (ctx.tree / 'refer/IOStorageFamily').is_dir() and not storage.is_dir():
+    # Revalidate the selected source and regenerate headers on every archive build.
+    # A pre-existing directory can belong to a different OS profile/revision.
+    if (ctx.tree / 'refer/IOStorageFamily').is_dir():
         log('kernel: prepare storage headers')
         run(['python3', ctx.tree / 'scripts/prepare-storage-headers.py'], cwd=ctx.tree, env=env,
             log_file=ctx.logs / 'storage-headers.log')
@@ -189,12 +212,42 @@ def build(ctx, modules):
     run(['bash', script], cwd=ctx.tree, env=env, log_file=ctx.logs / 'kernel.log')
 
 
+def stage_native(kernel, output):
+    """Stage the native executable unchanged for bring-up without prelinked kexts."""
+    data = kernel.read_bytes()
+    if len(data) < 32 or struct.unpack_from('<II', data) != (0xfeedfacf, 0x100000c) or struct.unpack_from('<I', data, 12)[0] != 2:
+        raise Error(f'{kernel} is not an ARM64 MH_EXECUTE native kernel')
+    digest = hashlib.sha256(data).hexdigest()
+    record = {'mode': 'native-only', 'format': 'MH_EXECUTE', 'native': str(kernel.resolve()),
+              'native_sha256': digest, 'candidate_sha256': digest, 'candidate_bytes': len(data),
+              'prelink_skipped': True, 'kernelcache_kexts_added': False, 'boot_verified': False}
+    output.parent.mkdir(parents=True, exist_ok=True)
+    for path, contents in ((output, data), (output.with_suffix('.json'), (json.dumps(record, indent=2) + '\n').encode())):
+        name = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.' + path.name + '.', delete=False) as stream:
+                name = stream.name
+                stream.write(contents)
+            os.replace(name, path)
+        finally:
+            if name and os.path.exists(name):
+                os.unlink(name)
+    log(f'kernel: native only {output} sha256 {digest}')
+    return output
+
+
 def prelink(ctx):
     """Produce out/<device>/kernel/kernel.macho from the XNU build and the original kernelcache."""
-    log('kernel: prelink')
     spec = ctx.board.get('kernel', {}).get('prelink')
     if not spec:
         raise Error('board.toml has no [kernel.prelink]')
+    kernel = ctx.tree / spec['kernel']
+    if not kernel.is_file():
+        raise Error(f'{kernel} not found; run "unixnu build kernel" first')
+    output = ctx.work / 'kernel/kernel.macho'
+    if getattr(ctx.args, 'skip_prelink', False):
+        return stage_native(kernel, output)
+    log('kernel: prelink')
     cache = ctx.option('kernelcache', 'UNIXNU_KERNELCACHE') or (expand(ctx.tree / spec['kernelcache']) if spec.get('kernelcache') else None)
     if not cache:
         # Not given: take it from the IPSW (--ipsw PATH_OR_URL, or the url of board.toml [ipsw]).
@@ -204,21 +257,41 @@ def prelink(ctx):
     wanted = spec.get('kernelcache_sha256')
     if wanted and sha256_file(cache) != wanted:
         raise Error(f'{cache} does not match the kernelcache this board was qualified against (sha256 {wanted})')
-    kernel = ctx.tree / spec['kernel']
-    if not kernel.is_file():
-        raise Error(f'{kernel} not found; run "unixnu build kernel" first')
-    output = ctx.work / 'kernel/kernel.macho'
     output.parent.mkdir(parents=True, exist_ok=True)
-    # emit_prelink refuses to overwrite; a rebuild replaces the previous candidate and its record.
-    for stale in (output, output.with_suffix('.json')):
-        stale.unlink(missing_ok=True)
     command = ['python3', ctx.tree / spec['tool'], '--kernel', kernel, '--prelinked', cache,
-               f'--slide={spec["slide"]}', '--output', output]
+               f'--slide={spec["slide"]}']
     for root in spec.get('roots', []):
         command += ['--root', root]
     if spec.get('early_security_init'):
         command += ['--early-security-init', spec['early_security_init']]
     command += spec.get('extra_args', [])
-    run(command, cwd=ctx.tree, log_file=ctx.logs / 'prelink.log')
+    # A failed rebuild must not remove the last candidate or its record.
+    with tempfile.TemporaryDirectory(dir=output.parent, prefix='.prelink-') as directory:
+        candidate = Path(directory) / output.name
+        saved_map = output.with_suffix('.map.json')
+        candidate_map = candidate.with_suffix('.map.json')
+        if saved_map.is_file():
+            shutil.copyfile(saved_map, candidate_map)
+        success = False
+        try:
+            run(command + ['--output', candidate], cwd=ctx.tree, log_file=ctx.logs / 'prelink.log')
+            if not candidate.is_file():
+                raise Error('prelink completed without writing a kernel candidate')
+            success = True
+        finally:
+            if candidate_map.is_file():
+                os.replace(candidate_map, saved_map)
+            record_path = candidate.with_suffix('.json')
+            if record_path.is_file():
+                record = json.loads(record_path.read_text())
+                record['output'] = str(output.resolve())
+                if record.get('map') == str(candidate_map.resolve()):
+                    record['map'] = str(saved_map.resolve())
+                record_path.write_text(json.dumps(record, indent=2) + '\n')
+                destination = output.with_suffix('.json' if success else '.failed.json')
+                os.replace(record_path, destination)
+                if not success:
+                    log(f'kernel: prelink failed; diagnostic record {destination}')
+        os.replace(candidate, output)
     log(f'kernel: {output} sha256 {sha256_file(output)}')
     return output

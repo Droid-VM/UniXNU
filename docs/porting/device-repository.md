@@ -211,13 +211,11 @@ fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustC
 first_lba = 0x0
 last_lba = 0x0
 lba_bytes = 4096
-windows = [
-  { name = "OS", component = "OS" },
-  { name = "SystemOS", component = "Cryptex1,SystemOS" },
-]
 ```
 
-`first_lba` and `last_lba` come from the GPT entry named `userdata`. `lba_bytes` is the logical block size. Each window names a disk image component from the IPSW.
+`first_lba` and `last_lba` come from the GPT entry named `userdata`. `lba_bytes` is the logical block size.
+
+The OS profile lists the IPSW disk images in `[userdata] windows`. A window with `optional = true` is skipped when the IPSW does not have it.
 
 ### Kernel
 

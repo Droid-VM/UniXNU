@@ -11,12 +11,12 @@ import json
 from pathlib import Path
 import platform
 import subprocess
-import struct
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import pbxproj
+from kernel_target import TRIPLE, check_object
 from xnu_symbols import kernel_names
 SOURCE = ROOT / 'refer/corecrypto-2023'
 REVISION = '11fba65b12d8830630e248dfa8344caf8b065f26'
@@ -74,7 +74,7 @@ for header in SOURCE.glob('*/corecrypto/*.h'):
         link.symlink_to(header)
 sdk = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
 framework = ROOT / '.cache/fakeroot/System/Library/Frameworks/Kernel.framework/Versions/A'
-command = ['xcrun', '--sdk', 'iphoneos', 'clang', '-target', 'arm64-apple-ios17.0', '-isysroot', sdk,
+command = ['xcrun', '--sdk', 'iphoneos', 'clang', '-target', TRIPLE, '-isysroot', sdk,
            '-mkernel', '-ffreestanding', '-fno-builtin', '-fno-stack-check', '-std=gnu99', '-fblocks', '-O2',
            '-fno-vectorize', '-fno-slp-vectorize', '-mno-implicit-float',
            '-DKERNEL=1', '-DKERNEL_PRIVATE=1', '-DBUILDKERNEL=1', '-DCC_USE_ASM=0', '-DNDEBUG=1',
@@ -114,7 +114,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
 failed = [result for result in results if result['exit_code']]
 report = {'source_url': 'https://github.com/ONLYA/corecrypto-2023', 'source_revision': REVISION,
           'provenance': 'Third-party source snapshot; not authenticated against an Apple archive',
-          'module_version': '14.0', 'target': 'arm64-apple-ios17.0', 'assembly_enabled': False,
+          'module_version': '14.0', 'target': TRIPLE, 'assembly_enabled': False,
           'compiled_sources': len(results), 'failures': len(failed), 'objects': results,
           'kernel_provider_registered': False, 'crypto_selftests_passed': False}
 (OUT / f'build-report{variant}.json').write_text(json.dumps(report, indent=2) + '\n')
@@ -124,19 +124,7 @@ for result in failed[:8]:
 if failed:
     sys.exit(1)
 for result in results:
-    data = (object_dir / result['object']).read_bytes()
-    magic, cpu, subtype, kind, count, size = struct.unpack_from('<6I', data)
-    if (magic, cpu, subtype, kind) != (0xfeedfacf, 0x100000c, 0, 1):
-        raise SystemExit(f'Wrong object architecture: {result["object"]}')
-    offset = 32
-    deployment = None
-    for _ in range(count):
-        cmd, length = struct.unpack_from('<II', data, offset)
-        if cmd == 0x32:
-            deployment = struct.unpack_from('<II', data, offset + 8)
-        offset += length
-    if deployment != (2, 0x110000):
-        raise SystemExit(f'Wrong deployment: {result["object"]}: {deployment}')
+    check_object((object_dir / result['object']).read_bytes(), result['object'])
 archive = OUT / f'libcorecrypto_kernel_noasm{variant}.a'
 archive.unlink(missing_ok=True)
 subprocess.run(['xcrun', 'ar', 'rcs', archive, *[object_dir / result['object'] for result in results]], check=True)

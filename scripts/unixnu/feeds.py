@@ -214,7 +214,18 @@ def update_submodules(ctx):
         if not (base / '.gitmodules').is_file():
             continue
         log(f'submodules {base}')
-        git(base, 'submodule', 'update', '--init', '--recursive')
+        # A submodule with modified tracked files is under local development; leave its checkout alone.
+        dirty = git(base, 'submodule', 'foreach', '--quiet',
+                    'git diff --quiet HEAD -- 2>/dev/null || echo "$sm_path"', capture=True).split()
+        for path in dirty:
+            log(f'submodules: {path} has local changes, not updated')
+        if not dirty:
+            git(base, 'submodule', 'update', '--init', '--recursive')
+            continue
+        paths = [line.split()[1] for line in git(base, 'submodule', 'status', capture=True).splitlines()
+                 if line.split()[1] not in dirty]
+        if paths:
+            git(base, 'submodule', 'update', '--init', '--recursive', '--', *paths)
 
 
 def _clone_dir(ctx, entry, revision=None):
