@@ -10,26 +10,44 @@ import plistlib
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / 'build/adreno-metal-plugin'
+# --target ios27: the arm64e build for iPadOS 27 (24A446), whose render server is an arm64e process.
+IOS27 = sys.argv[1:] == ['--target', 'ios27']
+OUT = ROOT / ('build/adreno-metal-plugin27' if IOS27 else 'build/adreno-metal-plugin')
 bundle = OUT / 'NativeAdrenoMetal.bundle'
 if OUT.exists():
     shutil.rmtree(OUT)
 bundle.mkdir(parents=True)
 sdk = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
-base = ['xcrun', 'clang', '-target', 'arm64-apple-ios17.0', '-isysroot', sdk, '-O2', '-g', '-Wall', '-Wextra', '-Werror',
+base = ['xcrun', 'clang', '-target', 'arm64e-apple-ios27.0' if IOS27 else 'arm64-apple-ios17.0', '-isysroot', sdk, '-O2', '-g', '-Wall', '-Wextra', '-Werror',
         '-fstack-protector-strong']
 VULKAN_INCLUDE = ROOT / '.cache/mesa-work/include'
-TURNIP = ROOT / 'build/mesa-tu-ios/src/freedreno/vulkan/libvulkan_freedreno.dylib'
+TURNIP = ROOT / ('build/mesa-tu-ios27' if IOS27 else 'build/mesa-tu-ios') / 'src/freedreno/vulkan/libvulkan_freedreno.dylib'
 if not TURNIP.is_file():
-    raise SystemExit('Build Turnip first: python3 scripts/build-turnip-darwin.py --target ios')
+    raise SystemExit('Build Turnip first: python3 scripts/build-turnip-darwin.py --target ' + ('ios27' if IOS27 else 'ios'))
 subprocess.run(['python3', ROOT / 'scripts/gen-turnip-smoke-shaders.py'], check=True)
 # Turnip's first submission, recorded on the host, for the plugin's prefix replay (build/turnip-smoke/TurnipReplay.h).
 subprocess.run(['python3', ROOT / 'scripts/gen-turnip-replay.py'], check=True)
-subprocess.run(['python3', ROOT / 'scripts/build-adreno-metal-bridge.py', '--target', 'ios'], check=True)
-BRIDGE = ROOT / 'build/adreno-metal-bridge/ios/libadreno_metal_bridge.a'
+BRIDGE_TARGET = 'ios27' if IOS27 else 'ios'
+subprocess.run(['python3', ROOT / 'scripts/build-adreno-metal-bridge.py', '--target', BRIDGE_TARGET], check=True)
+BRIDGE = ROOT / 'build/adreno-metal-bridge' / BRIDGE_TARGET / 'libadreno_metal_bridge.a'
+# arm64e: the Rust objects' imports that take a callback go through the signing wrappers of RustPacBoundary.c, and their indirect branches
+# are routed through its stripping trampolines after the link (scripts/rust-pac-rewrite.py).
+link_extra, PAC_RENAMES = [], {'_pthread_create': '_nmb_pac_pthread_create', '__tlv_atexit': '_nmb_pac_tlv_atexit',
+                               '_atexit': '_nmb_pac_atexit', '__dyld_register_func_for_add_image': '_nmb_pac_dyld_register_func_for_add_image',
+                               '__Unwind_Backtrace': '_nmb_pac_Unwind_Backtrace', '_dlsym': '_nmb_pac_dlsym'}
+if IOS27:
+    objcopy = next(p for p in ['/opt/homebrew/opt/llvm/bin/llvm-objcopy', shutil.which('llvm-objcopy') or ''] if p and Path(p).exists())
+    pac_bridge = OUT / 'libadreno_metal_bridge_pac.a'
+    subprocess.run([objcopy, *[f'--redefine-sym={a}={b}' for a, b in PAC_RENAMES.items()], BRIDGE, pac_bridge], check=True)
+    BRIDGE = pac_bridge
+    boundary = OUT / 'RustPacBoundary.o'
+    subprocess.run([*base, '-std=c11', '-I', VULKAN_INCLUDE, '-c', ROOT / 'drivers/AdrenoMetal/bridge/RustPacBoundary.c', '-o', boundary],
+                   check=True)
+    link_extra = [boundary, '-Wl,-map,' + str(OUT / 'NativeAdrenoMetal.map')]
 pm4 = OUT / 'AdrenoPM4.o'
 subprocess.run([*base, '-std=c11', '-c', ROOT / 'kits/AdrenoPM4/AdrenoPM4.c', '-o', pm4], check=True)
 exe = bundle / 'NativeAdrenoMetal'
@@ -316,7 +334,9 @@ for original, replacement in FRONTEND_REPLACED:
     if frontend.count(original) != 1:
         raise SystemExit(f'NativeBridgeMetalFrontend.mm no longer has exactly one {original.strip()[:80]!r}')
     frontend = frontend.replace(original, replacement)
-# - the plugin's clients list (NativeAdrenoMetal.clients, written from droidvm-gpu-clients) also takes a name ending in '*' for every
+# - the plugin's clients list (NativeAdrenoMetal.clients, written from droidvm-gpu-clients): upstream gives every process its own
+#   device, as Apple's plugin does; this board keeps the list, since every unsandboxed process would then open one (Maps' VectorKit
+#   lost its device within seconds and wedged the render server's frames until a reboot). The list takes a name ending in '*' for every
 #   process whose name begins with the rest: com.apple.WebKit.* gives WebKit's WebContent processes a device as well as its GPU process.
 #   CoreGraphics draws a layer's wide-color backing store ('b3a8' RGB10A8, 'w30r' RGB10) only through the GPU; without a device
 #   it draws nothing into one, and Safari's pages stayed black. The command line has no room to name each process. "*X*" names
@@ -325,7 +345,7 @@ for original, replacement in FRONTEND_REPLACED:
 #   zzw-native-adreno-sandbox-grant) matches the same three forms.
 # - a client that may write in neither shader-cache directory -- WebKit's GPU process, whose sandbox refuses both -- got no device
 #   ("no-cachedir"), so CoreGraphics drew the page's wide-color layers nowhere: it now opens one whose cache is never on disk (the
-#   runtime's METAL2VULKAN_SHADER_CACHE_OPTIONAL, patches/metal2vulkan/0006).
+#   runtime's METAL2VULKAN_SHADER_CACHE_OPTIONAL, now AdrenoMetal's bridge patch 0007).
 # - Turnip's flags: AdrenoMetal's default (TU_DEBUG=nocb: no concurrent binning, autotune choosing GMEM or system memory per pass)
 #   unless the first line of /private/var/ngpu/tu_debug, read by each process that may read it, names others. DroidVM once forced
 #   GMEM here: system-memory-only rendering (the earlier sysmem,nocb) left stale runs and garbled labels in composited layers once
@@ -338,13 +358,31 @@ PLUGIN_REPLACED = [
      '            fclose(flags);\n'
      '        }\n'
      '        setenv("TU_DEBUG", "nocb", 0);\n'),
-    ('// and GPU service processes).\n',
-     '// and GPU service processes; "*X*" names every process whose name holds X).\n'),
-    ('        if (nameLength && name[nameLength - 1] == \'*\' && !strncmp(name, self, nameLength - 1)) return true;\n',
+    ('static id clientDevice(unsigned port) {\n    char turnip[1024];\n',
+     '// Whether NativeAdrenoMetal.clients names this process (names separated by blanks, commas or new lines; "*" names every process; a\n'
+     '// name that ends in "*" names every process whose name starts with it, so "com.apple.WebKit.*" covers the WebContent, Networking\n'
+     '// and GPU service processes; "*X*" names every process whose name holds X).\n'
+     'static bool listedClient() {\n'
+     '    char path[1024];\n'
+     '    if (!requestedPath("NativeAdrenoMetal.clients", path, sizeof path)) return false;\n'
+     '    FILE *file = fopen(path, "r");\n'
+     '    if (!file) return false;\n'
+     '    char text[1024] = {};\n'
+     '    const size_t length = fread(text, 1, sizeof text - 1, file);\n'
+     '    fclose(file);\n'
+     '    text[length] = 0;\n'
+     '    const char *self = getprogname();\n'
+     '    for (char *save = nullptr, *name = strtok_r(text, " ,\\t\\r\\n", &save); name; name = strtok_r(nullptr, " ,\\t\\r\\n", &save)) {\n'
+     '        if (!strcmp(name, "*") || !strcmp(name, self)) return true;\n'
+     '        const size_t nameLength = strlen(name);\n'
      '        if (nameLength > 2 && name[0] == \'*\' && name[nameLength - 1] == \'*\') {\n'
      '            name[nameLength - 1] = 0;\n'
      '            if (strstr(self, name + 1)) return true;\n'
-     '        } else if (nameLength && name[nameLength - 1] == \'*\' && !strncmp(name, self, nameLength - 1)) return true;\n'),
+     '        } else if (nameLength && name[nameLength - 1] == \'*\' && !strncmp(name, self, nameLength - 1)) return true;\n'
+     '    }\n'
+     '    return false;\n'
+     '}\n'
+     'static id clientDevice(unsigned port) {\n    if (!listedClient()) return nil;\n    char turnip[1024];\n'),
     ('    if (!device) clientFailure(port, usable ? "no-device" : "no-cachedir", lastError);\n',
      '    if (!device && !usable) {\n'
      '        setenv("METAL2VULKAN_SHADER_CACHE_OPTIONAL", "1", 1);\n'
@@ -379,8 +417,11 @@ subprocess.run([*(['xcrun', 'clang++'] + base[2:]), '-std=c++17', '-fobjc-arc', 
                 '-I', ROOT / 'drivers/AdrenoMetal',
                 '-x', 'objective-c++', staged_plugin,
                 staged_frontend, '-x', 'none', pm4, BRIDGE,
-                '-Wl,-dead_strip', *prime_section, '-lobjc', '-framework', 'Foundation', '-framework', 'Metal', '-framework', 'IOSurface', '-o', exe],
+                *link_extra, '-Wl,-dead_strip', *prime_section, '-lobjc', '-framework', 'Foundation', '-framework', 'Metal', '-framework', 'IOSurface', '-o', exe],
                check=True)
+if IOS27:
+    subprocess.run(['python3', ROOT / 'scripts/rust-pac-rewrite.py', exe, OUT / 'NativeAdrenoMetal.map', 'libadreno_metal_bridge_pac.a'],
+                   check=True)
 subprocess.run(['strip', '-x', exe], check=True)
 # The linker writes the debug symbols of the Rust bridge next to the executable; keep them beside the bundle, not in the image.
 symbols = OUT / 'NativeAdrenoMetal.dSYM'
@@ -399,7 +440,7 @@ assert re.search(r'^Page size=4096$', turnip_detail, re.M)
 (bundle / 'Info.plist').write_bytes(plistlib.dumps(dict(
     CFBundleIdentifier='org.blu-sharky.NativeAdrenoMetal', CFBundleExecutable='NativeAdrenoMetal', CFBundlePackageType='BNDL',
     CFBundleVersion='1', CFBundleShortVersionString='1', NSPrincipalClass='NativeAdrenoMetalDevice',
-    MinimumOSVersion='17.0'), fmt=plistlib.FMT_XML))
+    MinimumOSVersion='27.0' if IOS27 else '17.0'), fmt=plistlib.FMT_XML))
 subprocess.run(['codesign', '--force', '--sign', '-', '--pagesize', '4096', '--identifier', 'org.blu-sharky.NativeAdrenoMetal',
                 bundle], check=True)
 subprocess.run(['codesign', '--verify', '--strict', bundle], check=True)
@@ -408,7 +449,7 @@ cdhash = re.search(r'^CDHash=([a-f0-9]{40})$', detail, re.M)[1]
 assert re.search(r'^Page size=4096$', detail, re.M), 'the signature must use 4 KiB pages'
 header = exe.read_bytes()[:16]
 magic, cputype, subtype = int.from_bytes(header[0:4], 'little'), int.from_bytes(header[4:8], 'little'), int.from_bytes(header[8:12], 'little')
-assert (magic, cputype, subtype & 0xffffff) == (0xfeedfacf, 0x100000c, 0), 'expected an ordinary ARM64 (subtype 0) Mach-O'
+assert (magic, cputype, subtype & 0xffffff) == (0xfeedfacf, 0x100000c, 2 if IOS27 else 0), 'expected an arm64e (27) or ARM64 (17) Mach-O'
 # The probe daemon (launchd starts it as an owner job). The original platform sandbox policy refuses IOServiceOpen for any user-client class
 # a process has not been granted (the same refusal an unentitled consumer got in the offline owner tests), so it carries exactly the grant that
 # worked there: com.apple.security.iokit-user-client-class naming the one class it opens, plus no-container.

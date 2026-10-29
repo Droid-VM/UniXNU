@@ -77,13 +77,15 @@ subprocess.run(['xcrun', 'clang++', '-std=c++23', '-O1', '-Wall', '-Wextra', '-W
 deferred_env = dict(env, TU_DARWIN_RETIRE_TRACE='1')
 deferred_env.pop('HOSTSIM_FAIL_USER_UNMAP', None)
 for mode in ['normal', 'busy', 'fence-error', 'free-error', 'lease-error', 'view-error', 'map-cleanup-error', 'pressure']:
-    test = subprocess.run([str(deferred), str(library), mode], env=deferred_env, capture_output=True, text=True, timeout=60)
+    # The release paths need every free to reach the kernel: only the normal mode runs with the BO cache on.
+    mode_env = dict(deferred_env, TU_DARWIN_BO_CACHE='1' if mode == 'normal' else '0')
+    test = subprocess.run([str(deferred), str(library), mode], env=mode_env, capture_output=True, text=True, timeout=60)
     (out / ('deferred-' + mode + '.log')).write_text(test.stdout + test.stderr)
     verdict = [line for line in test.stdout.splitlines() if line.startswith('PASS:')]
     if test.returncode or not verdict:
         sys.exit('Deferred BO %s failed (exit %d); see %s' % (mode, test.returncode, out / ('deferred-' + mode + '.log')))
-    if mode == 'pressure' and 'pressure=1' not in test.stderr:
-        sys.exit('Deferred BO pressure control did not reach its bounded queue limit')
+    if mode == 'pressure' and 'pressure=0' not in test.stderr:
+        sys.exit('Deferred BO pressure control waited for the GPU instead of growing its queue')
     print(verdict[0])
 # Driver cache controls compile Adreno code but submit/execute no shader.
 subprocess.run([sys.executable, ROOT / 'scripts/check-turnip-pipeline-cache-host.py'], check=True)

@@ -52,6 +52,16 @@ run = subprocess.run([str(nilargs), loader, str(cache)], capture_output=True, te
 if run.returncode or not any(l.startswith('PASS') for l in run.stdout.splitlines()):
     sys.exit('the nil-resource blit check failed; see %s' % (OUT / 'nil_args_host.log'))
 print([l for l in run.stdout.splitlines() if l.startswith('PASS')][0])
+# The GPU scanout: half-float frames converted by the compute kernel store the display driver's bytes; BGRA still copies.
+scanout = OUT / 'scanout_host'
+subprocess.run(['xcrun', 'clang++', *flags, KIT / 'NativeBridgeMetalFrontend.mm', KIT / 'bridge/scanout_host.mm',
+                ROOT / 'build/adreno-metal-bridge/host/libadreno_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
+                '-framework', 'IOSurface', '-framework', 'CoreFoundation', '-o', scanout], check=True)
+run = subprocess.run([str(scanout), loader, str(cache)], capture_output=True, text=True, timeout=600)
+(OUT / 'scanout_host.log').write_text(run.stdout + run.stderr)
+if run.returncode or not any(l.startswith('PASS') for l in run.stdout.splitlines()):
+    sys.exit('the GPU scanout check failed; see %s' % (OUT / 'scanout_host.log'))
+print([l for l in run.stdout.splitlines() if l.startswith('PASS')][0])
 # Interleaved encoding must be attributed to its own command buffer, regardless of commit order.
 telemetry = OUT / 'telemetry_host'
 subprocess.run(['xcrun', 'clang++', *flags, '-Wno-unused-function', KIT / 'NativeBridgeMetalFrontend.mm', KIT / 'bridge/telemetry_host.mm',
@@ -142,6 +152,7 @@ print([l for l in run.stdout.splitlines() if l.startswith('PASS')][0])
 # parallel creation and release after real pending completion.
 surface_import_object = OUT / 'surface-import-instrumented.o'
 subprocess.run(['xcrun', 'clang++', *flags, '-Dnmb_buffer_new_no_copy=tracked_surface_import',
+                '-Dnmb_buffer_new_no_copy_releasing=tracked_surface_import_releasing',
                 '-Dnmb_buffer_release=tracked_buffer_release', '-c', KIT / 'NativeBridgeMetalFrontend.mm',
                 '-o', surface_import_object], check=True)
 surface_import = OUT / 'surface_import_host'
@@ -255,3 +266,19 @@ print('\n'.join(summary))
 if run.returncode or not any(l.startswith('selftest code 0 ') for l in summary) or not any(l.endswith('last 660f') for l in summary):
     sys.exit('the plugin bridge phase failed with scattered BOs; see %s' % (OUT / 'plugin_sequence_scatter.log'))
 print('PASS: the same phase with scattered single-page spans and no contiguous run above 8 MiB (results unchecked)')
+# Core Image over the frontend, and the Core Image kernel library's answers Apple's Metal gives (no function names, a kernel by name of
+# function type 4): iPadOS 27's Core Image takes its DAG kernels so.
+coreimage = OUT / 'coreimage_host'
+subprocess.run(['xcrun', 'clang++', *flags, KIT / 'NativeBridgeMetalFrontend.mm', KIT / 'bridge/coreimage_host.mm',
+                ROOT / 'build/adreno-metal-bridge/host/libadreno_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
+                '-framework', 'IOSurface', '-framework', 'CoreFoundation', '-framework', 'CoreImage', '-framework', 'CoreGraphics',
+                '-o', coreimage], check=True)
+kernels = '/System/Library/Frameworks/CoreImage.framework/Versions/A/Resources/ci_stdlib.metallib'
+cicache = OUT / 'coreimage-cache'
+cicache.mkdir(exist_ok=True)
+for name, extra in [('apple', {'NMB_SYSTEM_DEVICE': '1'}), ('frontend', {})]:
+    run = subprocess.run([str(coreimage), loader, str(cicache), kernels], env=dict(os.environ, **extra), capture_output=True, text=True, timeout=600)
+    (OUT / ('coreimage_%s.log' % name)).write_text(run.stdout + run.stderr)
+    if run.returncode or not any(l.startswith('PASS') for l in run.stdout.splitlines()):
+        sys.exit('Core Image over the %s device failed; see %s' % (name, OUT / ('coreimage_%s.log' % name)))
+print('PASS: Core Image renders over the frontend; its kernel library answers as Apple\'s Metal does')

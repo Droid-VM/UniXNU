@@ -1,8 +1,8 @@
 diff --git a/crates/metal2vulkan-runtime/src/device/create.rs b/crates/metal2vulkan-runtime/src/device/create.rs
-index 76a0d07..49c9446 100644
+index 44371fe6..96dcd409 100644
 --- a/crates/metal2vulkan-runtime/src/device/create.rs
 +++ b/crates/metal2vulkan-runtime/src/device/create.rs
-@@ -1035,6 +1035,28 @@ pub(super) unsafe fn timeline_conformant(
+@@ -1228,6 +1228,28 @@ pub(super) unsafe fn timeline_conformant(
  
  /// Refuse a MoltenVK device of `description` running without Metal argument buffers
  /// (`argument_buffers.rs`).
@@ -31,10 +31,10 @@ index 76a0d07..49c9446 100644
  pub(super) fn argument_buffers_kept(description: &DeviceDescription) -> Result<(), Error> {
      use super::argument_buffers::{check, Facts};
      check(Facts::of(description).argument_buffers())
-@@ -1210,12 +1232,27 @@ fn create_on(
-             None => taken.push((family, 1)),
-         }
-     }
+@@ -1428,12 +1450,27 @@ fn create_on(
+     // names is always within it: the round robin alone takes up to `ROUND_ROBIN_CEILING` of one
+     // family, and presenting `PRESENT_QUEUES` more.
+     let priorities = vec![1.0f32; taken.iter().map(|&(_, count)| count).max().unwrap_or(0)];
 +    // The queues' global priority, the process's against every other user of the GPU, where the
 +    // process asks for one (METAL2VULKAN_QUEUE_PRIORITY: low, medium, high or realtime) and the
 +    // device offers VK_KHR_global_priority (or the EXT): unset or unoffered, the driver's default.
@@ -62,11 +62,11 @@ index 76a0d07..49c9446 100644
          .collect();
      // At the user-initiated class: MoltenVK compiles its command shaders as it makes the device.
 diff --git a/crates/metal2vulkan-runtime/src/enables.rs b/crates/metal2vulkan-runtime/src/enables.rs
-index 059f638..ae50703 100644
+index f68ec660..af3fe92b 100644
 --- a/crates/metal2vulkan-runtime/src/enables.rs
 +++ b/crates/metal2vulkan-runtime/src/enables.rs
-@@ -1280,7 +1280,7 @@ impl Enables {
-         Ok(())
+@@ -1392,7 +1392,7 @@ impl Enables {
+         self.names.iter().map(CString::as_c_str)
      }
  
 -    fn push_name(&mut self, name: CString) {

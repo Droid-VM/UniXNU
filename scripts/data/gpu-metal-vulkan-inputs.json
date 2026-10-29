@@ -11,13 +11,12 @@
   },
   "translator": {
     "repository": "https://github.com/steelbrain/metal2vulkan",
-    "commit": "720ef1ce9ae2a2068999a8675717418b9416283e",
+    "commit": "0dfdbcd59d235e37ba13b87a5ab30835b5bb9e35",
     "clone": "depth 1, blob filter, checked out source",
     "files": {
-      "README.md": "e603d5c9f6b736e1f468e06e062299eff2cbb3b799718a24518dad4733ad4318",
-      "Cargo.toml": "2cfb7ff0fe5bb20e0a1e2b342df42580221911bc2e9a6a171c9cb2ef1ee14f2d",
-      "crates/metal2vulkan/src/device/policy.rs": "7b98a679de388befde39a1b9af0f35dddea799d791dba83200705ce52ddab98a",
-      "crates/metal2vulkan-validation/profiles/vk12-bare.json": "b39bb9d68811859ed6f781c46d4c8210a72a53ffda34e2da656de6936520a6be"
+      "README.md": "0df40b723fd5ea51ca91b9e59fa5dac774015dde128a31b6834c3c8efb69a316",
+      "Cargo.toml": "e2fc374386d6ee10854f9c2996a8c3858cbb4f86f549f15c93dacf20cc4db439",
+      "crates/metal2vulkan/src/device/policy.rs": "1e07afdb2952046d13f593922fae6a27b6f26939912b6abf542645c60653a5e6"
     }
   },
   "mesa": {

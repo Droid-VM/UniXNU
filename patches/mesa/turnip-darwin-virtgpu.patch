@@ -28,18 +28,18 @@ index 5597422..cf9b92a 100644
  }
  
 diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
-index b03c6ee..0c607a4 100644
+index 5d629cc..80edd55 100644
 --- a/src/freedreno/vulkan/tu_knl_darwin.cc
 +++ b/src/freedreno/vulkan/tu_knl_darwin.cc
-@@ -14,6 +14,7 @@
+@@ -17,6 +17,7 @@
  #include <mach/mach.h>
  
  #include "NativeAdrenoABI.h"
 +#include "tu_knl_darwin_virtgpu.h"
  
  #include "util/os_time.h"
- #include "util/timespec.h"
-@@ -47,6 +48,8 @@ static struct {
+ #include "util/u_atomic.h"
+@@ -52,6 +53,8 @@ static struct {
      * selectors (selector = ABI method) stay available for an unrestricted process that opens NativeAdrenoGpuPublished. */
     bool tunnel;
     uint32_t selector;
@@ -48,7 +48,7 @@ index b03c6ee..0c607a4 100644
     uint32_t last_fence;
     NativeAdrenoAbiDeviceInfo info;
     NativeAdrenoAbiParams params;
-@@ -73,6 +76,8 @@ static kern_return_t
+@@ -139,6 +142,8 @@ static kern_return_t
  dw_call(uint32_t method, const void *in, size_t in_size, void *out,
          size_t out_size)
  {
@@ -57,7 +57,7 @@ index b03c6ee..0c607a4 100644
     size_t out_bytes = out_size;
     if (!dw.tunnel)
        return IOConnectCallStructMethod(dw.conn, method, in, in_size, out_size ? out : NULL,
-@@ -102,9 +107,33 @@ dw_probe_selector(void)
+@@ -168,9 +173,33 @@ dw_probe_selector(void)
     return false;
  }
  
@@ -91,7 +91,7 @@ index b03c6ee..0c607a4 100644
     /* TU_DARWIN_SERVICE names the IOKit service (default: the AGX accelerator the original Metal discovery finds), TU_DARWIN_OPEN_TYPE its open
      * type (default 0x4147, the type the driver serves to the plugin). NativeAdrenoGpuPublished with type 0 is the unsandboxed direct form. */
     const char *service_name = getenv("TU_DARWIN_SERVICE");
-@@ -154,9 +183,13 @@ static void
+@@ -220,9 +249,13 @@ static void
  dw_close_connection(void)
  {
     if (dw.open) {
@@ -106,7 +106,26 @@ index b03c6ee..0c607a4 100644
     }
  }
  
-@@ -479,6 +512,19 @@ darwin_bo_export_dmabuf(struct tu_device *dev, struct tu_bo *bo)
+@@ -629,9 +662,17 @@ darwin_watch_memory_pressure(void)
+ {
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, [] {
++      /* Also the process's own limit (libdispatch's DISPATCH_MEMORYPRESSURE_PROC_LIMIT_WARN 0x10 and _CRITICAL 0x20, source_private.h):
++       * jetsam ends a process at its footprint limit with no system-wide level reached, and a cached BO's CPU view counts in that
++       * footprint (as IOKit-mapped memory) -- a widget extension or a daemon with a limit of tens of MiB. */
++      const unsigned long proc_limit = 0x10 | 0x20;
+       dispatch_source_t source = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0,
+-                                                        DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL,
++                                                        DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL | proc_limit,
+                                                         dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
++      if (!source)
++         source = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0,
++                                         DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL,
++                                         dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+       if (!source)
+          return;
+       dispatch_source_set_event_handler_f(source, [](void *) { p_atomic_inc(&darwin_memory_pressure); });
+@@ -919,6 +960,19 @@ darwin_bo_export_dmabuf(struct tu_device *dev, struct tu_bo *bo)
  static VkResult
  darwin_bo_map(struct tu_device *dev, struct tu_bo *bo, void *placed_addr)
  {
@@ -128,7 +147,7 @@ index b03c6ee..0c607a4 100644
     kern_return_t kr = dw_call(NativeAdrenoMethodBoCpuMap, &req, sizeof(req), &reply, sizeof(reply));
 diff --git a/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc b/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc
 new file mode 100644
-index 0000000..9722361
+index 0000000..e416859
 --- /dev/null
 +++ b/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc
 @@ -0,0 +1,639 @@

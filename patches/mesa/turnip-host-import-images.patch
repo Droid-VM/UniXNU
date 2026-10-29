@@ -1,8 +1,8 @@
 diff --git a/src/freedreno/vulkan/tu_image.cc b/src/freedreno/vulkan/tu_image.cc
-index fa2ca90..8b0aef1 100644
+index 3a9511a..1937a81 100644
 --- a/src/freedreno/vulkan/tu_image.cc
 +++ b/src/freedreno/vulkan/tu_image.cc
-@@ -1169,8 +1169,14 @@ tu_get_image_memory_requirements(struct tu_device *dev, struct tu_image *image,
+@@ -1189,8 +1189,14 @@ tu_get_image_memory_requirements(struct tu_device *dev, struct tu_image *image,
        case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
           VkMemoryDedicatedRequirements *req =
              (VkMemoryDedicatedRequirements *) ext;

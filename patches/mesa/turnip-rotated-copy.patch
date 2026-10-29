@@ -1,7 +1,8 @@
 diff --git a/src/freedreno/vulkan/tu_clear_blit.cc b/src/freedreno/vulkan/tu_clear_blit.cc
+index d6aa3a3..9a1a48a 100644
 --- a/src/freedreno/vulkan/tu_clear_blit.cc
 +++ b/src/freedreno/vulkan/tu_clear_blit.cc
-@@ -2559,12 +2559,37 @@
+@@ -2559,12 +2559,37 @@ copy_compressed(VkFormat format,
        *height = DIV_ROUND_UP(*height, block_height);
  }
  
@@ -40,7 +41,7 @@ diff --git a/src/freedreno/vulkan/tu_clear_blit.cc b/src/freedreno/vulkan/tu_cle
  {
     struct tu_cs *cs = &cmd->cs;
     uint32_t layers = MAX2(info->imageExtent.depth,
-@@ -2602,6 +2627,32 @@
+@@ -2602,6 +2627,32 @@ tu_copy_buffer_to_image(struct tu_cmd_buffer *cmd,
     uint32_t pitch = src_width * block_size;
     uint32_t layer_size = src_height * pitch;
  
@@ -73,7 +74,7 @@ diff --git a/src/freedreno/vulkan/tu_clear_blit.cc b/src/freedreno/vulkan/tu_cle
     ops->setup(cmd, cs, src_format, dst_format,
                info->imageSubresource.aspectMask, blit_param, false, dst_image->layout[0].ubwc,
                (VkSampleCountFlagBits) dst_image->layout[0].nr_samples,
-@@ -2683,9 +2734,10 @@
+@@ -2683,9 +2734,10 @@ tu_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
  
     trace_start_copy_buffer_to_image(&cmd->trace, &cmd->cs, cmd, dst_image->vk.format);
  
@@ -85,7 +86,7 @@ diff --git a/src/freedreno/vulkan/tu_clear_blit.cc b/src/freedreno/vulkan/tu_cle
  
     if (dst_image->lrz_layout.lrz_total_size) {
        tu_disable_lrz<CHIP>(cmd, &cmd->cs, dst_image);
-@@ -2789,7 +2841,8 @@
+@@ -2789,7 +2841,8 @@ tu_copy_image_to_buffer(struct tu_cmd_buffer *cmd,
                          struct tu_image *src_image,
                          struct tu_buffer *dst_buffer,
                          const VkBufferImageCopy2 *info,
@@ -95,7 +96,7 @@ diff --git a/src/freedreno/vulkan/tu_clear_blit.cc b/src/freedreno/vulkan/tu_cle
  {
     struct tu_cs *cs = &cmd->cs;
     uint32_t layers = MAX2(info->imageExtent.depth,
-@@ -2824,6 +2877,31 @@
+@@ -2824,6 +2877,31 @@ tu_copy_image_to_buffer(struct tu_cmd_buffer *cmd,
     uint32_t pitch = dst_width * block_size;
     uint32_t layer_size = pitch * dst_height;
  
@@ -127,7 +128,7 @@ diff --git a/src/freedreno/vulkan/tu_clear_blit.cc b/src/freedreno/vulkan/tu_cle
     handle_buffer_unaligned_store<CHIP>(cmd,
                                         vk_buffer_address(&dst_buffer->vk, info->bufferOffset),
                                         layer_size * layers, unaligned_store);
-@@ -2891,10 +2969,11 @@
+@@ -2891,10 +2969,11 @@ tu_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
     trace_start_copy_image_to_buffer(&cmd->trace, &cmd->cs, cmd, src_image->vk.format);
  
     bool unaligned_store = false;

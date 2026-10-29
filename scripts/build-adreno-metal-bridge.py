@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the native Metal bridge (drivers/AdrenoMetal/bridge/NativeMetalBridge.rs): the pinned metal2vulkan runtime behind a C ABI, as a static library.
 
---target ios (default) cross-builds for arm64-apple-ios17.0, --target host for the macOS host simulation. The runtime's own example library
+--target ios (default) cross-builds for arm64-apple-ios17.0, --target ios27 for arm64e-apple-ios27.0 (nightly, std built from source), --target host for the macOS host simulation. The runtime's own example library
 (runtime_examples.ll) and its function-constant fixture are assembled to AIR with llvm-as and embedded for the self-tests. Only generated build files hold local paths; nothing here
 is committed. Output: build/adreno-metal-bridge/<target>/libadreno_metal_bridge.a"""
 import argparse
@@ -16,42 +16,41 @@ ROOT = Path(__file__).resolve().parents[1]
 PIN = json.loads((ROOT / 'scripts/data/gpu-metal-vulkan-inputs.json').read_text())['translator']['commit']
 SOURCE = ROOT / '.cache/gpu-reference/metal2vulkan'
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--target', choices=['ios', 'host'], default='ios')
+parser.add_argument('--target', choices=['ios', 'ios27', 'host'], default='ios')
 parser.add_argument('--manifest-only', action='store_true',
                     help='write build/adreno-metal-bridge/Cargo.toml (patched source, fixtures) and stop before cargo, for `cargo fetch`')
 args = parser.parse_args()
 if subprocess.check_output(['git', '-C', str(SOURCE), 'rev-parse', 'HEAD'], text=True).strip() != PIN:
     raise SystemExit('Translator revision differs from the qualified source pin')
 PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
+    # Each stacks on the source the ones before it leave.
     '0001-optional-constant-output-members.patch', '0002-resource-wait-storage-dependencies.patch',
     '0003-cache-device-entry-point-priming.patch', '0004-fold-constant-global-field-loads.patch',
-    '0005-keep-module-decodes-and-profile-fingerprints.patch', '0006-skip-draws-without-a-pipeline.patch',
-    '0007-accept-two-plane-rgb-surfaces.patch', '0008-alias-padded-rows-of-written-textures.patch',
-    # The rest stack in order, each on the source the ones before it leave.
-    '0009-keep-final-pass.patch', '0010-fewer-allocations-per-draw.patch', '0011-keep-draw-commands.patch',
-    '0012-keep-draw-lists.patch', '0013-skip-unchanged-rebinds.patch', '0014-map-tracker-keys.patch',
-    '0015-two-plane-shadow-as-memory-lies.patch', '0016-tile-stores-within-rows.patch']] + [ROOT / 'patches/metal2vulkan' / name for name in [
-    # The board's own: a shader-cache directory a sandboxed process cannot write opens anyway when the environment asks
-    # (METAL2VULKAN_SHADER_CACHE_OPTIONAL, which the Metal plugin sets for WebKit's GPU process); every lookup is then a miss.
-    '0006-optional-shader-cache-directory.patch',
-    # An `_sRGB` extended-range form's blend the translator's fast-math model does not hold takes its rounded model (Metal's own
-    # without fast math) instead of refusing the pipeline: NanoUniverse's starfield, the Astronomy wallpaper, had no pipeline.
-    '0007-srgb-extended-range-blend-rounded-model.patch',
-    # `llvm.bitreverse` (what MSL's `reverse_bits` compiles to) lowers to the translator's own ReverseBits: GFXBench's Aztec
-    # Ruins and Car Chase sample with a bit-reversed (Hammersley) sequence, and their pipelines were refused (UnknownIntrinsic).
-    '0008-llvm-bitreverse.patch',
-    # Pooled memory blocks start at 4 MiB and grow with their pool (up to 64 MiB), rather than 64 MiB each from the first
-    # resource: on the iPadOS guest every block is wired guest memory, and its home screen's GPU clients held 2 GiB of them.
-    '0009-growing-memory-blocks.patch',
-    # A `[[patch(quad, 0)]]` function (no control points: GFXBench Car Chase's Bezier car body) answers its patch type and 0, as
-    # Metal does, instead of being refused as unmeasured: the frontend took the refusal for no patch, so the pipeline lost the
-    # descriptor's tessellation state (winding, partitioning, the factors' step function) and the car drew black and torn.
-    '0010-patch-with-no-control-points.patch',
-    # A rotated texture's turns between its pass's frame and its plane (CoreAnimation's framebuffer, rotation 3 in landscape)
-    # on the Adreno 2D engine, through the board's Turnip (patches/mesa/turnip-rotated-copy.patch): one copy each way instead of
-    # a staging copy, a compute kernel and a tight-buffer copy (a 1366x1024 pass: 8.8 ms against 0.5 unrotated). Diagnostics
-    # read at process start: /private/var/ngpu/debug/rot-kernel (the kernel's turns), rot-swap (the quarter turns the other
-    # way), rot-noload (the image turned in once only).
+    # A draw whose pipeline the driver refused binds nothing (int-170: tu_CmdBindPipeline in the render server).
+    '0005-skip-draws-without-a-pipeline.patch',
+    # A batch's barrier globals on the stack, and the neutral resources' maps by the runtime's key hash.
+    '0006-batch-barriers-and-key-hash-neutral-maps.patch',
+    # From the DroidVM board's translator patches: a cache directory a sandboxed process may not write, llvm.bitreverse, a patch
+    # function with no control points, and Core Image kernel libraries (file_type 1) loaded as Metal loads them.
+    '0007-optional-shader-cache-directory.patch', '0008-llvm-bitreverse.patch', '0009-patch-with-no-control-points.patch',
+    '0010-core-image-kernel-libraries.patch',
+    # A two-plane surface's shadow starts as its memory lies; the Astronomy wallpaper's extended-range sRGB blends take the rounded
+    # model; pooled blocks start at 4 MiB and grow (the render server alone held 1 GiB of wired memory).
+    '0011-two-plane-shadow-as-memory-lies.patch', '0012-srgb-extended-range-blend-rounded-model.patch',
+    '0013-growing-memory-blocks.patch',
+    # HostPageTexturePolicy::InPlaceWrites: textures over surfaces and padded buffers are images over their bytes, rendered and written
+    # too, where their tile stores stay within their rows, instead of shadows copied in and out every pass.
+    '0014-in-place-written-textures.patch', '0015-in-place-written-host-page-textures.patch',
+    # Device::refuse_rebinds: no call logs or per-command holds of no-copy buffers, which only a rebind or a detach reads.
+    '0016-refuse-rebinds.patch',
+    # A read-only source of shader-cache entries behind the directory (the pipelines compiled ahead on the host, read on demand from the
+    # userdata import region): an entry the directory lacks is asked of it, and nothing is copied into the directory.
+    '0017-shader-cache-fallback-source.patch']] + [ROOT / 'patches/metal2vulkan' / name for name in [
+    # The board's own, on top. A rotated texture's turns between its pass's frame and its plane (CoreAnimation's framebuffer, rotation 3
+    # in landscape) on the Adreno 2D engine, through the board's Turnip (patches/mesa/turnip-rotated-copy.patch): one copy each way instead
+    # of a staging copy, a compute kernel and a tight-buffer copy (a 1366x1024 pass: 8.8 ms against 0.5 unrotated). Diagnostics read at
+    # process start: /private/var/ngpu/debug/rot-kernel (the kernel's turns), rot-swap (the quarter turns the other way), rot-noload (the
+    # image turned in once only).
     '0011-rotated-turns-on-the-2d-engine.patch',
     # The queues' global priority from the environment (METAL2VULKAN_QUEUE_PRIORITY), which the Metal plugin sets to high in the
     # render server: on an iPad CoreAnimation asks for a high GPU priority on its queue (setGPUPriority:), but a Vulkan queue's
@@ -90,6 +89,9 @@ air = out / 'runtime_examples.air'
 subprocess.run([llvm_as, '-o', air, SOURCE / 'crates/metal2vulkan-validation/fixtures/public/examples/runtime_examples.ll'], check=True)
 fc_air = out / 'function_constant.air'
 subprocess.run([llvm_as, '-o', fc_air, SOURCE / 'crates/metal2vulkan-validation/fixtures/public/kernel_function_constant_gate_fold.ll'], check=True)
+# The GPU scanout's half-float conversion kernel (GpuScanoutPresenter.h), hand-written AIR.
+scanout_air = out / 'scanout_convert.air'
+subprocess.run([llvm_as, '-o', scanout_air, ROOT / 'drivers/AdrenoMetal/shaders/scanout_convert.ll'], check=True)
 manifest = out / 'Cargo.toml'
 manifest.write_text('\n'.join([
     '[package]', 'name = "adreno-metal-bridge"', 'version = "0.1.0"', 'edition = "2024"', 'rust-version = "1.98"', '[workspace]',
@@ -101,12 +103,6 @@ manifest.write_text('\n'.join([
     # The runtime hashes every shader-cache key and entry; without asm, sha2 0.10 on aarch64 is the portable software rounds, not the
     # ARMv8 SHA-256 instructions every target CPU has (cpufeatures answers sha2 true on Apple platforms).
     'sha2 = { version = "0.10", features = ["asm"] }',
-    # The bridge's global allocator (NativeMetalBridge.rs).
-    'mimalloc = { version = "=0.1.43", default-features = false }',
-    # mimalloc's own version 2, not the 3 libmimalloc-sys 0.1.49 builds by default: 3 keeps each thread's heap in the fixed TSD slots
-    # 108 and 109 on Apple platforms, which are Swift's (__PTK_FRAMEWORK_SWIFT_KEY8/9) -- Settings' wallpaper pages (RenderBox) and
-    # PosterBoard crashed in mi_thread_init, and Metal processes whose Swift wrote those slots corrupted. 2 uses a plain __thread.
-    'libmimalloc-sys = { version = "=0.1.49", default-features = false, features = ["v2"] }',
     # The render server's display thread spends most of a frame in the runtime, much of it in small functions across the
     # translator's crates: one optimisation unit with link-time optimisation lets them inline across crate boundaries.
     '[profile.release]', 'panic = "unwind"', 'debug = 1', 'lto = "fat"', 'codegen-units = 1', '',
@@ -114,15 +110,19 @@ manifest.write_text('\n'.join([
 if args.manifest_only:
     print(manifest)
     raise SystemExit(0)
-triple = 'aarch64-apple-ios' if args.target == 'ios' else 'aarch64-apple-darwin'
+triple = {'ios': 'aarch64-apple-ios', 'ios27': 'arm64e-apple-ios', 'host': 'aarch64-apple-darwin'}[args.target]
+# arm64e has no prebuilt std: it is built from rust-src (RUSTC_BOOTSTRAP for -Z); the iPadOS 27 processes that load the plugin are arm64e.
+cargo = ['cargo', '+1.98.0'] + (['-Z', 'build-std=std,panic_unwind'] if args.target == 'ios27' else [])
 # The translator source the runtime is built from (its pin and recorded patches), which keys the shader cache: shader priming keeps what it
 # finished while this stays the same (PrimeShaders.h).
 runtime_id = hashlib.sha256((PIN + '\n' + states[-1]).encode()).hexdigest()[:32]
-env = dict(os.environ, NMB_RUNTIME_ID=runtime_id, NMB_FIXTURE_AIR=str(air), NMB_FC_AIR=str(fc_air), IPHONEOS_DEPLOYMENT_TARGET='17.0', MACOSX_DEPLOYMENT_TARGET='14.0')
+env = dict(os.environ, NMB_RUNTIME_ID=runtime_id, NMB_FIXTURE_AIR=str(air), NMB_FC_AIR=str(fc_air), NMB_SCANOUT_AIR=str(scanout_air), IPHONEOS_DEPLOYMENT_TARGET='27.0' if args.target == 'ios27' else '17.0', MACOSX_DEPLOYMENT_TARGET='14.0')
+if args.target == 'ios27':
+    env['RUSTC_BOOTSTRAP'] = '1'
 target_dir = ROOT / 'build/m2v-target'
 log = out / ('build-%s.log' % args.target)
 with log.open('w') as stream:
-    result = subprocess.run(['cargo', '+1.98.0', 'build', '--release', '--manifest-path', manifest, '--target', triple,
+    result = subprocess.run(cargo + ['build', '--release', '--manifest-path', manifest, '--target', triple,
                              '--target-dir', target_dir], env=env, stdout=stream, stderr=subprocess.STDOUT, timeout=1800)
 if result.returncode:
     raise SystemExit(log.read_text()[-6000:])
