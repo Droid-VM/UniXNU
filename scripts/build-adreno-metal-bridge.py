@@ -63,7 +63,11 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     # render server: on an iPad CoreAnimation asks for a high GPU priority on its queue (setGPUPriority:), but a Vulkan queue's
     # priority is fixed when the device opens, before that call. The board's Turnip moves the process's ring to it
     # (patches/mesa/turnip-darwin-queue-priority.patch), so the compositor's frames no longer wait behind an app's.
-    '0012-queue-global-priority.patch']]
+    '0012-queue-global-priority.patch',
+    # Device::trim_kept_memory: the kept empty pooled blocks that stayed empty a while, each pool's last one included, freed when the
+    # Metal plugin asks (its process idle two seconds, or memory pressure): on this board every block is wired guest memory, and a
+    # pool keeps its last empty block however long its process stays idle (136 MiB in the render server at the home screen).
+    '0013-trim-kept-memory.patch']]
 
 
 def git_tree(*steps):

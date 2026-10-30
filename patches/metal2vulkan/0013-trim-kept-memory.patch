@@ -1,0 +1,56 @@
+diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
+index 1f88274..d36126c 100644
+--- a/crates/metal2vulkan-runtime/src/memory.rs
++++ b/crates/metal2vulkan-runtime/src/memory.rs
+@@ -2187,3 +2187,51 @@ pub(super) fn keep_room(memory: &Mutex<Memory>, device: &ash::Device, counts: &C
+         memory.add_block(pool, block, bytes, false, 0);
+     }
+ }
++
++impl crate::Device {
++    /// Frees the kept empty pooled blocks that have stayed empty for `idle` or longer, each pool's
++    /// last one included, and answers how many went. [`Pool::stale`] keeps a pool's last empty
++    /// block for its next placements however long it stays empty, and runs only as a block of the
++    /// pool is returned: a process that went idle kept a block in each pool it had used. Where
++    /// device memory is the system's own and wired as it is made (a guest whose GPU imports its
++    /// pages), that is wired memory the system cannot reclaim (the iPadOS guest's render server
++    /// held 136 MiB of empty blocks at its home screen); the caller trims as its process idles or
++    /// the system reports memory pressure (`Duration::ZERO`: every kept empty block).
++    pub fn trim_kept_memory(&self, idle: Duration) -> usize {
++        let shared = self.shared();
++        lock(&shared.memory).trim_kept(shared.vk(), idle)
++    }
++}
++
++impl Memory {
++    /// [`Device::trim_kept_memory`](crate::Device::trim_kept_memory).
++    fn trim_kept(&mut self, device: &ash::Device, idle: Duration) -> usize {
++        let now = Instant::now();
++        let blocks: Vec<Block> = (self.pools.iter_mut())
++            .flat_map(|pool| pool.take_idle(now, idle))
++            .collect();
++        let count = blocks.len();
++        for block in blocks {
++            // SAFETY: nothing is placed in a kept empty block, and no command reads it.
++            drop(unsafe { self.let_go(device, block, FreeCause::KeptStale, None) });
++        }
++        count
++    }
++}
++
++impl<T> Pool<T> {
++    /// Every kept empty pooled block that has stayed empty for `idle` or longer, taken out to be
++    /// freed.
++    fn take_idle(&mut self, now: Instant, idle: Duration) -> Vec<T> {
++        let idle_blocks: Vec<usize> = (self.blocks.iter().enumerate())
++            .filter_map(|(index, block)| {
++                let block = block.as_ref().filter(|block| block.kept())?;
++                (now.saturating_duration_since(block.emptied?) >= idle).then_some(index)
++            })
++            .collect();
++        idle_blocks
++            .into_iter()
++            .filter_map(|index| self.take(index))
++            .collect()
++    }
++}
