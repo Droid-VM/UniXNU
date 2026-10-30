@@ -1,0 +1,42 @@
+diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
+index 8b226ac..648114b 100644
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -590,6 +590,22 @@ darwin_cache_evict(struct tu_device *dev, struct darwin_retire_state *retire, un
+    return VK_SUCCESS;
+ }
+ 
++/* The most bytes the cache keeps (TU_DARWIN_BO_CACHE_MB, 96 by default; 0: no limit, as before): past it the least recently cached BOs
++ * go as one is put. On a virtual GPU every cached BO is wired guest memory, and memory pressure alone never reached the cache there: the
++ * iPadOS 27 render server's cache grew to 434 MiB over a minute of page swipes at 2048x2732 (BOs of every size a frame frees, the
++ * classes rarely asked again) while the guest ran out of free pages with 1.4 GiB still counted available, below no pressure level. */
++static uint64_t
++darwin_cache_budget(void)
++{
++   static uint64_t budget = UINT64_MAX;
++   if (budget == UINT64_MAX) {
++      const char *text = getenv("TU_DARWIN_BO_CACHE_MB");
++      const uint64_t mb = text && *text ? strtoull(text, NULL, 10) : 96;
++      budget = mb ? mb << 20 : UINT64_MAX - 1;
++   }
++   return budget;
++}
++
+ /* Called under retire->lock with a BO whose fence completed. True: the cache took it whole. */
+ static bool
+ darwin_cache_put(struct tu_device *dev, struct darwin_retire_state *retire, const struct darwin_retired_bo *bo)
+@@ -608,6 +624,14 @@ darwin_cache_put(struct tu_device *dev, struct darwin_retire_state *retire, cons
+    if (retire->cache_bytes > retire->cache_stats.bytes_peak)
+       retire->cache_stats.bytes_peak = retire->cache_bytes;
+    ++retire->cache_stats.inserts;
++   while (retire->cache_bytes > darwin_cache_budget() && retire->cache_count > 1) {
++      unsigned oldest = 0;
++      for (unsigned i = 1; i < retire->cache_count; ++i)
++         if (retire->cache[i].stamp < retire->cache[oldest].stamp)
++            oldest = i;
++      if (darwin_cache_evict(dev, retire, oldest) != VK_SUCCESS)
++         break;
++   }
+    return true;
+ }
+ 
