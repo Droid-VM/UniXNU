@@ -43,9 +43,16 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     '0014-in-place-written-textures.patch', '0015-in-place-written-host-page-textures.patch',
     # Device::refuse_rebinds: no call logs or per-command holds of no-copy buffers, which only a rebind or a detach reads.
     '0016-refuse-rebinds.patch',
-    # A read-only source of shader-cache entries behind the directory (the pipelines compiled ahead on the host, read on demand from the
-    # userdata import region): an entry the directory lacks is asked of it, and nothing is copied into the directory.
-    '0017-shader-cache-fallback-source.patch']] + [ROOT / 'patches/metal2vulkan' / name for name in [
+    # A heap texture's own-device answer rounded up to a multiple of its alignment, as Metal's answers are: a heap sized as the sum of
+    # its textures' answers then holds them (iconservicesagent's Core Image heaps ran out: OutOfMemory(Heap)).
+    '0017-heap-texture-size-a-multiple-of-its-alignment.patch',
+    # The runtime's live device memory in bytes by kind (pooled, placed, empty kept, dedicated, imported), for the frontend's MEM row.
+    '0018-memory-census-bytes.patch',
+    # The call stacks that allocated device memory of 4 MiB or more, by bytes, for the frontend's MA rows.
+    '0019-allocation-sites.patch',
+    # Not 0020-written-host-page-textures-in-place-at-any-size.patch: it relies on upstream's Turnip render-mode patch
+    # (turnip-render-mode-for-attachment-memory.patch), which this fork's Turnip patches do not take yet.
+    ]] + [ROOT / 'patches/metal2vulkan' / name for name in [
     # The board's own, on top. A rotated texture's turns between its pass's frame and its plane (CoreAnimation's framebuffer, rotation 3
     # in landscape) on the Adreno 2D engine, through the board's Turnip (patches/mesa/turnip-rotated-copy.patch): one copy each way instead
     # of a staging copy, a compute kernel and a tight-buffer copy (a 1366x1024 pass: 8.8 ms against 0.5 unrotated). Diagnostics read at
