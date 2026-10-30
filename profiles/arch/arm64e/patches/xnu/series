@@ -48,6 +48,7 @@
 ../../../../../patches/xnu-12377/zzw-native-adreno-sandbox-grant.patch
 ../../../../../patches/xnu-12377/zzwb-native-sandbox-grant-set-properties.patch
 ../../../../../patches/xnu-12377/zzyc-owner-skip-launch-constraints.patch
+../../../../../patches/xnu-12377/zzyd-owner-hide-vmm.patch
 ../../../../../patches/xnu-12377/native-4k-user-abi.patch
 ../../../../../patches/xnu-12377/native-4k-signature-hash-cache.patch
 ../../../../../patches/xnu-12377/native-4k-shared-region-slide.patch
