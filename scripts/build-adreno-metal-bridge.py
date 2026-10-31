@@ -70,7 +70,11 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     '0013-trim-kept-memory.patch',
     # A quarter-turned texture over a surface plane held to the plane's row, not its own: the iPad's display framebuffer is a
     # portrait surface behind the render server's landscape texture (see the fork copy for the reason).
-    '0014-quarter-turn-plane-row.patch']]
+    '0014-quarter-turn-plane-row.patch',
+    # A [[color(n)]] read of a color the render pipeline has no attachment for reads zero instead of refusing the pipeline
+    # (LoweringInputs::unattached_reads): iPadOS 27's QuartzCore makes path_blit_frag_lph (its coverage mask at color 2) and
+    # fixed_frag_lph_cph for passes without that attachment, and the render server aborted in create_pipeline_state.
+    '0015-unattached-color-reads.patch']]
 
 
 def git_tree(*steps):

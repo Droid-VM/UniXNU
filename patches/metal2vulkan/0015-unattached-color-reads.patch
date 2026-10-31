@@ -1,0 +1,147 @@
+diff --git a/crates/metal2vulkan/src/lower/fragment/fetch.rs b/crates/metal2vulkan/src/lower/fragment/fetch.rs
+index 3de21d36..c576d49e 100644
+--- a/crates/metal2vulkan/src/lower/fragment/fetch.rs
++++ b/crates/metal2vulkan/src/lower/fragment/fetch.rs
+@@ -1434,6 +1434,10 @@ fn colors_read(cx: &SelectCx<'_>, used: &BTreeSet<u32>) -> Result<BTreeSet<u32>,
+             ..
+         } = b.role
+         {
++            // A color the pipeline has no attachment for reads as zero (`select_param`).
++            if cx.inputs.unattached_reads.contains(&color) {
++                continue;
++            }
+             super::color::param_form(cx, b)
+                 .map_err(|e| e.at_attachment(Attachment::Color(color)))?;
+             out.insert(color);
+diff --git a/crates/metal2vulkan/src/lower/fragment/mod.rs b/crates/metal2vulkan/src/lower/fragment/mod.rs
+index f9a7edbb..bf6fc3a7 100644
+--- a/crates/metal2vulkan/src/lower/fragment/mod.rs
++++ b/crates/metal2vulkan/src/lower/fragment/mod.rs
+@@ -183,6 +183,9 @@ pub struct FragmentPlan {
+     pub helper_queries: bool,
+     /// Every used color input (framebuffer fetch), in parameter order.
+     pub colors: Vec<ColorInput>,
++    /// The used color inputs of a color the pipeline has no attachment for
++    /// (`LoweringInputs::unattached_reads`), by parameter: each reads as zero of its form.
++    pub absent_colors: BTreeMap<u32, Form>,
+     /// The function is in a raster order group: its body runs inside this interlock mode's
+     /// critical section, called from the entry [`wrap_entry`] builds.
+     pub interlock: Option<ExecMode>,
+@@ -591,6 +594,22 @@ pub fn select_param(cx: &mut SelectCx<'_>, b: &ParamBinding) -> Result<(), Error
+     if let ParamRole::Imageblock(ib) = &b.role {
+         return imageblock::select_input(cx, b.param, ib, b.ty.align);
+     }
++    // A color the pipeline has no attachment for: zero, and no input attachment.
++    if let ParamRole::ColorInput {
++        index: AbiInt::Const(color),
++        ..
++    } = b.role
++    {
++        if cx.inputs.unattached_reads.contains(&color) {
++            let ty = cx
++                .value_ty(Value::Arg(crate::air::ir::ArgIdx::new(b.param)))
++                .ok_or_else(|| cx.invariant("a color input without a type"))?;
++            let f = form_on(cx.entry, cx.profile, ty)
++                .map_err(|e| e.at_attachment(Attachment::Color(color)))?;
++            cx.families.fragment.absent_colors.insert(b.param, f);
++            return Ok(());
++        }
++    }
+     let c = color::select_param(cx, b).map_err(|e| match b.role {
+         ParamRole::ColorInput {
+             index: AbiInt::Const(color),
+@@ -731,6 +750,15 @@ pub fn param_value(
+         .iter()
+         .find(|c| c.param == b.param)
+         .copied();
++    if let Some(form) = cx.plan.families.fragment.absent_colors.get(&b.param).copied() {
++        return match crate::lower::arith::legal::zero(&form.demote()) {
++            Some(k) => match crate::lower::arith::legal::materialize(fb, &k)? {
++                Some(x) => Ok(x),
++                None => Err(cx.fail("an unattached color's zero does not materialize")),
++            },
++            None => Err(cx.fail("an unattached color of a type without a zero")),
++        };
++    }
+     match planned {
+         Some(c) => color::value(cx, fb, c),
+         None => Err(cx.fail(format!("parameter {} has no fragment value", b.param))),
+diff --git a/crates/metal2vulkan/src/pipeline/compile.rs b/crates/metal2vulkan/src/pipeline/compile.rs
+index 678cb8ac..c8f82b0c 100644
+--- a/crates/metal2vulkan/src/pipeline/compile.rs
++++ b/crates/metal2vulkan/src/pipeline/compile.rs
+@@ -2012,6 +2012,30 @@ pub(crate) fn unattached_colors_written(
+         .collect()
+ }
+ 
++/// The colors the specialized fragment entry `spec` reads through a `[[color(n)]]` input of a
++/// constant index that a render pipeline whose color attachments are `colors` has no attachment
++/// for (`LoweringInputs::unattached_reads`).
++pub(crate) fn unattached_colors_read(
++    spec: &air::Entry,
++    colors: &[Option<ColorAttachmentDescriptor>],
++) -> BTreeSet<u32> {
++    if !matches!(spec.ep.stage, AbiStage::Fragment { .. }) {
++        return BTreeSet::new();
++    }
++    spec.ep
++        .params
++        .iter()
++        .filter_map(|b| match b.role {
++            ParamRole::ColorInput {
++                index: AbiInt::Const(a),
++                ..
++            } => Some(a),
++            _ => None,
++        })
++        .filter(|&a| colors.get(a as usize).copied().flatten().is_none())
++        .collect()
++}
++
+ /// The framebuffer-fetch state of pass `d` for the specialized fragment entry `spec` on `p`
+ /// (`LoweringInputs::framebuffer_fetch`): on a device that orders fetch only through the pixel
+ /// interlock, the state of every attachment the entry declares a `[[color(n)]]` input of a constant
+@@ -2287,6 +2311,7 @@ fn lower_inputs(
+             out.signed_color_attachments = signed_colors_written(spec, d.color_attachments);
+             out.unattached_colors =
+                 unattached_colors_written(spec, d.color_attachments, d.alpha_to_coverage);
++            out.unattached_reads = unattached_colors_read(spec, d.color_attachments);
+             out.framebuffer_fetch = fetch_inputs(spec, d, variant, p);
+             let read = raw_indices_read(spec);
+             out.viewport_index_varying = written.viewport && read.viewport;
+diff --git a/crates/metal2vulkan/src/pipeline/compile/key.rs b/crates/metal2vulkan/src/pipeline/compile/key.rs
+index a02631d0..0d00988c 100644
+--- a/crates/metal2vulkan/src/pipeline/compile/key.rs
++++ b/crates/metal2vulkan/src/pipeline/compile/key.rs
+@@ -369,6 +369,11 @@ pub fn function_key(
+         h.bytes(b"unattached-colors")
+             .bytes(format!("{:?}", inputs.unattached_colors).as_bytes());
+     }
++    // Appended only when set, as `unattached_colors` is.
++    if !inputs.unattached_reads.is_empty() {
++        h.bytes(b"unattached-reads")
++            .bytes(format!("{:?}", inputs.unattached_reads).as_bytes());
++    }
+     // Appended only when set; masks alike at every place of a quad as the one mask.
+     match inputs.sample_mask {
+         Some(m) if crate::pipeline::private_state::uniform(&m) => {
+diff --git a/crates/metal2vulkan/src/pipeline/lower_inputs.rs b/crates/metal2vulkan/src/pipeline/lower_inputs.rs
+index f499702b..ac25be8e 100644
+--- a/crates/metal2vulkan/src/pipeline/lower_inputs.rs
++++ b/crates/metal2vulkan/src/pipeline/lower_inputs.rs
+@@ -532,6 +532,15 @@ pub struct LoweringInputs {
+     /// (`NeedsInput(ColorWrites)`). Any other function compiles as without it.
+     #[cfg_attr(feature = "serde", serde(default))]
+     pub unattached_colors: BTreeSet<u32>,
++    /// Colors the fragment function reads (a `[[color(n)]]` input of a constant index) that its
++    /// render pipeline has no attachment for, by color index. Metal makes such a pipeline:
++    /// iPadOS 27's QuartzCore makes `path_blit_frag_lph`, which reads its coverage mask at color 2,
++    /// for passes without the mask attachment, and its render server aborts when the pipeline is
++    /// refused. What the read returns there is not measured; the function declares no input
++    /// attachment for such a color and reads it as zero. `Device::compile_render_pipeline` sets it
++    /// for a `Function` fragment stage; empty for any other function, which compiles as without it.
++    #[cfg_attr(feature = "serde", serde(default))]
++    pub unattached_reads: BTreeSet<u32>,
+     /// The render pipeline's private sample mask, its bits below the pipeline's sample count,
+     /// ANDed with its private sample coverage's, by the window pixel's place in its 2x2 quad
+     /// (index `(x & 1) | (y & 1) << 1`), which the fragment function applies itself: each return
