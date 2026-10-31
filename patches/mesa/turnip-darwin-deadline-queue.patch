@@ -1,0 +1,114 @@
+diff --git a/src/freedreno/vulkan/tu_queue.h b/src/freedreno/vulkan/tu_queue.h
+--- a/src/freedreno/vulkan/tu_queue.h
++++ b/src/freedreno/vulkan/tu_queue.h
+@@ -27,6 +27,9 @@
+    enum tu_queue_type type;
+    uint32_t msm_queue_id;
+    uint32_t priority;
++   /* As the queue was made: one at high or realtime priority (a compositor's) asks a host through the Darwin virtio GPU to run
++    * its submissions at full clock (dwv_set_deadline). */
++   VkQueueGlobalPriorityKHR global_priority;
+ 
+    uint32_t sparse_queue_id;
+ 
+diff --git a/src/freedreno/vulkan/tu_queue.cc b/src/freedreno/vulkan/tu_queue.cc
+--- a/src/freedreno/vulkan/tu_queue.cc
++++ b/src/freedreno/vulkan/tu_queue.cc
+@@ -643,6 +643,7 @@
+    }
+ 
+    queue->priority = priority;
++   queue->global_priority = global_priority;
+    queue->vk.driver_submit =
+       (type == TU_QUEUE_SPARSE) ? queue_submit_sparse : queue_submit;
+ 
+diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -317,8 +317,11 @@
+    /* The kernel client has queue 0 from open(); every submission rides the one shared ring. Through the virtio GPU that ring is
+     * at the host's default priority, and a queue made with a higher global priority raises it for the process. */
+    queue->msm_queue_id = 0;
+-   if (dwv_enabled())
++   if (dwv_enabled()) {
+       dwv_set_priority(queue->priority);
++      if (queue->global_priority >= VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR)
++         dwv_set_deadline();
++   }
+    return 0;
+ }
+ 
+diff --git a/src/freedreno/vulkan/tu_knl_darwin_virtgpu.h b/src/freedreno/vulkan/tu_knl_darwin_virtgpu.h
+--- a/src/freedreno/vulkan/tu_knl_darwin_virtgpu.h
++++ b/src/freedreno/vulkan/tu_knl_darwin_virtgpu.h
+@@ -17,6 +17,7 @@
+ kern_return_t dwv_open(void);
+ uint32_t dwv_priorities(void);
+ kern_return_t dwv_set_priority(uint32_t priority);
++kern_return_t dwv_set_deadline(void);
+ void dwv_close(void);
+ /* One NativeAdreno ABI method, as dw_call would make it. */
+ kern_return_t dwv_call(uint32_t method, const void *in, size_t in_size, void *out, size_t out_size);
+diff --git a/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc b/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc
+--- a/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc
+@@ -76,7 +76,7 @@
+    pthread_mutex_t lock;     /* the ccmd sequence (one response area) and the handle table */
+    volatile uint8_t *shmem;
+    uint32_t shmem_handle, seqno;
+-   uint32_t queue_id, ring, submit_fence, priority;
++   uint32_t queue_id, ring, submit_fence, priority, queue_flags;
+    uint64_t next_blob_id;
+    struct dwv_bo *bos;
+    uint32_t bo_capacity;
+@@ -264,6 +264,7 @@
+    if (kr == KERN_SUCCESS) {
+       dwv.queue_id = queue.id;
+       dwv.priority = queue.prio;
++      dwv.queue_flags = queue.flags;
+       dwv.ring = queue.prio + 1;
+       dwv.submit_fence = 0;
+       dwv.next_blob_id = 1;
+@@ -292,7 +293,7 @@
+    kern_return_t kr = KERN_SUCCESS;
+    pthread_mutex_lock(&dwv.lock);
+    if (dwv.shmem && priority < dwv.priority && !dwv.submit_fence) {
+-      struct { uint32_t flags, prio, id; } queue = {0, priority, 0};
++      struct { uint32_t flags, prio, id; } queue = {dwv.queue_flags, priority, 0};
+       kr = vg_ioctl_simple(DWV_MSM_SUBMITQUEUE_NEW, &queue, sizeof(queue));
+       if (kr == KERN_SUCCESS) {
+          uint32_t old = dwv.queue_id;
+@@ -300,6 +301,33 @@
+          dwv.queue_id = queue.id;
+          dwv.priority = priority;
+          dwv.ring = priority + 1;
++      }
++   }
++   pthread_mutex_unlock(&dwv.lock);
++   return kr;
++}
++
++/* A submit queue flag of the host's drm2kgsl, beyond msm's: the queue's submissions have a deadline (a compositor's frames), and
++ * the host runs the GPU at full clock while they run rather than at what its governor makes of the GPU's load -- the governor
++ * kept a 2048x2732 compositor's frames at 160 MHz a third of the time, 4.5 ms a pass where 1200 MHz takes 1.5. A host that knows
++ * no such flag ignores it. */
++#define DWV_SUBMITQUEUE_DEADLINE 0x80000000u
++
++/* Asks the host to treat the process's submit queue as having a deadline (DWV_SUBMITQUEUE_DEADLINE): a new queue with the flag, at
++ * the same priority, replaces the old one while nothing has been submitted on it; once something was, the queue stays as it is. */
++kern_return_t
++dwv_set_deadline(void)
++{
++   kern_return_t kr = KERN_SUCCESS;
++   pthread_mutex_lock(&dwv.lock);
++   if (dwv.shmem && !(dwv.queue_flags & DWV_SUBMITQUEUE_DEADLINE) && !dwv.submit_fence) {
++      struct { uint32_t flags, prio, id; } queue = {dwv.queue_flags | DWV_SUBMITQUEUE_DEADLINE, dwv.priority, 0};
++      kr = vg_ioctl_simple(DWV_MSM_SUBMITQUEUE_NEW, &queue, sizeof(queue));
++      if (kr == KERN_SUCCESS) {
++         uint32_t old = dwv.queue_id;
++         vg_ioctl_simple(DWV_MSM_SUBMITQUEUE_CLOSE, &old, sizeof(old));
++         dwv.queue_id = queue.id;
++         dwv.queue_flags = queue.flags;
+       }
+    }
+    pthread_mutex_unlock(&dwv.lock);

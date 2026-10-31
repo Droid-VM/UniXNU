@@ -58,7 +58,8 @@
     "patches/mesa/turnip-darwin-virtgpu.patch",
     "patches/mesa/turnip-rotated-copy.patch",
     "patches/mesa/turnip-darwin-queue-priority.patch",
-    "patches/mesa/turnip-darwin-bo-cache-budget.patch"
+    "patches/mesa/turnip-darwin-bo-cache-budget.patch",
+    "patches/mesa/turnip-darwin-deadline-queue.patch"
   ],
   "integer_fma_reference": {
     "repository": "https://github.com/ucb-bar/berkeley-softfloat-3",
