@@ -1,0 +1,32 @@
+diff --git a/security/mac_process.c b/security/mac_process.c
+--- a/security/mac_process.c
++++ b/security/mac_process.c
+@@ -89,6 +89,10 @@
+ #include <kern/cs_blobs.h>
+ #include <sys/spawn.h>
+ #include <sys/spawn_internal.h>
++#include <pexpert/pexpert.h>
++
++// Board bring-up (debug VM only): IOCurrentTaskHasEntitlement is exported by IOKit for the kernel.
++extern boolean_t IOCurrentTaskHasEntitlement(const char *);
+ 
+ struct label *
+ mac_cred_label_alloc(void)
+@@ -433,6 +437,17 @@
+ 
+ 	assert(flavor <= TASK_FLAVOR_NAME);
+ 
++	// Board bring-up (debug VM only): owner-debug lets an owner debug binary get another process's task control or
++	// name port. The release AMFI that gates this refuses the owner ssh debugserver -- ad-hoc signed, in the owner
++	// trust cache, running as root with developer mode on -- so its task_for_pid() returns KERN_FAILURE and it cannot
++	// attach to a system process. The check is cleared here only for a caller carrying the owner debug entitlement,
++	// and only when the board asks for it; the boot argument, not the default, decides.
++	uint32_t owner_debug = 0;
++	if (PE_parse_boot_argn("owner-debug", &owner_debug, sizeof(owner_debug)) && owner_debug != 0 &&
++	    IOCurrentTaskHasEntitlement("com.apple.private.droidvm.debug")) {
++		return 0;
++	}
++
+ 	MAC_CHECK(proc_check_get_task_with_flavor, cred, pident, flavor);
+ 
+ 	return error;

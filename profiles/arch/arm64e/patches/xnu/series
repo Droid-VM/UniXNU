@@ -49,6 +49,8 @@
 ../../../../../patches/xnu-12377/zzwb-native-sandbox-grant-set-properties.patch
 ../../../../../patches/xnu-12377/zzyc-owner-skip-launch-constraints.patch
 ../../../../../patches/xnu-12377/zzyd-owner-hide-vmm.patch
+../../../../../patches/xnu-12377/zzye-owner-debug-task-ports.patch
+../../../../../patches/xnu-12377/zzyf-owner-debug-vnode-read.patch
 ../../../../../patches/xnu-12377/native-4k-user-abi.patch
 ../../../../../patches/xnu-12377/native-4k-signature-hash-cache.patch
 ../../../../../patches/xnu-12377/native-4k-shared-region-slide.patch

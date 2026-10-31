@@ -1,0 +1,125 @@
+diff --git a/security/mac_vfs.c b/security/mac_vfs.c
+--- a/security/mac_vfs.c
++++ b/security/mac_vfs.c
+@@ -82,6 +82,8 @@
+ #include <sys/uio_internal.h>
+ #include <sys/vnode_internal.h>
+ #include <sys/kdebug.h>
++#include <sys/fcntl.h>
++#include <pexpert/pexpert.h>
+ 
+ 
+ #include <miscfs/devfs/devfsdefs.h>
+@@ -931,6 +933,22 @@
+ 	return result;
+ }
+ 
++// Board bring-up (debug VM only): owner-debug lets an owner debug binary read the guest to debug it -- open
++// (read only), read, readdir, lookup, stat, getattr and readlink of a file or directory a sandbox storage class or
++// data vault would otherwise deny even to root (the ssh shell could not read the logs daemons keep in their
++// containers). The relaxation is read only, is cleared only for a caller carrying the owner debug entitlement, and
++// only when the board asks for it; the boot argument, not the default, decides. No write path is touched.
++extern boolean_t IOCurrentTaskHasEntitlement(const char *);
++static int
++droidvm_owner_debug_vnode_read(void)
++{
++	uint32_t owner_debug = 0;
++	if (!PE_parse_boot_argn("owner-debug", &owner_debug, sizeof(owner_debug)) || owner_debug == 0) {
++		return 0;
++	}
++	return IOCurrentTaskHasEntitlement("com.apple.private.droidvm.debug") ? 1 : 0;
++}
++
+ int
+ mac_vnode_check_access(vfs_context_t ctx, struct vnode *vp,
+     int acc_mode)
+@@ -951,6 +969,9 @@
+ 	}
+ 	/* Convert {R,W,X}_OK values to V{READ,WRITE,EXEC} for entry points */
+ 	mask = ACCESS_MODE_TO_VNODE_MASK(acc_mode);
++	if ((mask & VWRITE) == 0 && droidvm_owner_debug_vnode_read()) {
++		return 0;
++	}
+ 	VFS_KERNEL_DEBUG_START1(29, vp);
+ 	MAC_CHECK(vnode_check_access, cred, vp, mac_vnode_label(vp), mask);
+ 	VFS_KERNEL_DEBUG_END1(29, vp);
+@@ -1184,6 +1205,9 @@
+ 	if (!mac_cred_check_enforce(cred)) {
+ 		return 0;
+ 	}
++	if (droidvm_owner_debug_vnode_read()) {
++		return 0;
++	}
+ 	VFS_KERNEL_DEBUG_START1(39, vp);
+ 	MAC_CHECK(vnode_check_getattr, cred, file_cred, vp, mac_vnode_label(vp), va);
+ 	VFS_KERNEL_DEBUG_END1(39, vp);
+@@ -1207,6 +1231,9 @@
+ 	if (!mac_cred_check_enforce(cred)) {
+ 		return 0;
+ 	}
++	if (droidvm_owner_debug_vnode_read()) {
++		return 0;
++	}
+ 	VFS_KERNEL_DEBUG_START1(40, vp);
+ 	MAC_CHECK(vnode_check_getattrlist, cred, vp, mac_vnode_label(vp), alist, options);
+ 	VFS_KERNEL_DEBUG_END1(40, vp);
+@@ -1647,6 +1674,9 @@
+ 	if (!mac_cred_check_enforce(cred)) {
+ 		return 0;
+ 	}
++	if (droidvm_owner_debug_vnode_read()) {
++		return 0;
++	}
+ 	VFS_KERNEL_DEBUG_START1(51, dvp);
+ 	MAC_CHECK(vnode_check_lookup, cred, dvp, mac_vnode_label(dvp), cnp);
+ 	VFS_KERNEL_DEBUG_END1(51, dvp);
+@@ -1669,6 +1699,9 @@
+ 	if (!mac_cred_check_enforce(cred)) {
+ 		return 0;
+ 	}
++	if ((acc_mode & FWRITE) == 0 && droidvm_owner_debug_vnode_read()) {
++		return 0;
++	}
+ 	VFS_KERNEL_DEBUG_START1(52, vp);
+ 	MAC_CHECK(vnode_check_open, cred, vp, mac_vnode_label(vp), acc_mode);
+ 	VFS_KERNEL_DEBUG_END1(52, vp);
+@@ -1692,6 +1725,9 @@
+ 	if (!mac_cred_check_enforce(cred)) {
+ 		return 0;
+ 	}
++	if (droidvm_owner_debug_vnode_read()) {
++		return 0;
++	}
+ 	VFS_KERNEL_DEBUG_START1(53, vp);
+ 	MAC_CHECK(vnode_check_read, cred, file_cred, vp,
+ 	    mac_vnode_label(vp));
+@@ -1716,6 +1752,9 @@
+ 	if (!mac_cred_check_enforce(cred)) {
+ 		return 0;
+ 	}
++	if (droidvm_owner_debug_vnode_read()) {
++		return 0;
++	}
+ 	VFS_KERNEL_DEBUG_START1(54, dvp);
+ 	MAC_CHECK(vnode_check_readdir, cred, dvp, mac_vnode_label(dvp));
+ 	VFS_KERNEL_DEBUG_END1(54, dvp);
+@@ -1738,6 +1777,9 @@
+ 	if (!mac_cred_check_enforce(cred)) {
+ 		return 0;
+ 	}
++	if (droidvm_owner_debug_vnode_read()) {
++		return 0;
++	}
+ 	VFS_KERNEL_DEBUG_START1(55, vp);
+ 	MAC_CHECK(vnode_check_readlink, cred, vp, mac_vnode_label(vp));
+ 	VFS_KERNEL_DEBUG_END1(55, vp);
+@@ -2053,6 +2095,9 @@
+ 	if (!mac_cred_check_enforce(cred)) {
+ 		return 0;
+ 	}
++	if (droidvm_owner_debug_vnode_read()) {
++		return 0;
++	}
+ 	VFS_KERNEL_DEBUG_START1(68, vp);
+ 	MAC_CHECK(vnode_check_stat, cred, file_cred, vp,
+ 	    mac_vnode_label(vp));
