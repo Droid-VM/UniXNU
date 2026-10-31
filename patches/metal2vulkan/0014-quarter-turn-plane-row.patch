@@ -1,0 +1,21 @@
+diff --git a/crates/metal2vulkan-runtime/src/buffer_texture.rs b/crates/metal2vulkan-runtime/src/buffer_texture.rs
+index 1499665f..c1fb36bb 100644
+--- a/crates/metal2vulkan-runtime/src/buffer_texture.rs
++++ b/crates/metal2vulkan-runtime/src/buffer_texture.rs
+@@ -758,7 +758,15 @@ pub(super) fn turned_plane(
+     if !measured {
+         return Err(Error::NotImplemented(RuntimeGap::RotatedTexture));
+     }
+-    covers_its_row(texture).map_err(|problem| refusal_error(call, problem.into()))?;
++    // A quarter turn's plane holds the frame turned, its rows the frame's height long: the iPad's
++    // display framebuffer, a portrait 2048x2732 surface of 8192-byte rows, behind the render
++    // server's landscape texture (2732x2048, rotation 3). Metal on the iPad draws landscape so,
++    // though macOS's validation asserts on the texture's own row (above); the stored extent's plan
++    // below holds the pitch to the plane's row, which is all the texels need. Refused, every
++    // landscape frame went black. A half turn's row is the texture's own, checked as before.
++    if !rotated::quarter(rotation) {
++        covers_its_row(texture).map_err(|problem| refusal_error(call, problem.into()))?;
++    }
+     let [width, height, depth] = texture.layout.extent;
+     let [width, height] = rotated::stored_extent(rotation, [width, height]);
+     let stored = BufferTexture {

@@ -67,7 +67,10 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     # Device::trim_kept_memory: the kept empty pooled blocks that stayed empty a while, each pool's last one included, freed when the
     # Metal plugin asks (its process idle two seconds, or memory pressure): on this board every block is wired guest memory, and a
     # pool keeps its last empty block however long its process stays idle (136 MiB in the render server at the home screen).
-    '0013-trim-kept-memory.patch']]
+    '0013-trim-kept-memory.patch',
+    # A quarter-turned texture over a surface plane held to the plane's row, not its own: the iPad's display framebuffer is a
+    # portrait surface behind the render server's landscape texture (see the fork copy for the reason).
+    '0014-quarter-turn-plane-row.patch']]
 
 
 def git_tree(*steps):
