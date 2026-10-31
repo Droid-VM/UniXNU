@@ -1,0 +1,186 @@
+diff --git a/crates/metal2vulkan-air/src/canon/link.rs b/crates/metal2vulkan-air/src/canon/link.rs
+index 6dac3b02..d9604a11 100644
+--- a/crates/metal2vulkan-air/src/canon/link.rs
++++ b/crates/metal2vulkan-air/src/canon/link.rs
+@@ -76,6 +76,10 @@ pub struct LinkedModule {
+ pub struct LinkedName {
+     /// The Metal function name it links under.
+     pub name: Box<[u8]>,
++    /// The name its module defines it under: `name`, but for a function a descriptor made under
++    /// another name (`MTLFunctionDescriptor.specializedName`), which links under that one while
++    /// its module still defines the function it was made from.
++    pub symbol: Box<[u8]>,
+     /// The function-constant values it was specialized with, by index, or why they do not apply
+     /// to its module.
+     pub constants: Result<BTreeMap<u32, ConstValue>, Error>,
+@@ -517,7 +521,7 @@ fn link_in(
+                         Ok(def) => Ok(def),
+                         Err(error) => Err(Unimported {
+                             error,
+-                            ty: source_type(l, &f.name, m)?.map(|t| (i, t)),
++                            ty: source_type(l, &f.symbol, m)?.map(|t| (i, t)),
+                         }),
+                     };
+                     m.charge(std::mem::size_of::<Candidate>() + f.name.len())?;
+@@ -784,6 +788,7 @@ fn plan(
+     held: &mut usize,
+ ) -> Result<Result<Plan, Error>, Error> {
+     let name = &*f.name;
++    let symbol = &*f.symbol;
+     if l.abi.linkage_signature.is_some() {
+         return Ok(Err(not_implemented(name, "air.signature")));
+     }
+@@ -827,7 +832,7 @@ fn plan(
+         l.module
+             .func(v.func)
+             .and_then(|f| l.module.symbols().get(f.name))
+-            == Some(name)
++            == Some(symbol)
+     });
+     let Some(func) = visible.map(|v| v.func) else {
+         return Ok(Err(link_problem(name, LinkProblem::NotVisible)));
+diff --git a/crates/metal2vulkan-runtime/src/library.rs b/crates/metal2vulkan-runtime/src/library.rs
+index 561af086..c65af77c 100644
+--- a/crates/metal2vulkan-runtime/src/library.rs
++++ b/crates/metal2vulkan-runtime/src/library.rs
+@@ -88,6 +88,9 @@ pub struct Function {
+     /// The options the function was made with (`newFunctionWithDescriptor:`); none for the
+     /// other forms.
+     options: FunctionOptions,
++    /// The name the function was made under (`MTLFunctionDescriptor.specializedName`), which it
++    /// links under in a pipeline's linked functions; `None`: its own name.
++    specialized_name: Option<String>,
+     /// What the function object holds of the sampler IDs its function's pipeline states
+     /// numbered, shared with every function object of the same function of its library
+     /// (`resource_ids/numbered.rs`); held for its drop.
+@@ -289,6 +292,7 @@ impl Library {
+             properties: Arc::default(),
+             constants_dictionary: Arc::default(),
+             options: FunctionOptions::NONE,
++            specialized_name: None,
+             _holds: holds,
+         })
+     }
+@@ -469,5 +473,13 @@ impl Function {
+         LinkedFunction::new(self.function.clone())
+             .with_constants(self.constants.clone())
+             .with_precompiled(self.precompiled())
++            .with_specialized_name(self.specialized_name.clone())
++    }
++
++    /// Make the function under `name` (`MTLFunctionDescriptor.specializedName`): it links under
++    /// that name, which a visible-function reference names (iPadOS 27's RenderBox makes
++    /// IconRendering's `clampedPlusL_v1` as `custom_blend`). `None`: its own name.
++    pub fn set_specialized_name(&mut self, name: Option<String>) {
++        self.specialized_name = name;
+     }
+ }
+diff --git a/crates/metal2vulkan/src/pipeline/compile.rs b/crates/metal2vulkan/src/pipeline/compile.rs
+index c8f82b0c..837e9e2c 100644
+--- a/crates/metal2vulkan/src/pipeline/compile.rs
++++ b/crates/metal2vulkan/src/pipeline/compile.rs
+@@ -292,6 +292,7 @@ impl<'a> LinkedSource<'a> {
+             key: LinkedKey {
+                 list: crate::pipeline::descriptor::LinkedList::Functions,
+                 name,
++                symbol: name,
+                 air_hash: container::sha256(bitcode),
+                 constants,
+             },
+@@ -308,7 +309,8 @@ pub(crate) fn linked_keys(linked: &LinkedFunctions) -> Vec<LinkedKey<'_>> {
+             let info = f.function.info();
+             LinkedKey {
+                 list,
+-                name: info.name,
++                name: f.specialized_name.as_deref().unwrap_or(info.name),
++                symbol: info.name,
+                 air_hash: info.air_hash,
+                 constants: &f.constants,
+             }
+@@ -1750,6 +1752,7 @@ pub(crate) fn linked_modules(
+             m.charge(std::mem::size_of::<LinkedName>())?;
+             l.functions.push(LinkedName {
+                 name: name.clone(),
++                symbol: key.symbol.as_bytes().into(),
+                 constants,
+                 handle: handle.map(|h| h.word()),
+             });
+@@ -1802,6 +1805,7 @@ pub(crate) fn linked_modules(
+         m.charge(std::mem::size_of::<LinkedName>() + key.name.len())?;
+         l.functions.push(LinkedName {
+             name: key.name.as_bytes().into(),
++            symbol: key.symbol.as_bytes().into(),
+             constants,
+             handle: handle.map(|h| h.word()),
+         });
+diff --git a/crates/metal2vulkan/src/pipeline/compile/key.rs b/crates/metal2vulkan/src/pipeline/compile/key.rs
+index 0d00988c..881344ce 100644
+--- a/crates/metal2vulkan/src/pipeline/compile/key.rs
++++ b/crates/metal2vulkan/src/pipeline/compile/key.rs
+@@ -34,6 +34,9 @@ use crate::pipeline::descriptor::{
+ pub struct LinkedKey<'a> {
+     pub list: LinkedList<'a>,
+     pub name: &'a str,
++    /// The name its module defines it under (`LinkedFunction::specialized_name`): `name` unless
++    /// the function links under a specialized name.
++    pub symbol: &'a str,
+     pub air_hash: Hash256,
+     pub constants: &'a FunctionConstantValues,
+ }
+@@ -485,6 +488,11 @@ pub fn function_key(
+                 LinkedList::Group(name) => h.u64(3).bytes(name.as_bytes()),
+             };
+             h.bytes(&l.air_hash).bytes(l.name.as_bytes());
++            // Appended only when the function links under a specialized name, so keys of
++            // functions linked under their own names are unchanged.
++            if l.symbol != l.name {
++                h.bytes(b"symbol").bytes(l.symbol.as_bytes());
++            }
+             constants(&mut h, l.constants);
+         }
+     }
+diff --git a/crates/metal2vulkan/src/pipeline/descriptor.rs b/crates/metal2vulkan/src/pipeline/descriptor.rs
+index 01b2814b..4066e843 100644
+--- a/crates/metal2vulkan/src/pipeline/descriptor.rs
++++ b/crates/metal2vulkan/src/pipeline/descriptor.rs
+@@ -252,6 +252,11 @@ pub struct LinkedFunction {
+     /// made pipeline state; the runtime checks it, refusing one that is not as Metal does. The
+     /// translation links the function's AIR either way, so it is not part of any key.
+     pub precompiled: bool,
++    /// The name the function was made under (`MTLFunctionDescriptor.specializedName`): it links
++    /// under this name, which a visible-function reference names, while its module defines the
++    /// function it was made from. iPadOS 27's RenderBox makes IconRendering's `clampedPlusL_v1`
++    /// as `custom_blend`, which its fragment functions call. `None`: its own name.
++    pub specialized_name: Option<String>,
+ }
+ 
+ impl LinkedFunction {
+@@ -261,9 +266,16 @@ impl LinkedFunction {
+             function,
+             constants: FunctionConstantValues::defaults(),
+             precompiled: false,
++            specialized_name: None,
+         }
+     }
+ 
++    /// This function, linked under `name` (`specialized_name`).
++    pub fn with_specialized_name(mut self, name: Option<String>) -> LinkedFunction {
++        self.specialized_name = name;
++        self
++    }
++
+     /// This function specialized with `constants`.
+     pub fn with_constants(mut self, constants: FunctionConstantValues) -> LinkedFunction {
+         self.constants = constants;
+diff --git a/crates/metal2vulkan/src/pipeline/table.rs b/crates/metal2vulkan/src/pipeline/table.rs
+index 4154b74b..f059fc01 100644
+--- a/crates/metal2vulkan/src/pipeline/table.rs
++++ b/crates/metal2vulkan/src/pipeline/table.rs
+@@ -115,6 +115,7 @@ mod tests {
+         LinkedKey {
+             list,
+             name,
++            symbol: name,
+             air_hash: [hash; 32],
+             constants,
+         }

@@ -74,7 +74,10 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     # A [[color(n)]] read of a color the render pipeline has no attachment for reads zero instead of refusing the pipeline
     # (LoweringInputs::unattached_reads): iPadOS 27's QuartzCore makes path_blit_frag_lph (its coverage mask at color 2) and
     # fixed_frag_lph_cph for passes without that attachment, and the render server aborted in create_pipeline_state.
-    '0015-unattached-color-reads.patch']]
+    '0015-unattached-color-reads.patch',
+    # A linked function made under MTLFunctionDescriptor.specializedName links under that name (LinkedFunction::specialized_name;
+    # the AIR linker finds the definition by the module's own name): RenderBox makes IconRendering's clampedPlusL_v1 as custom_blend.
+    '0016-specialized-name-links.patch']]
 
 
 def git_tree(*steps):
