@@ -91,7 +91,11 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     '0015-unattached-color-reads.patch',
     # A linked function made under MTLFunctionDescriptor.specializedName links under that name (LinkedFunction::specialized_name;
     # the AIR linker finds the definition by the module's own name): RenderBox makes IconRendering's clampedPlusL_v1 as custom_blend.
-    '0016-specialized-name-links.patch']]
+    '0016-specialized-name-links.patch',
+    # The spare dedicated image blocks (bridge patch 0021) held to a sixteenth of the GPU address space (sparseAddressSpaceSize):
+    # each of the board's GPU contexts has a slice of the host GPU's, and with spares holding part of it the render server's Turnip
+    # found no address range for its next BO and lost the device.
+    '0017-spares-within-the-address-space.patch']]
 
 
 def git_tree(*steps):

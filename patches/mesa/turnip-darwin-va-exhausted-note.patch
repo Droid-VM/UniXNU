@@ -1,0 +1,16 @@
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -515,7 +515,13 @@
+    } else {
+       *iova = darwin_va_alloc(va, size, os_page_size, false);
+    }
++   /* An address range is what this device runs out of without the kernel refusing anything (the virtio GPU gives each context a
++    * slice of the host GPU's address space, 2 GiB): say so, with what the range holds, so a lost device is traced to it. */
++   const uint64_t used = va->used, holes = va->holes;
+    mtx_unlock(&dev->vma_mutex);
++   if (!*iova)
++      mesa_loge("darwin: no GPU address range of %llu bytes: %llu of %llu bytes in use, %llu holes", (unsigned long long)size,
++                (unsigned long long)used, (unsigned long long)dev->physical_device->va_size, (unsigned long long)holes);
+    return *iova ? VK_SUCCESS : VK_ERROR_OUT_OF_DEVICE_MEMORY;
+ }
+ 

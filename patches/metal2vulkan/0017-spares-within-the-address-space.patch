@@ -1,0 +1,80 @@
+diff --git a/crates/metal2vulkan-runtime/src/device/mod.rs b/crates/metal2vulkan-runtime/src/device/mod.rs
+index 96352266..afba80c7 100644
+--- a/crates/metal2vulkan-runtime/src/device/mod.rs
++++ b/crates/metal2vulkan-runtime/src/device/mod.rs
+@@ -1608,6 +1608,7 @@ impl Device {
+         // SAFETY: as above.
+         let physical_properties = unsafe { instance.raw.get_physical_device_properties(physical) };
+         let limits = physical_properties.limits;
++        memory.bound_spares(limits.sparse_address_space_size);
+         let upload_alignment = [
+             16,
+             limits.min_storage_buffer_offset_alignment,
+diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
+index 0c2d3d65..77b59745 100644
+--- a/crates/metal2vulkan-runtime/src/memory.rs
++++ b/crates/metal2vulkan-runtime/src/memory.rs
+@@ -1081,6 +1081,8 @@ pub(super) struct Memory {
+     /// The dedicated blocks of images kept for the next dedicated image of their pool
+     /// ([`SPARE_FOR`]).
+     spare: Vec<Spare>,
++    /// The bytes the spare blocks may hold together ([`Memory::bound_spares`]).
++    spare_limit: u64,
+ }
+ 
+ impl Memory {
+@@ -1117,9 +1119,23 @@ impl Memory {
+             log: None,
+             binds_wait: binds_wait(driver),
+             spare: Vec::new(),
++            spare_limit: u64::MAX,
+         }
+     }
+ 
++    /// Hold the spare blocks to a sixteenth of the device's GPU address space,
++    /// `address_space` bytes (`sparseAddressSpaceSize`; 0: no bound). Every block of the device
++    /// takes addresses from that space, the driver's own too: where it is small (a virtio GPU
++    /// context's 2 GiB slice of the host GPU's), spares left no room for the driver's next
++    /// allocation, which no spare can be given back for, and the render server lost its device
++    /// (Turnip's autotune BO, `VK_ERROR_OUT_OF_DEVICE_MEMORY` with no allocation refused).
++    pub(super) fn bound_spares(&mut self, address_space: u64) {
++        self.spare_limit = match address_space {
++            0 => u64::MAX,
++            bytes => bytes / 16,
++        };
++    }
++
+     /// Log each `VkDeviceMemory` allocated, imported or freed from now on to `log`
+     /// (`memory_log.rs`).
+     pub(super) fn log_to(&mut self, log: Option<MemoryLog>) {
+@@ -1476,6 +1492,7 @@ impl Memory {
+                     block,
+                     since: now,
+                 });
++                self.trim_spare(device);
+                 after
+             }
+             Some((block, dedicated)) => {
+@@ -1510,6 +1527,22 @@ impl Memory {
+         count
+     }
+ 
++    /// Free the oldest spare blocks until the rest hold no more than the bound
++    /// ([`Memory::bound_spares`]).
++    fn trim_spare(&mut self, device: &ash::Device) {
++        let mut held: u64 = self.spare.iter().map(|spare| spare.block.size).sum();
++        while held > self.spare_limit {
++            let oldest = (self.spare.iter().enumerate()).min_by_key(|(_, spare)| spare.since);
++            let Some((oldest, _)) = oldest else {
++                break;
++            };
++            let spare = self.spare.swap_remove(oldest);
++            held -= spare.block.size;
++            // SAFETY: nothing is placed in a spare block, and no command reads it.
++            drop(unsafe { self.let_go(device, spare.block, FreeCause::KeptStale, None) });
++        }
++    }
++
+     /// Free the spare blocks that stayed spare for [`SPARE_FOR`] at `now`.
+     fn age_spare(&mut self, device: &ash::Device, now: Instant) {
+         let stale: Vec<Spare> = (self.spare)
