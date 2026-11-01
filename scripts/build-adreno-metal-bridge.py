@@ -104,7 +104,11 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     # The pooled block size from the environment (METAL2VULKAN_BLOCK_MIB), which the Metal plugin sets to 16 MiB: every block is wired
     # guest memory, and each pool grows, keeps room and keeps an empty block a whole block at a time (the render server held 547-616 MiB
     # of empty 64 MiB blocks at the home screen; opening an app grew its blocks by 640 MiB for 187 MiB placed in them).
-    '0019-pooled-block-size-from-the-environment.patch']]
+    '0019-pooled-block-size-from-the-environment.patch',
+    # Device::hold_back_memory: while the Metal plugin reports memory pressure raised (its source fires as the level changes, so it
+    # turns this on at warn or critical and off at normal), no room kept ahead of the placements, no empty pooled block and no spare
+    # kept: a one-time trim came back with the next frame's room, 547-616 MiB of empty wired blocks in the render server.
+    '0020-hold-back-memory-under-pressure.patch']]
 
 
 def git_tree(*steps):

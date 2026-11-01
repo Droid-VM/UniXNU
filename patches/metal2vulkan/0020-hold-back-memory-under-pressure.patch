@@ -1,0 +1,79 @@
+diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
+index 7826ca3..39ce972 100644
+--- a/crates/metal2vulkan-runtime/src/memory.rs
++++ b/crates/metal2vulkan-runtime/src/memory.rs
+@@ -1098,6 +1098,12 @@ pub(super) struct Memory {
+     spare: Vec<Spare>,
+     /// The bytes the spare blocks may hold together ([`Memory::bound_spares`]).
+     spare_limit: u64,
++    /// While the system reports memory pressure ([`crate::Device::hold_back_memory`]): no room
++    /// kept ahead of the placements ([`keep_room`]), no empty pooled block and no spare kept --
++    /// each goes as it empties. Where every block is wired memory the system cannot reclaim (a
++    /// guest whose GPU imports its pages), a one-time trim at the pressure notification came back
++    /// with the next frame's room: the notification comes as the level changes, not while it stays.
++    held_back: bool,
+ }
+ 
+ impl Memory {
+@@ -1135,6 +1141,7 @@ impl Memory {
+             binds_wait: binds_wait(driver),
+             spare: Vec::new(),
+             spare_limit: u64::MAX,
++            held_back: false,
+         }
+     }
+ 
+@@ -1500,7 +1507,7 @@ impl Memory {
+         }
+         self.age_spare(device, now);
+         match freed {
+-            Some((block, true)) if holds == Holds::Images && block.plain() => {
++            Some((block, true)) if holds == Holds::Images && block.plain() && !self.held_back => {
+                 self.say_block("kept a dedicated block of an image spare", &block);
+                 self.spare.push(Spare {
+                     pool: (holds, type_index),
+@@ -1518,6 +1525,13 @@ impl Memory {
+                 // SAFETY: no resource is placed in the block any more.
+                 unsafe { self.let_go(device, block, cause, after) }
+             }
++            None if self.held_back => {
++                for block in self.pool(holds, type_index).take_kept() {
++                    // SAFETY: nothing is placed in a kept empty block, and no command reads it.
++                    drop(unsafe { self.let_go(device, block, FreeCause::KeptForRoom, None) });
++                }
++                after
++            }
+             None => after,
+         }
+     }
+@@ -2306,6 +2320,9 @@ fn place(
+ pub(super) fn keep_room(memory: &Mutex<Memory>, device: &ash::Device, counts: &Counters) {
+     let (lacking, maker) = {
+         let mut memory = lock(memory);
++        if memory.held_back {
++            return;
++        }
+         let Ok(kept) = memory.kept(device) else {
+             return;
+         };
+@@ -2340,6 +2357,20 @@ pub(super) fn keep_room(memory: &Mutex<Memory>, device: &ash::Device, counts: &C
+ }
+ 
+ impl crate::Device {
++    /// Keeps no memory for later placements while `on` ([`Memory::held_back`]): the caller turns
++    /// it on as the system reports memory pressure and off as it reports the normal level again.
++    /// Turning it on gives back every spare and kept empty block now: how many blocks went.
++    pub fn hold_back_memory(&self, on: bool) -> usize {
++        let shared = self.shared();
++        let mut memory = lock(&shared.memory);
++        memory.held_back = on;
++        if on {
++            memory.release_spare(shared.vk())
++        } else {
++            0
++        }
++    }
++
+     /// Frees the kept empty pooled blocks that have stayed empty for `idle` or longer, each pool's
+     /// last one included, and answers how many went. [`Pool::stale`] keeps a pool's last empty
+     /// block for its next placements however long it stays empty, and runs only as a block of the
