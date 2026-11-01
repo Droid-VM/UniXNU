@@ -1,0 +1,218 @@
+diff --git a/crates/metal2vulkan-air/src/canon/devirt_tests.rs b/crates/metal2vulkan-air/src/canon/devirt_tests.rs
+index 4b23e82e..85aa2a93 100644
+--- a/crates/metal2vulkan-air/src/canon/devirt_tests.rs
++++ b/crates/metal2vulkan-air/src/canon/devirt_tests.rs
+@@ -230,6 +230,7 @@ fn candidates() -> LinkedModule {
+             .zip(2..)
+             .map(|(name, word)| LinkedName {
+                 name: name.as_bytes().into(),
++                symbol: name.as_bytes().into(),
+                 constants: Ok(BTreeMap::new()),
+                 handle: Some(word),
+             })
+@@ -389,6 +390,7 @@ fn an_unimportable_candidate_is_refused_at_a_surviving_call() {
+     let broken = || LinkedModule {
+         functions: vec![LinkedName {
+             name: b"inc".as_slice().into(),
++            symbol: b"inc".as_slice().into(),
+             constants: Ok(BTreeMap::new()),
+             handle: Some(2),
+         }],
+@@ -470,6 +472,7 @@ fn a_candidate_calling_through_its_table_recurses_on_a_call_stack() {
+     let linked = LinkedModule {
+         functions: vec![LinkedName {
+             name: b"rec".as_slice().into(),
++            symbol: b"rec".as_slice().into(),
+             constants: Ok(BTreeMap::new()),
+             handle: Some(2),
+         }],
+@@ -741,6 +744,7 @@ fn pointer_candidates() -> LinkedModule {
+             .zip(2..)
+             .map(|(name, word)| LinkedName {
+                 name: name.as_bytes().into(),
++                symbol: name.as_bytes().into(),
+                 constants: Ok(BTreeMap::new()),
+                 handle: Some(word),
+             })
+@@ -1405,6 +1409,7 @@ fn inlining_candidates_at_every_table_call_is_capped() {
+     let linked = LinkedModule {
+         functions: vec![LinkedName {
+             name: b"big".as_slice().into(),
++            symbol: b"big".as_slice().into(),
+             constants: Ok(BTreeMap::new()),
+             handle: Some(2),
+         }],
+diff --git a/crates/metal2vulkan-air/src/canon/link.rs b/crates/metal2vulkan-air/src/canon/link.rs
+index d9604a11..8082e095 100644
+--- a/crates/metal2vulkan-air/src/canon/link.rs
++++ b/crates/metal2vulkan-air/src/canon/link.rs
+@@ -670,6 +670,39 @@ fn unimported_samplers(
+             if f.handle.is_none() || imported((i, j)) {
+                 continue;
+             }
++            // A specialized function's constants bound into a copy of its module: its own globals
++            // and the imports they reach are that copy's.
++            let bound = match bound_constants(code, f, m)? {
++                Ok(bound) => bound,
++                Err(_) => {
++                    unknown = true;
++                    continue;
++                }
++            };
++            if let Some((code, f)) = &bound {
++                let items = imports(code.module.parts(), m)?;
++                *held += items.len() * std::mem::size_of::<Item>();
++                let plan = match plan(code, f, &items, layout, m, held)? {
++                    Ok(plan) => plan,
++                    Err(_) => {
++                        unknown = true;
++                        continue;
++                    }
++                };
++                let mut states = Vec::new();
++                for s in &code.abi.static_samplers {
++                    m.tick(1)?;
++                    if plan.keep_g.get(s.global.index()).copied().unwrap_or(false) {
++                        m.charge(std::mem::size_of::<SamplerState>())?;
++                        *held += std::mem::size_of::<SamplerState>();
++                        states.push(s.state);
++                    }
++                }
++                if !states.is_empty() {
++                    groups.push(states);
++                }
++                continue;
++            }
+             let src_imports = match &src_imports {
+                 Some(items) => items,
+                 None => {
+@@ -748,6 +781,14 @@ fn import_linked(
+         Err(e) => return Ok((Err(e.clone()), tables)),
+         Ok(code) => code,
+     };
++    let bound = match bound_constants(code, f, m)? {
++        Err(refusal) => return Ok((Err(refusal), tables)),
++        Ok(bound) => bound,
++    };
++    let (code, f) = match &bound {
++        Some((code, f)) => (code, f),
++        None => (code, f),
++    };
+     let src_imports = imports(code.module.parts(), m)?;
+     *held += src_imports.len() * std::mem::size_of::<Item>();
+     let plan = match plan(code, f, &src_imports, brought.layout, m, held)? {
+@@ -776,6 +817,86 @@ struct Plan {
+     keep_f: Vec<bool>,
+ }
+ 
++/// `code` closed for linking `f` in a copy of its module: the function-constant values `f` was
++/// specialized with bound, and its static initializers evaluated into constant initializers, as
++/// the stage's own module is before inlining (`specialize_dynamic`, steps 3 and 4). That is what a
++/// specialized `MTLFunction` whose module declares constants links (Metal resolves them before
++/// linking; [`plan`]). `f` comes back with no values left to bind. `Ok(None)` when the module has
++/// neither, or declares a constant `f` has no value for (refused by [`plan`] as before);
++/// `Ok(Err(refusal))` when the values do not fit or an initializer does not evaluate; an outer
++/// error for a budget stop. iPadOS 27's RenderBox links `displacementMap_v1`, specialized with
++/// `RB::shaderVariant` and initializing its constant tables statically, as `custom_fn` (the icon
++/// effects of Settings' rows, drawn in iconservicesagent).
++fn bound_constants(
++    code: &LinkedCode,
++    f: &LinkedName,
++    m: &mut Meter,
++) -> Result<Result<Option<(LinkedCode, LinkedName)>, Error>, Error> {
++    let declared = &code.abi.function_constants;
++    let Ok(values) = &f.constants else {
++        return Ok(Ok(None));
++    };
++    if declared.is_empty() && !static_initializer(code) {
++        return Ok(Ok(None));
++    }
++    if declared.iter().any(|d| !values.contains_key(&d.index)) {
++        return Ok(Ok(None));
++    }
++    // A static initializer is not a function a stage calls: linked as one, it stays refused.
++    let parts = code.module.parts();
++    let root_initializes = parts.funcs.values().any(|func| {
++        func.section == Some(Section::StaticInit)
++            && parts.symbols.get(func.name) == Some(&*f.symbol)
++    });
++    if root_initializes {
++        return Ok(Ok(None));
++    }
++    let stop = |e: &Error| {
++        matches!(
++            e,
++            Error::Budget(_) | Error::Cancelled | Error::LimitExceeded(_)
++        )
++    };
++    let (pending, states) = match super::fc::check(&code.module, &code.abi, values, m) {
++        Ok(checked) => checked,
++        Err(e) if stop(&e) => return Err(e),
++        Err(refusal) => return Ok(Err(refusal)),
++    };
++    let mut parts = code.module.clone().into_parts();
++    let closed = super::fc::bind(
++        &parts.types,
++        &mut parts.consts,
++        &mut parts.globals,
++        &pending,
++        m,
++    )
++    .and_then(|()| {
++        let unevaluable = super::static_init::Unevaluable::Refuse;
++        super::static_init::evaluate(&mut parts, &states, unevaluable, m)
++    });
++    match closed {
++        Ok(_) => {}
++        Err(e) if stop(&e) => return Err(e),
++        Err(refusal) => return Ok(Err(refusal)),
++    }
++    // What the initializers stored is in the globals' initializers now: nothing runs them, and
++    // each is left a declaration (which only external linkage may be).
++    for func in parts.funcs.values_mut() {
++        if func.section == Some(Section::StaticInit) {
++            func.body = None;
++            func.linkage = Linkage::External;
++        }
++    }
++    let module = Module::new(parts, m)?;
++    let mut abi = code.abi.clone();
++    abi.function_constants.clear();
++    let f = LinkedName {
++        constants: Ok(BTreeMap::new()),
++        ..f.clone()
++    };
++    Ok(Ok(Some((LinkedCode { module, abi }, f))))
++}
++
+ /// Decide the import of `f` from `l` (whose dynamic-library imports are `imports`): `Ok(Err(refusal))`
+ /// when it cannot be linked (the stub's state), an outer error for a budget stop. The
+ /// destination ids are assigned by [`import`].
+@@ -804,11 +925,10 @@ fn plan(
+     //   the visible function reads it, `newFunctionWithName:constantValues:`          created, ran
+     //
+     // A specialized `MTLFunction` therefore resolves the module's constants before linking, and a
+-    // constant nothing the import reaches reads costs nothing. This refuses on the module
+-    // declaring any constant at all, which is wider than Metal in three of those four shapes. The
+-    // values are already here (`LinkedName::constants`, the specialized function's); closing the
+-    // gap means binding them and folding the linked module before the import, then refusing only
+-    // a constant `reach` keeps with no value bound.
++    // constant nothing the import reaches reads costs nothing. A function specialized with a value
++    // for every constant its module declares comes here with them bound ([`bound_constants`]);
++    // this refuses the rest, a module declaring a constant with no value, which is wider than
++    // Metal where nothing the import reaches reads that constant.
+     if !l.abi.function_constants.is_empty() {
+         return Ok(Err(not_implemented(name, "air.function_constants")));
+     }
+diff --git a/crates/metal2vulkan-air/src/canon/link_tests.rs b/crates/metal2vulkan-air/src/canon/link_tests.rs
+index f6694358..1f18ae5f 100644
+--- a/crates/metal2vulkan-air/src/canon/link_tests.rs
++++ b/crates/metal2vulkan-air/src/canon/link_tests.rs
+@@ -233,6 +233,7 @@ fn linked(name: &str, module: Module, abi: AirAbi) -> LinkedModule {
+     LinkedModule {
+         functions: vec![LinkedName {
+             name: name.as_bytes().into(),
++            symbol: name.as_bytes().into(),
+             constants: Ok(BTreeMap::new()),
+             handle: None,
+         }],

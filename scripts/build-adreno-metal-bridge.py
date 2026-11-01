@@ -95,7 +95,12 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     # The spare dedicated image blocks (bridge patch 0021) held to a sixteenth of the GPU address space (sparseAddressSpaceSize):
     # each of the board's GPU contexts has a slice of the host GPU's, and with spares holding part of it the render server's Turnip
     # found no address range for its next BO and lost the device.
-    '0017-spares-within-the-address-space.patch']]
+    '0017-spares-within-the-address-space.patch',
+    # A linked function specialized with function constants links with them bound and its module's static initializers evaluated,
+    # as Metal resolves a specialized function's constants before linking (the linker refused any module declaring a constant or a
+    # static initializer): RenderBox links displacementMap_v1 specialized with RB::shaderVariant as custom_fn, the icon effect of
+    # Settings' rows (iconservicesagent's refused custom_effect pipelines). Also gives 0016's LinkedName.symbol to the unit tests.
+    '0018-specialized-linked-functions-closed-before-linking.patch']]
 
 
 def git_tree(*steps):
