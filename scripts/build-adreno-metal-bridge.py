@@ -100,7 +100,11 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     # as Metal resolves a specialized function's constants before linking (the linker refused any module declaring a constant or a
     # static initializer): RenderBox links displacementMap_v1 specialized with RB::shaderVariant as custom_fn, the icon effect of
     # Settings' rows (iconservicesagent's refused custom_effect pipelines). Also gives 0016's LinkedName.symbol to the unit tests.
-    '0018-specialized-linked-functions-closed-before-linking.patch']]
+    '0018-specialized-linked-functions-closed-before-linking.patch',
+    # The pooled block size from the environment (METAL2VULKAN_BLOCK_MIB), which the Metal plugin sets to 16 MiB: every block is wired
+    # guest memory, and each pool grows, keeps room and keeps an empty block a whole block at a time (the render server held 547-616 MiB
+    # of empty 64 MiB blocks at the home screen; opening an app grew its blocks by 640 MiB for 187 MiB placed in them).
+    '0019-pooled-block-size-from-the-environment.patch']]
 
 
 def git_tree(*steps):

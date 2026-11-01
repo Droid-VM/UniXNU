@@ -1,0 +1,35 @@
+diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
+index 77b5974..7826ca3 100644
+--- a/crates/metal2vulkan-runtime/src/memory.rs
++++ b/crates/metal2vulkan-runtime/src/memory.rs
+@@ -90,6 +90,21 @@ const LOGGED_PLACEMENT_BYTES: u64 = 4 << 20;
+ /// guest's home screen.
+ pub(super) const FIRST_BLOCK_BYTES: u64 = 4 << 20;
+ 
++/// The size of a pooled block in this process: [`BLOCK_BYTES`], or `METAL2VULKAN_BLOCK_MIB` MiB
++/// where the process sets it (a power of two from [`FIRST_BLOCK_BYTES`] to [`BLOCK_BYTES`]). Where
++/// every block is wired guest memory, each pool's growth, the room [`keep_room`] keeps in it and
++/// the empty block it keeps are a block each: an iPadOS guest's render server held 547-616 MiB of
++/// empty pooled blocks at its home screen, and opening one app grew its pooled blocks by 640 MiB
++/// for 187 MiB placed in them (1.1 GiB of wired memory in a second, the guest's free pages at 0).
++/// A request larger than half a block takes a dedicated block of its own size, as before.
++fn block_bytes() -> u64 {
++    (std::env::var("METAL2VULKAN_BLOCK_MIB").ok())
++        .and_then(|text| text.trim().parse::<u64>().ok())
++        .and_then(|mib| mib.checked_mul(1 << 20))
++        .filter(|&bytes| bytes.is_power_of_two() && (FIRST_BLOCK_BYTES..=BLOCK_BYTES).contains(&bytes))
++        .unwrap_or(BLOCK_BYTES)
++}
++
+ /// How long a dedicated block of images whose image went stays spare for the next dedicated image
+ /// of its pool ([`Memory::take_spare`]) before it is freed. Core Animation makes a memoryless
+ /// attachment for every surface it renders to and releases it with the surface: where the device's
+@@ -1105,7 +1120,7 @@ impl Memory {
+                 .map(|_| Pool::default())
+                 .collect(),
+             types,
+-            block_bytes: BLOCK_BYTES.min(max_allocation.max(1)),
++            block_bytes: block_bytes().min(max_allocation.max(1)),
+             device_address,
+             address_types: None,
+             kept: None,
