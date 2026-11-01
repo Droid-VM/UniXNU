@@ -19,6 +19,7 @@ UniXNU-<device>/
   configs/<device>_defconfig
   dts/<device>.dts
   patches/xnu/series
+  scripts/package.sh
   proprietary-files.txt
   package/
   local.toml.example
@@ -82,6 +83,8 @@ areas checked. Resolve each reported error before publication.
 
 Compile the [board DTS](/porting/device-tree), then follow
 [Building](/building) for kernel, package, firmware, payload and boot image.
+The repository also carries the [device packaging script](/porting/packaging)
+that produces the same two artifacts from a clean checkout with no edit.
 Record each command, revision, output and result. Record hardware checkpoints
 separately using [bring-up](/porting/bring-up) and [log capture](/porting/log-capture).
 Assign each area its supported [completion level](/porting/records#completion-levels).

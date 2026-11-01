@@ -85,6 +85,33 @@ sheng 配方把这些 kit、ArmSmmu4K 和板级投票链接到 `libAdreno740.a`�
 CPU 读取结果前完成缓存同步；fence 超时时先停止队列并确认 DMA 已停止，再释放 BO 和映射。
 在错误返回中保留失败的请求类型、句柄和 fence，便于定位分配、映射或执行阶段。
 
+### 8 位 BGRA 帧缓冲的渲染模式 {#render-mode}
+
+`sheng-fb-bgra=1` 时插件设置 `TU_DEBUG=sysmem,nocb`，所有 pass 在系统内存中渲染。tile 内存里的颜色已是渲染目标写出的字节序，
+GMEM 的加载和存储在内存侧必须用恒等 swap 搬运字节；记录的 Mesa 补丁 `turnip-gmem-mutable-swap.patch` 对 resolve、2D 与 3D 存储、
+3D 加载做了这一处理。打补丁后锁屏在 tile 内存下与 RGhA 画面一致度为 99.5 %，但每个命令缓冲区的 GPU 时间并不优于系统内存
+（均值 17.8 ms、p95 56.1 ms，系统内存为 17.1 与 52.1），主屏仍有一帧红蓝互换，因此默认保持系统内存。
+`sheng-tu-debug=` 可用于实验覆盖。
+
+### 定位慢帧的耗时 {#frame-path}
+
+修改之前，先把慢帧拆成各层占用的时间。下面每一段都用主机的 uptime 时钟测量；GPU 的 always-on 计数器通过拟合直线换算到同一时钟。
+
+| 段 | 测量位置 |
+| --- | --- |
+| 提交到调度器 | 运行时阶段记录（commit、prepared、handed、taken）。 |
+| 调度器到提交 | 运行时阶段记录，以及批次被扣住的原因。 |
+| 提交到 GPU 开始 | 驱动任务时间线：按进程统计排在前面的任务。 |
+| GPU 开始到结束 | 每个任务的 CP 起止时间戳；Turnip 每个 render pass 的时间戳。 |
+| GPU 结束到回调 | 驱动的 retire 时间、完成等待线程、completed 回调。 |
+
+sheng 上 iPadOS 27 的测量结果（小组件页、设置、Safari）：
+
+- 驱动锁的等待都在 7 ms 以下。render pass 的 GPU 时间中位数 0.5 ms，全屏 pass 1.1 ms。
+- 多数慢帧在 GPU 队列里排在其他进程的任务后面：一个海报扩展提交的任务每个约 77 ms，而队列按顺序执行，不分优先级。
+- 运行时中把命令缓冲区送到回调的线程使用默认 QoS：设置 QoS 的代码只在 macOS 上生效。
+- 打开设置和 Safari 时，94 到 112 MiB 的内存块锁定需要 281 到 340 ms。
+
 ## 4. 构建并加入 Metal
 
 准备匹配的 SDK、编译器依赖和 ABI 输入后，在目标构建树执行：
@@ -107,6 +134,24 @@ AirNir 是离线编译器 kit；运行时前端使用组件页说明的 AIR → 
 
 **预期结果：** Metal 设备发现、客户端连接、pipeline 创建、渲染和呈现分别成功。
 随画面结果记录固件、编译器和插件版本，分别测量首次 pipeline 编译和缓存复用时间。
+
+### 预热着色器缓存 {#shader-warmup}
+
+pipeline 在第一次被请求时才从 Apple 的 AIR 编译，会让画面卡顿。预先预热缓存，桌面就能直接命中。有两项输入，所有 OS 配置都用同一机制（iOS/iPadOS 17 用 `--target ios`，27 用 `--target ios27`）；只有库列表不同，因为它列出的是该 OS 镜像的库。
+
+1. **预编译列表。** 把 OS 镜像中每个 `.metallib` 的绝对路径按 render server 看到的形式（`/System/Library/...`）逐行写出。放在 `build/prime-list.txt`，`build-adreno-metal-plugin.py` 会把它嵌入插件的 `__DATA,__primelist` 段，`make-gpu-addon.py --prime-list FILE` 把它作为 `addons/NativeAdrenoMetal.primelist` 带上。有列表时 render server 不扫描目录，因为沙盒让它看不到大部分目录。
+2. **Pipeline 包。** 启动用 `make-gpu-addon.py --cache-export` 构建的镜像，插件会把缓存目录写进板级日志。用 `scripts/read-sheng-log.py` 读取这次运行，用 `scripts/make-m2vpack.py OUT EXPORT_DIR...` 合并一个或多个导出（靠后的目录优先），再用 `make-gpu-addon.py --pipeline-pack OUT` 带上。插件在运行时打开缓存目录之前先把包导入其中。
+
+预编译的运行方式：
+
+- render server 打开设备 90 s 后在后台线程启动，线程栈 8 MiB。
+- 每个 kernel 函数生成一个 compute pipeline；每个 vertex 函数生成一个 render pipeline，配同名前缀的 fragment 函数（`_vert_` 换成 `_frag_`）和一个 BGRA8 附件。之后用其他常量或附件创建的 pipeline 仍按需编译。
+- 桌面有动画时等待：250 ms 内超过 8 个命令缓冲区算忙，120 Hz 空闲桌面约提交 6 个。动画结束后再静默 2 s，每次等待最多 10 s，所以桌面一直不安静时仍每 10 s 编译一个 pipeline。
+- 进度保存在缓存目录：`prime-done`（已完成的库）、`prime-fn`（未完成库里已完成的函数）、`prime-current`（正在编译的函数）、`prime-bad`（曾使进程结束的函数；启动时发现 `prime-current` 就移入这里）和 `prime.log`。重启后可在有数千个函数的库内部继续。
+- 每个已完成条目带构建标识：运行时转换器的构建加 Turnip 库的 `LC_UUID`。重建运行时或 Turnip 会让所有库重新预编译，只重建插件则保留已完成的工作。
+- 板级日志的 PR 行显示线程在做什么（编译、等待、打开库）、列表中已完成的库数、已生成的 pipeline 数，以及一次等待内见到的最高提交速率。
+
+**预期结果：** PR 行达到列表中的全部库，第二次启动时相同场景不再出现新的 pipeline 编译。记录列表规模、构建标识以及冷启动和热启动的帧时间。
 
 ## 下一步
 

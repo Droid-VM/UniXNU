@@ -69,7 +69,7 @@ def main():
         pipeline_pack = Path(args[at + 1])
         del args[at:at + 2]
         if pipeline_pack.read_bytes()[:8] != b'SHEXP001':
-            sys.exit('--pipeline-pack takes a SHEXP001 pack (local-tools/make-m2vpack.py)')
+            sys.exit('--pipeline-pack takes a SHEXP001 pack (scripts/make-m2vpack.py)')
     if len(args) != 1:
         sys.exit(__doc__)
     output = Path(args[0]).resolve()

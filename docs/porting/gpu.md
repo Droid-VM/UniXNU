@@ -97,6 +97,36 @@ caches before CPU readback. On fence timeout, stop the queue and confirm DMA has
 before releasing the BO and mapping. Report the failed request, handle and fence
 to distinguish allocation, mapping and execution failures.
 
+### Render mode with an 8-bit BGRA framebuffer {#render-mode}
+
+With `sheng-fb-bgra=1` the plugin sets `TU_DEBUG=sysmem,nocb`: every pass renders in system memory. Tile memory holds a colour
+in the byte order its render target writes, so a GMEM load or store must move the bytes with the identity swap on the memory
+side; the recorded Mesa patch `turnip-gmem-mutable-swap.patch` does that for resolve, 2D and 3D stores and 3D loads. With it
+the lock screen matched the RGhA picture to 99.5 % in tile memory, but the GPU time per command buffer was no better than in
+system memory (17.8 ms mean, 56.1 ms at p95, against 17.1 and 52.1) and one home screen frame still came out with red and blue
+exchanged, so system memory stays the default. `sheng-tu-debug=` overrides it for experiments.
+
+### Find where a slow frame goes {#frame-path}
+
+Split a slow frame into the time each layer holds it before changing anything. Every segment below is
+measured on the host uptime clock; the GPU's always-on counter is mapped to it by a fitted line.
+
+| Segment | Where it is measured |
+| --- | --- |
+| Commit to scheduler | Runtime stage records (commit, prepared, handed, taken). |
+| Scheduler to submit | Runtime stage records, with the reason a batch was held. |
+| Submit to GPU start | Driver job timeline: the jobs ahead in the ring, by process. |
+| GPU start to end | CP start and end stamps per job; Turnip stamps per render pass. |
+| GPU end to handler | Driver retire time, the completion waiter, the completed handler. |
+
+Measured on sheng with iPadOS 27 (widget page, Settings, Safari):
+
+- Driver lock waits stay under 7 ms. A render pass takes 0.5 ms of GPU time at the median, a full-screen pass 1.1 ms.
+- Most slow frames wait in the ring behind other processes' jobs: a poster extension submitted jobs of about 77 ms each,
+  and the ring runs jobs in order with no priority.
+- The runtime threads that bring a command buffer to its handlers ran at the default QoS: the class was set on macOS only.
+- Blocks of 94 to 112 MiB took 281 to 340 ms to wire when Settings and Safari opened.
+
 ## 4. Build and stage Metal
 
 Run these commands from the resolved target tree after preparing the matching
@@ -125,6 +155,24 @@ AIR → SPIR-V → NIR → IR3 chain described in the component page.
 rendering and presentation each succeed. Record firmware, compiler and plugin
 revisions with the frame result. Cold pipeline compilation and cache reuse need
 separate timing observations.
+
+### Warm the shader caches {#shader-warmup}
+
+A pipeline compiles from Apple's AIR the first time something asks for it, which stalls frames. Warm the caches ahead so the desktop finds them. Two inputs do this, and both use the same mechanism for every OS profile (iOS/iPadOS 17 `--target ios`, 27 `--target ios27`); only the library list differs, because it names the libraries of that OS image.
+
+1. **Priming list.** Write the absolute path of every `.metallib` of the OS image, one per line, as the render server sees it (`/System/Library/...`). Keep it in `build/prime-list.txt`; `build-adreno-metal-plugin.py` embeds it in the plugin as the `__DATA,__primelist` section, and `make-gpu-addon.py --prime-list FILE` ships it as `addons/NativeAdrenoMetal.primelist`. With a list the render server does not scan directories: its sandbox hides most of them.
+2. **Pipeline pack.** Boot an image built with `make-gpu-addon.py --cache-export`; the plugin writes its cache directory to the board log. Read the run with `scripts/read-sheng-log.py`, merge one or more exports with `scripts/make-m2vpack.py OUT EXPORT_DIR...` (later directories win) and ship the result with `make-gpu-addon.py --pipeline-pack OUT`. The plugin imports the pack into the cache directory before the runtime opens it.
+
+How priming runs:
+
+- It starts 90 s after the render server opens the device, on a background thread with an 8 MiB stack.
+- Each kernel function becomes a compute pipeline. Each vertex function becomes a render pipeline with the fragment function of the same stem (`_vert_` to `_frag_`) and one BGRA8 attachment. Pipelines made later with other constants or attachments still compile on demand.
+- It waits while the desktop animates: more than 8 command buffers in 250 ms is busy, and the idle desktop at 120 Hz submits about 6. After an animation it waits 2 s of quiet, and it never waits longer than 10 s, so one pipeline still compiles on a desktop that never settles.
+- Progress lives in the cache directory: `prime-done` (finished libraries), `prime-fn` (finished functions of libraries not finished yet), `prime-current` (the function being compiled), `prime-bad` (functions that ended the process; a start that finds `prime-current` moves it there) and `prime.log`. A restart resumes inside a library with thousands of functions.
+- Each finished entry carries the build id: the runtime's translator build plus the Turnip library's `LC_UUID`. A runtime or Turnip rebuild primes every library again; a plugin rebuild alone keeps the work.
+- The PR row of the board log shows what the thread does (compiling, waiting, opening a library), libraries done of the list, pipelines made and the highest submit rate a wait saw.
+
+**Expected result:** the PR row reaches all libraries of the list, and a second boot shows no new pipeline compiles for the same scenes. Record the list size, the build id and the cold and warm frame timings.
 
 ## Next step
 

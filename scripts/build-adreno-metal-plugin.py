@@ -304,13 +304,7 @@ FRONTEND_REPLACED = [
      '  if(told.fetch_add(1)<64)NBLOG(@"native-metal: function %@ refused: %@",name,lastError());\n'
      '  return nil;\n'
      ' }\n'),
-    (' if(!renderDescriptor(d,p,error)){delete p;return nil;}\n',
-     ' if(!renderDescriptor(d,p,error)) {\n'
-     '  static std::atomic<int> told{0};\n'
-     '  if(told.fetch_add(1)<64)NBLOG(@"native-metal: render pipeline descriptor refused (vertex %@, fragment %@): %@",d.vertexFunction.name,\n'
-     '                               d.fragmentFunction.name,error?(*error).localizedDescription:@"?");\n'
-     '  delete p;return nil;\n'
-     ' }\n'),
+    # (A refused render pipeline descriptor's line is AdrenoMetal's own since a0f0287b, with the pipeline's L row.)
     # supportsExtendedXR10Formats (device): given to the wallpaper's poster extensions. NativeMetal withholds it from every process
     # because the render server picks a 64-bit wide-gamut framebuffer when the device offers XR10, which the display chain cannot
     # show; but CAMetalLayer asks it too, in the extension's process, before it takes an XR10 pixel format
@@ -361,13 +355,7 @@ for original, replacement in FRONTEND_REPLACED:
 #   GMEM here: system-memory-only rendering (the earlier sysmem,nocb) left stale runs and garbled labels in composited layers once
 #   several apps had run.
 PLUGIN_REPLACED = [
-    ('        setenv("TU_DEBUG", "nocb", 0);\n',
-     '        if (FILE *flags = fopen("/private/var/ngpu/tu_debug", "r")) {\n'
-     '            char line[128] = {};\n'
-     '            if (fgets(line, sizeof line, flags)) {line[strcspn(line, "\\n")] = 0; setenv("TU_DEBUG", line, 1);}\n'
-     '            fclose(flags);\n'
-     '        }\n'
-     '        setenv("TU_DEBUG", "nocb", 0);\n'),
+    # (/private/var/ngpu/tu_debug is read by AdrenoMetal itself since a0f0287b, before its sheng-tu-debug= and sheng-fb-bgra=1.)
     ('static id clientDevice(unsigned port) {\n    char turnip[1024];\n',
      '// Whether NativeAdrenoMetal.clients names this process (names separated by blanks, commas or new lines; "*" names every process; a\n'
      '// name that ends in "*" names every process whose name starts with it, so "com.apple.WebKit.*" covers the WebContent, Networking\n'

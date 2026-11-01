@@ -6,7 +6,7 @@
 
 Xiaomi 13 \(fuxi\). XNU for iPad7,1 iPadOS 17.7.11 boots from RAM: a UEFI USB bulk receiver takes the payload into DRAM, the UniXNU menu starts DarwinBoot, and XNU switches its root from the RAM block device to the APFS system volume.
 
-源记录: [porting.toml](https://github.com/mouse233/unixnu-fuxi/blob/b8fc5d3af5d25b8b2b13059aaa90181b8299bcea/porting.toml), `b8fc5d3af5d25b8b2b13059aaa90181b8299bcea`.
+源记录: [porting.toml](https://github.com/mouse233/unixnu-fuxi/blob/4545692515a54d8bfc94597a7ba72fd9b25bead5/porting.toml), `4545692515a54d8bfc94597a7ba72fd9b25bead5`.
 
 本页按设备记录自动生成。
 
@@ -80,7 +80,7 @@ Xiaomi 13 \(fuxi\). XNU for iPad7,1 iPadOS 17.7.11 boots from RAM: a UEFI USB bu
 
 ### 证据
 
-- `source`: [Parses with schema\_version = 2 and keeps the format 1 tables \(ipsw, userdata, kernel, firmware, payload\), so the board's own scripts and the pre-format-2 driver keep working.](https://github.com/mouse233/unixnu-fuxi/blob/b8fc5d3af5d25b8b2b13059aaa90181b8299bcea/board.toml)
+- `source`: [Parses with schema\_version = 2 and keeps the format 1 tables \(ipsw, userdata, kernel, firmware, payload\), so the board's own scripts and the pre-format-2 driver keep working.](https://github.com/mouse233/unixnu-fuxi/blob/4545692515a54d8bfc94597a7ba72fd9b25bead5/board.toml)
 - `source`: [Recorded source pins for xnu and edk2 that the candidate builds resolve.](https://github.com/mouse233/unixnu-fuxi/blob/d67e18aec56a21b2e2e81f647b8444f3222ec53d/unixnu.lock)
 - `host`: [Exits 0 with the board resolved to fuxi and every driver and kit listed at base.](https://github.com/mouse233/unixnu-fuxi/commit/e5a7d450c159ae662e7d5785eef19d1ba4cb5fec)
   Command: <code>./unixnu status -D ../UniXNU-fuxi</code>. Revision: `e5a7d450c159ae662e7d5785eef19d1ba4cb5fec`.
@@ -226,7 +226,7 @@ Xiaomi 13 \(fuxi\). XNU for iPad7,1 iPadOS 17.7.11 boots from RAM: a UEFI USB bu
 
 - `device`: [Records the SID 60 0 to 1 transition and the final SCTLR=0, CBAR=10000, CBA2R=1, GFSR=0 and FSR=400 snapshot for the M1 native UFS receiver run.](https://github.com/mouse233/unixnu-fuxi/blob/9644d94e6bb050e4bde5f50f94312dd10cd3f416/diagnostics/ram-root/usb-bulk.md)
   Command: <code>python3 scripts/test-usb-ram-full.py --expected-sha256 &lt;image-sha&gt; --output out/&lt;candidate&gt;/attempt-NN</code>. Revision: `9644d94e6bb050e4bde5f50f94312dd10cd3f416`.
-- `source`: [The probe that reports context bank state is in the device package and builds with the receiver image.](https://github.com/mouse233/unixnu-fuxi/blob/b8fc5d3af5d25b8b2b13059aaa90181b8299bcea/package/ArmSmmu4KProbe.c)
+- `source`: [The probe that reports context bank state is in the device package and builds with the receiver image.](https://github.com/mouse233/unixnu-fuxi/blob/4545692515a54d8bfc94597a7ba72fd9b25bead5/package/ArmSmmu4KProbe.c)
 
 ## 存储与根卷 {#storage}
 
@@ -559,7 +559,7 @@ Xiaomi 13 \(fuxi\). XNU for iPad7,1 iPadOS 17.7.11 boots from RAM: a UEFI USB bu
 
 - `host`: [Delivered image v47 hashes recorded above, with eighteen checks at run\_id 20261025T074819.554188Z exiting 0 and bound to that image and source.](https://github.com/mouse233/unixnu-fuxi/blob/283834986151e0911a88ffcb3d5fe8531558f8a7/diagnostics/ram-root/README.md)
   Command: <code>PYTHONDONTWRITEBYTECODE=1 python3 scripts/check-fuxi-usb-ram-image.py --uefi ../uefi-fuxi --output out/usb-system-mount-v47 &amp;&amp; PYTHONDONTWRITEBYTECODE=1 python3 scripts/check-usb-ram.py --uefi ../uefi-fuxi --report out/usb-system-mount-v47/host-tests.json</code>. Revision: `283834986151e0911a88ffcb3d5fe8531558f8a7`.
-- `source`: [The packaging entry that writes the tagged payload volume used by the firmware boot entry.](https://github.com/mouse233/unixnu-fuxi/blob/b8fc5d3af5d25b8b2b13059aaa90181b8299bcea/scripts/package-sheng-xnu-boot.py)
+- `source`: [The packaging entry that writes the tagged payload volume used by the firmware boot entry.](https://github.com/mouse233/unixnu-fuxi/blob/4545692515a54d8bfc94597a7ba72fd9b25bead5/scripts/package-sheng-xnu-boot.py)
 
 ## 诊断 {#diagnostics}
 
@@ -615,7 +615,7 @@ Xiaomi 13 \(fuxi\). XNU for iPad7,1 iPadOS 17.7.11 boots from RAM: a UEFI USB bu
   Command: <code>python3 scripts/test-usb-ram-full.py --boot-profile usb-system --expected-sha256 &lt;image-sha&gt; --output out/&lt;candidate&gt;/attempt-NN</code>. Revision: `9644d94e6bb050e4bde5f50f94312dd10cd3f416`.
 - `host`: [Linux host checks run in the WSL workspace with real exit codes recorded for the rebuild.](https://github.com/mouse233/unixnu-fuxi/blob/0e9eb2196efc5974feed2817e6f56e080e6c68be/diagnostics/ram-root/wsl-linux-rebuild.md)
   Command: <code>PYTHONDONTWRITEBYTECODE=1 python3 scripts/check-usb-smmu-audit.py --uefi ../uefi-fuxi --report out/&lt;candidate&gt;/smmu-tests.json</code>. Revision: `0e9eb2196efc5974feed2817e6f56e080e6c68be`.
-- `source`: [Component and source pins recorded for the RAM root path are committed on the default branch.](https://github.com/mouse233/unixnu-fuxi/blob/b8fc5d3af5d25b8b2b13059aaa90181b8299bcea/diagnostics/ram-root/pins.json)
+- `source`: [Component and source pins recorded for the RAM root path are committed on the default branch.](https://github.com/mouse233/unixnu-fuxi/blob/4545692515a54d8bfc94597a7ba72fd9b25bead5/diagnostics/ram-root/pins.json)
 - `device`: [Three receiver runs with one fastboot boot each, plus the V-E read-only failure snapshot, are recorded with host sampling counts and readings transcribed from device photographs. The photo files are not committed to this repository.](https://github.com/mouse233/unixnu-fuxi/blob/1d071dae4618b0676d313cfbe1fc39689e6f139e/diagnostics/ram-root/usb-bulk.md)
   Command: <code>fastboot boot m1-ab-ep0snapshot-v6; python3 scripts/boot-ram-window-once.py</code>. Revision: `1d071dae4618b0676d313cfbe1fc39689e6f139e`.
 

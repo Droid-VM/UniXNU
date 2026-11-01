@@ -70,6 +70,13 @@ sheng 上两条 VIG 管线取同一个 32 位物理地址，右侧管线用自�
 直接扫描输出（`sheng-dpu-scanout=2`）为实验功能，默认关闭：它给显示 bank 一个
 stage 1 窗口（ShengUfs），让管线直接读取合成器的 surface。任何失败都会回退到 GPU 复制。
 
+窗口的 TCR2 把符号扩展字段（SEP，位 17:15）设为 7，与 arm-smmu 对 AArch64 上下文的
+做法一致；SEP 为 0 时，第 31 位为 1 的地址会在第 0 级出错。合成器在命令缓冲被调度时就
+提交换帧，而不是在 GPU 完成时，所以显示驱动要等 GPU 写完换帧到达前交给它的所有工作
+才翻转（Adreno 驱动导出已发出的最新 fence 和已完成的 fence）。没有这个等待，显示管线会
+扫描 GPU 仍在写的 surface，面板闪烁。启动日志行 `[direct scanout]` 给出翻转次数、映射的
+surface、latch 时间和翻转等待 GPU 的时间。帧缓冲必须是 8 位 BGRA。
+
 ## 3. 确认亮度控制接口
 
 选择目标的 I2C、DSI 命令或 PWM 传输方式及亮度编码。

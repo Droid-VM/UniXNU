@@ -51,7 +51,21 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     # The call stacks that allocated device memory of 4 MiB or more, by bytes, for the frontend's MA rows.
     '0019-allocation-sites.patch',
     # Not 0020-written-host-page-textures-in-place-at-any-size.patch: it relies on upstream's Turnip render-mode patch
-    # (turnip-render-mode-for-attachment-memory.patch), which this fork's Turnip patches do not take yet.
+    # (turnip-render-mode-for-attachment-memory.patch), which does not apply on this fork's Mesa (Droid-VM/mesa), nor does
+    # turnip-gmem-mutable-swap.patch; both stay out of adreno-compiler-inputs.json until they are ported.
+    # A dedicated block of images whose image went stays spare for the next one of its pool (Core Animation's memoryless attachments,
+    # backed at their first pass, were each a new 40-112 MiB allocation), freed after 10 s, when a block cannot be made, or under memory
+    # pressure; room in the pools is kept by a thread of the device's, not in the creation call that asked for it.
+    '0021-spare-image-blocks-and-room-keeper.patch',
+    # stage_trace.rs: each command buffer's stages from its commit to its completion (commit, lowering, recording, the scheduler's
+    # holds, each submission, the completion waiter) and the scheduler's sleeps and wakes, read by the frontend (nmb_stage_ring_read).
+    '0022-command-buffer-stage-trace.patch',
+    # The threads that bring command buffers to their handlers run at the user-interactive class and the compile threads at least at
+    # the user-initiated class on iOS too, not on macOS alone: on the iPad they ran at the default class and woke up to 50 ms late.
+    '0023-quality-of-service-on-ios.patch',
+    # The host's diagnostics switch (SHENG_DIAG, from the boot argument sheng-diag=1): without it the stage ring and the allocation sites
+    # keep nothing. The stage ring also marks the steps inside a batch's submission (SubmitStep: placed, gathered, vkQueueSubmit, changes).
+    '0024-diagnostics-switch-and-submit-steps.patch'
     ]] + [ROOT / 'patches/metal2vulkan' / name for name in [
     # The board's own, on top. A rotated texture's turns between its pass's frame and its plane (CoreAnimation's framebuffer, rotation 3
     # in landscape) on the Adreno 2D engine, through the board's Turnip (patches/mesa/turnip-rotated-copy.patch): one copy each way instead

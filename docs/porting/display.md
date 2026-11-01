@@ -89,6 +89,16 @@ Direct scanout (`sheng-dpu-scanout=2`) is experimental and off by default: it
 gives the display bank a stage 1 window (ShengUfs) and points the pipes at the
 compositor's surfaces. Any failure falls back to the GPU copy.
 
+The window's TCR2 sets the sign extension field (SEP, bits 17:15) to 7, as
+arm-smmu does for AArch64 contexts; with SEP 0 an address with bit 31 set faults
+at level 0. The compositor submits a swap when its command buffer is scheduled,
+not when the GPU finished it, so the display driver flips only after the GPU
+wrote everything handed to it before the swap arrived (the Adreno driver exports
+the newest and the completed fence). Without that wait the pipes scan a surface
+the GPU is still writing and the panel flickers. The boot log row
+`[direct scanout]` shows flips, mapped surfaces, latch times and the time the
+flips waited for the GPU. The framebuffer must be 8-bit BGRA.
+
 ## 3. Identify the brightness transport
 
 Select the target's I2C, DSI-command or PWM transport and its brightness encoding.
