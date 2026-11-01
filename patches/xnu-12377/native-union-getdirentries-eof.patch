@@ -1,0 +1,45 @@
+diff --git a/bsd/vfs/vfs_lookup.c b/bsd/vfs/vfs_lookup.c
+--- a/bsd/vfs/vfs_lookup.c
++++ b/bsd/vfs/vfs_lookup.c
+@@ -1578,7 +1578,15 @@
+ 		}
+ 
+ 		for (;;) {
+-			if (dp == ndp->ni_rootdir || dp == rootvnode) {
++			/*
++			 * The root of a file system that covers nothing and is not rootvnode: the root
++			 * volume below a union mounted on / (iPadOS 27's SystemOS). A directory read of
++			 * the union moves its descriptor down there, and ls -a's fstatat(fd, "..") went
++			 * on to its NULL mnt_vnodecovered. Its ".." stays where it is, as rootvnode's.
++			 */
++			if (dp == ndp->ni_rootdir || dp == rootvnode ||
++			    ((dp->v_flag & VROOT) && dp->v_mount != NULL &&
++			    dp->v_mount->mnt_vnodecovered == NULLVP)) {
+ 				ndp->ni_dvp = dp;
+ 				ndp->ni_vp = dp;
+ 				/*
+diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -11128,6 +11128,21 @@
+ 	}
+ #endif /* CONFIG_UNION_MOUNTS */
+ 
++#if CONFIG_UNION_MOUNTS
++	/*
++	 * The upper directory of a union read to its end is not the end of the union: the
++	 * directory below is still to be read. Libc's readdir stops at the first end reported
++	 * (GETDIRENTRIES64_EOF) and never made the empty read that moves this descriptor down,
++	 * so a union directory listed only its upper entries (iPadOS 27's root showed System
++	 * and usr, and NSBundle found none of CoreImage.framework's kernel libraries below
++	 * SystemOS). The next read, empty, goes below; with nothing below it ends as before.
++	 */
++	if (error == 0 && *eofflag && (user_ssize_t)bufsize != uio_resid(auio) &&
++	    (vp->v_mount->mnt_flag & MNT_UNION)) {
++		*eofflag = 0;
++	}
++#endif /* CONFIG_UNION_MOUNTS */
++
+ 	vnode_put(vp);
+ 	if (offset) {
+ 		*offset = loff;
