@@ -1,0 +1,24 @@
+diff --git a/src/freedreno/vulkan/tu_autotune.cc b/src/freedreno/vulkan/tu_autotune.cc
+index 8274e010737..49d291b49d9 100644
+--- a/src/freedreno/vulkan/tu_autotune.cc
++++ b/src/freedreno/vulkan/tu_autotune.cc
+@@ -1816,6 +1816,19 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
+    if (pass->has_msrtss)
+       return render_mode::GMEM;
+ 
++   /* A multisampled attachment that is not stored (resolved, as Metal's memoryless multisample targets and its MultisampleResolve
++    * store action are, or a multisampled depth buffer discarded beside them) keeps its samples in tile memory in GMEM and never
++    * writes them to memory, while SYSMEM writes every sample and reads them back to resolve. Its users (Metal apps, iPadOS's animated wallpapers, WebGL) draw few calls a pass, which the
++    * small-pass rule below sends to SYSMEM. Measured on Adreno 840 (2048x2732, 4 samples, one draw): 4.5-5.0 ms a pass in
++    * SYSMEM, 2.0 ms in GMEM. A stored multisample attachment costs about the same in both, and a single-sample pass of one draw
++    * is faster in SYSMEM (0.8 ms against 1.6), so those keep the autotuner's choice.
++    */
++   for (uint32_t i = 0; i < pass->attachment_count; i++) {
++      const struct tu_render_pass_attachment *att = &pass->attachments[i];
++      if (att->samples > 1 && !att->store && !att->store_stencil)
++         return render_mode::GMEM;
++   }
++
+    /* SYSMEM is always a safe default mode when we can't fully engage the autotuner. From testing, we know that for an
+     * incorrect decision towards SYSMEM tends to be far less impactful than an incorrect decision towards GMEM, which
+     * can cause significant performance issues.

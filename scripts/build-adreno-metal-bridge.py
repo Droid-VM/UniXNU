@@ -108,7 +108,11 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     # Device::hold_back_memory: while the Metal plugin reports memory pressure raised (its source fires as the level changes, so it
     # turns this on at warn or critical and off at normal), no room kept ahead of the placements, no empty pooled block and no spare
     # kept: a one-time trim came back with the next frame's room, 547-616 MiB of empty wired blocks in the render server.
-    '0020-hold-back-memory-under-pressure.patch']]
+    '0020-hold-back-memory-under-pressure.patch',
+    # Turnip hands Metal's DontCare and MultisampleResolve stores DONT_CARE (DriverFact::DontCareStoreIsOneOfMetals, measured on the
+    # Adreno 840 by gfxprobe dontcare: each texel the earlier one under GMEM, the stored one under SYSMEM): storing them wrote a 4x
+    # attachment's samples to memory from every tile, 37 ms against 9 ms a full-screen pass of 64 blended draws.
+    '0021-turnip-dont-care-stores.patch']]
 
 
 def git_tree(*steps):

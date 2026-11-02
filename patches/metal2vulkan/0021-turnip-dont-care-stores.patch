@@ -1,0 +1,45 @@
+diff --git a/crates/metal2vulkan/src/device/driver_facts.rs b/crates/metal2vulkan/src/device/driver_facts.rs
+index 87531f0b..835a34b3 100644
+--- a/crates/metal2vulkan/src/device/driver_facts.rs
++++ b/crates/metal2vulkan/src/device/driver_facts.rs
+@@ -1786,7 +1786,16 @@ const DYNAMIC_RESTART_WARNING: DriverDiagnostic = DriverDiagnostic {
+ /// 26.2.4, on the Radeon 780M and ANV, Mesa 26.2.4, on the UHD 770 (RPL-S); at dd718a7905 with its
+ /// row, ANV, Mesa 26.2.4, on the Iris Xe (RPL-P). Not listed: NVIDIA's 615.71.09, whose RTX 3080
+ /// left a third answer; RADV on the RX 7900 XTX, clean at dd718a7905 at Mesa 26.0.8 but not
+-/// measured since; and every GPU not measured, which store with `STORE`.
++/// measured since; and every GPU not measured, which store with `STORE`. Turnip on Qualcomm's
++/// Adreno, any GPU (the DroidVM board's patch): measured on the Adreno 840 (Mesa 26.1 with the
++/// board's patches, through drm2kgsl) by the board's `gfxprobe dontcare` at 1024 by 1024 and 2048 by
++/// 2732, every texel and sample of BGRA8 at 1 and 4 samples (resolved and not), RGBA16Float and
++/// Depth32Float at 1 and 4, loaded Clear, Load and DontCare, drawing nothing, half or all, the
++/// earlier one or the stored one, under each render mode (`TU_DEBUG=gmem` keeps the earlier: GMEM
++/// skips the tile store; `TU_DEBUG=sysmem` the stored: the draws wrote memory). Turnip's choice
++/// between the two is one code path for every Adreno it drives, so the row names no GPU. Storing
++/// instead wrote a 4x attachment's samples to memory from every tile: 37 ms against 9 ms a
++/// full-screen pass of 64 blended draws on the Adreno 840.
+ ///
+ /// `PointerImportsFollowTheirAddress`: ANV, Mesa 26.2.4 on the Iris Xe of RPL-P under Linux 7.2.9's
+ /// i915, measured with a probe outside the runtime (2026-10-17): a page of a `memfd` filled with
+@@ -2090,6 +2099,12 @@ pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
+         DriverId::INTEL_OPEN_SOURCE_MESA,
+         (INTEL_VENDOR_ID, INTEL_IRIS_XE_RPL_P),
+     ),
++    Measured {
++        fact: DriverFact::DontCareStoreIsOneOfMetals,
++        driver: DriverId::MESA_TURNIP,
++        vendor: Some(QUALCOMM_VENDOR_ID),
++        device: None,
++    },
+     mesa_on(
+         DriverFact::ColorBlockDecodeIsMetals,
+         DriverId::MESA_RADV,
+@@ -2233,6 +2248,9 @@ pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
+ /// Intel's `vendorID`.
+ const INTEL_VENDOR_ID: u32 = 0x8086;
+ 
++/// Qualcomm's `vendorID` (Turnip's).
++const QUALCOMM_VENDOR_ID: u32 = 0x5143;
++
+ impl DeviceDescription {
+     /// The runtime's driver facts ([`DriverFact`]) of the device this description names: those
+     /// its driver's rows name, on its vendor and GPU, at any release.
