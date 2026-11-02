@@ -1,0 +1,22 @@
+diff --git a/src/util/os_misc.c b/src/util/os_misc.c
+--- a/src/util/os_misc.c
++++ b/src/util/os_misc.c
+@@ -363,8 +363,17 @@
+    const long phys_pages = sysconf(_SC_PHYS_PAGES);
+    const long page_size = sysconf(_SC_PAGESIZE);
+ 
+-   if (phys_pages <= 0 || page_size <= 0)
++   if (phys_pages <= 0 || page_size <= 0) {
++#if DETECT_OS_APPLE
++      /* A sandbox may refuse the sysctls behind _SC_PHYS_PAGES (hw.physmem, hw.pagesize) and still allow hw.memsize: iOS's
++       * WebKit GPU process does, and its GPU heap came out 0 bytes, so every allocation failed. */
++      size_t len = sizeof(*size);
++      int mib[2] = {CTL_HW, HW_MEMSIZE};
++      return sysctl(mib, 2, size, &len, NULL, 0) == 0 && *size;
++#else
+       return false;
++#endif
++   }
+ 
+    *size = (uint64_t)phys_pages * (uint64_t)page_size;
+    return true;

@@ -255,24 +255,39 @@ FRONTEND_REPLACED = [
     # into its own two-plane 4:4:4 format, MTLPixelFormatRGB8_444_2P over an '_RB4' IOSurface. NativeMetal textures such a surface but
     # renders into none ("render encoder: Unsupported ... MTLPixelFormatRGB8_444_2P"), so the layer stayed whatever the surface held:
     # the Weather widget showed rows of stray colour. RenderBox learns its tier by asking supportsFamily: from Apple1 up until the
-    # first NO (RB::Device's constructor), so it alone is told Apple2 and draws them in BGRA8; every other caller keeps the answer.
+    # first NO (RB::Device's constructor), so it alone is told Apple2 and draws them in BGRA8. WebKit's WebGPU makes an adapter only for
+    # MTLGPUFamilyApple4 and up (Safari's requestAdapter() answered null), so WebGPU.framework alone is told Apple4; every other caller
+    # keeps the answer.
     ('static void installAnswers(Class cls) {\n',
      'static BOOL (*gFamilyAnswer)(id,SEL,NSInteger);\n'
-     '// Whether the code at a return address is RenderBox\'s, looked up once per address: dladdr searches the image\'s symbol table, and\n'
+     'enum FamilyCaller {FamilyCallerOther,FamilyCallerRenderBox,FamilyCallerWebGPU};\n'
+     '// The framework whose code is at a return address, looked up once per address: dladdr searches the image\'s symbol table, and\n'
      '// QuartzCore\'s pixel-format queries ask supportsFamily: for every surface it makes (a masked corner, a backdrop, a blur\'s mips) and every\n'
      '// IOSurface it checks -- the render server\'s display thread spent 15% of its running time in that search during page swipes.\n'
-     'static bool callerIsRenderBox(void *address) {\n'
+     'static FamilyCaller familyCaller(void *address) {\n'
      ' static std::mutex lock;\n'
-     ' static std::unordered_map<void *,bool> known;\n'
+     ' static std::unordered_map<void *,FamilyCaller> known;\n'
      ' {std::lock_guard<std::mutex> hold(lock);auto found=known.find(address);if(found!=known.end())return found->second;}\n'
      ' Dl_info caller;\n'
-     ' const bool renderBox=dladdr(address,&caller) && caller.dli_fname && strstr(caller.dli_fname,"/RenderBox.framework/");\n'
+     ' FamilyCaller kind=FamilyCallerOther;\n'
+     ' if(dladdr(address,&caller) && caller.dli_fname) {\n'
+     '  if(strstr(caller.dli_fname,"/RenderBox.framework/"))kind=FamilyCallerRenderBox;\n'
+     '  else if(strstr(caller.dli_fname,"/WebGPU.framework/"))kind=FamilyCallerWebGPU;\n'
+     ' }\n'
      ' std::lock_guard<std::mutex> hold(lock);\n'
-     ' if(known.size()<4096)known.emplace(address,renderBox);\n'
-     ' return renderBox;\n'
+     ' if(known.size()<4096)known.emplace(address,kind);\n'
+     ' return kind;\n'
      '}\n'
+     '// WebKit\'s WebGPU (WebGPU.framework, in Safari\'s GPU process) makes an adapter only for a device in MTLGPUFamilyApple4 or later: Apple\'s\n'
+     '// feature set tables list no WebGPU limits for Apple1 to Apple3, so requestAdapter() answered null and every page saw no WebGPU. The rows\n'
+     '// Apple4 adds that this device refuses (gfxprobe families: imageblocks, tile shaders, raster order groups, post-depth coverage) are the\n'
+     '// Apple GPUs\' tile-memory features, which WebGPU has no API for, so WebGPU alone is told Apple4 (the family its tables start at).\n'
      'static BOOL familyForCaller(id self,SEL _cmd,NSInteger family) {\n'
-     ' if(family>=1003 && family<2000 && callerIsRenderBox(__builtin_return_address(0)))return NO;   // MTLGPUFamilyApple3 and up\n'
+     ' if(family>=1003 && family<2000) {   // MTLGPUFamilyApple3 to Apple10\n'
+     '  const FamilyCaller kind=familyCaller(__builtin_return_address(0));\n'
+     '  if(kind==FamilyCallerRenderBox)return NO;\n'
+     '  if(kind==FamilyCallerWebGPU && family==1004)return YES;   // MTLGPUFamilyApple4\n'
+     ' }\n'
      ' return gFamilyAnswer(self,_cmd,family);\n'
      '}\n'
      'static void installAnswers(Class cls) {\n'),

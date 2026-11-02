@@ -60,7 +60,8 @@
     "patches/mesa/turnip-darwin-queue-priority.patch",
     "patches/mesa/turnip-darwin-bo-cache-budget.patch",
     "patches/mesa/turnip-darwin-deadline-queue.patch",
-    "patches/mesa/turnip-darwin-va-exhausted-note.patch"
+    "patches/mesa/turnip-darwin-va-exhausted-note.patch",
+    "patches/mesa/mesa-darwin-total-memory-sysctl.patch"
   ],
   "integer_fma_reference": {
     "repository": "https://github.com/ucb-bar/berkeley-softfloat-3",
