@@ -354,8 +354,9 @@ for original, replacement in FRONTEND_REPLACED:
         raise SystemExit(f'NativeBridgeMetalFrontend.mm no longer has exactly one {original.strip()[:80]!r}')
     frontend = frontend.replace(original, replacement)
 # - the plugin's clients list (NativeAdrenoMetal.clients, written from droidvm-gpu-clients): upstream gives every process its own
-#   device, as Apple's plugin does; this board keeps the list, since every unsandboxed process would then open one (Maps' VectorKit
-#   lost its device within seconds and wedged the render server's frames until a reboot). The list takes a name ending in '*' for every
+#   device, as Apple's plugin does. A board may name the processes instead (when every unsandboxed process had one, Maps' VectorKit
+#   lost its device within seconds and wedged the render server's frames until a reboot); the iPadOS 27 board names "*" again since
+#   2026-11-03, when that no longer happened. The list takes a name ending in '*' for every
 #   process whose name begins with the rest: com.apple.WebKit.* gives WebKit's WebContent processes a device as well as its GPU process.
 #   CoreGraphics draws a layer's wide-color backing store ('b3a8' RGB10A8, 'w30r' RGB10) only through the GPU; without a device
 #   it draws nothing into one, and Safari's pages stayed black. The command line has no room to name each process. "*X*" names
