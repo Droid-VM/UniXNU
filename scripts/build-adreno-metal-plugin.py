@@ -360,8 +360,11 @@ for original, replacement in FRONTEND_REPLACED:
 #   CoreGraphics draws a layer's wide-color backing store ('b3a8' RGB10A8, 'w30r' RGB10) only through the GPU; without a device
 #   it draws nothing into one, and Safari's pages stayed black. The command line has no room to name each process. "*X*" names
 #   every process whose name holds X: *Poster* gives PosterBoard and each wallpaper's poster extension (AegirPoster, the Kaleidoscope
-#   and Extragalactic watch faces) a device; without one they crashed rendering the gallery's previews. The kernel's grant (patch
-#   zzw-native-adreno-sandbox-grant) matches the same three forms.
+#   and Extragalactic watch faces) a device; without one they crashed rendering the gallery's previews. "@apps" names every app: a
+#   process whose executable lies in an app bundle container (/var/containers/Bundle/Application/), as any installed app's and its
+#   extensions' do. On an iPad every app may use the GPU; the list's names stay for the system's resident processes, which each keep a
+#   device and its memory pools here. The kernel's grant (patch zzw-native-adreno-sandbox-grant, and the board's
+#   droidvm-gpu-grant-apps for "@apps") matches the same forms.
 # - a client that may write in neither shader-cache directory -- WebKit's GPU process, whose sandbox refuses both -- got no device
 #   ("no-cachedir"), so CoreGraphics drew the page's wide-color layers nowhere: it now opens one whose cache is never on disk (the
 #   runtime's METAL2VULKAN_SHADER_CACHE_OPTIONAL, now AdrenoMetal's bridge patch 0007).
@@ -374,7 +377,12 @@ PLUGIN_REPLACED = [
     ('static id clientDevice(unsigned port) {\n    char turnip[1024];\n',
      '// Whether NativeAdrenoMetal.clients names this process (names separated by blanks, commas or new lines; "*" names every process; a\n'
      '// name that ends in "*" names every process whose name starts with it, so "com.apple.WebKit.*" covers the WebContent, Networking\n'
-     '// and GPU service processes; "*X*" names every process whose name holds X).\n'
+     '// and GPU service processes; "*X*" names every process whose name holds X; "@apps" names every process run from an app bundle\n'
+     '// container, as every installed app is).\n'
+     'static bool appProcess() {\n'
+     '    NSString *path = NSBundle.mainBundle.executablePath;\n'
+     '    return [path hasPrefix:@"/private/var/containers/Bundle/Application/"] || [path hasPrefix:@"/var/containers/Bundle/Application/"];\n'
+     '}\n'
      'static bool listedClient() {\n'
      '    char path[1024];\n'
      '    if (!requestedPath("NativeAdrenoMetal.clients", path, sizeof path)) return false;\n'
@@ -386,7 +394,7 @@ PLUGIN_REPLACED = [
      '    text[length] = 0;\n'
      '    const char *self = getprogname();\n'
      '    for (char *save = nullptr, *name = strtok_r(text, " ,\\t\\r\\n", &save); name; name = strtok_r(nullptr, " ,\\t\\r\\n", &save)) {\n'
-     '        if (!strcmp(name, "*") || !strcmp(name, self)) return true;\n'
+     '        if (!strcmp(name, "*") || !strcmp(name, self) || (!strcmp(name, "@apps") && appProcess())) return true;\n'
      '        const size_t nameLength = strlen(name);\n'
      '        if (nameLength > 2 && name[0] == \'*\' && name[nameLength - 1] == \'*\') {\n'
      '            name[nameLength - 1] = 0;\n'
