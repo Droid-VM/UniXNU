@@ -1,0 +1,111 @@
+diff --git a/crates/metal2vulkan-runtime/src/spares.rs b/crates/metal2vulkan-runtime/src/spares.rs
+--- a/crates/metal2vulkan-runtime/src/spares.rs
++++ b/crates/metal2vulkan-runtime/src/spares.rs
+@@ -99,6 +99,14 @@
+ //! - **Released with the device**, as its teardown begins (`DeviceShared`'s drop, after
+ //!   `vkDeviceWaitIdle`): every command buffer holds the device, so none is left to give one
+ //!   back.
++//! - **On this board, also trimmed** ([`Spares::trim_command_pools`], from
++//!   `Device::trim_kept_memory`): the spares a busier spell made and no command buffer took since.
++//!   A pool keeps every command buffer it made, a secondary for each render pass instance its
++//!   largest command buffer recorded, and Turnip keeps each one's command stream memory across the
++//!   implicit resets: after windowed apps and Maps the iPadOS guest's render server held 13,890
++//!   blobs, 32, 16 and 8 KiB command stream BOs most of them (390 MiB of wired guest memory), never
++//!   given back. A taker takes the newest spare of its family, so the older ones are those idle.
++//!   Turnip's `vkDestroyCommandPool` returns (unlike the NVIDIA driver's above).
+ 
+ use super::descriptor_arena::{Room, SetNeeds};
+ use super::device::{lock, DeviceShared};
+@@ -108,6 +116,7 @@
+ use ash::vk;
+ use std::collections::VecDeque;
+ use std::sync::Mutex;
++use std::time::{Duration, Instant};
+ 
+ /// The most spare descriptor pools a device keeps (of each list, a command buffer's arenas' and
+ /// the fitted arenas'): a few frames' worth of a window server's (the module docs).
+@@ -136,6 +145,8 @@
+     /// did not complete, or left one it was handed unended (the module docs), so its taker
+     /// resets it.
+     pub(super) recording: bool,
++    /// When it was last kept a spare ([`keep_command_pool`]), for [`Spares::trim_command_pools`].
++    kept: Option<Instant>,
+ }
+ 
+ impl CommandPool {
+@@ -148,6 +159,7 @@
+             handed: [0, 0],
+             begun: None,
+             recording: false,
++            kept: None,
+         }
+     }
+ 
+@@ -418,7 +430,32 @@
+             // SAFETY: nothing uses the pool's sets (the caller's, or a spare's), and nothing else
+             // holds it.
+             unsafe { release_in_section(device, raw) };
++        }
++    }
++
++    /// Release the spare command pools of `device` kept spares for `idle` or longer, all but the
++    /// `floor` newest (the module docs): how many went. Nothing of a spare is pending; a primary
++    /// begun ahead in one is recording nothing.
++    pub(super) fn trim_command_pools(&self, device: &DeviceShared, idle: Duration, floor: usize) -> usize {
++        let now = Instant::now();
++        let stale: Vec<CommandPool> = {
++            let mut pools = lock(&self.command_pools);
++            let oldest = pools.len().saturating_sub(floor);
++            let newest = pools.split_off(oldest);
++            let (stale, fresh): (Vec<CommandPool>, Vec<CommandPool>) = pools
++                .drain(..)
++                .partition(|pool| pool.kept.is_some_and(|kept| now.saturating_duration_since(kept) >= idle));
++            pools.extend(fresh);
++            pools.extend(newest);
++            stale
++        };
++        let count = stale.len();
++        for pool in stale {
++            // SAFETY: a spare's command buffers are none of them pending (`give_command_pool`), and
++            // it is out of the spares, so no command buffer takes it.
++            unsafe { release_in_section(device, pool.raw) };
+         }
++        count
+     }
+ 
+     /// Release every spare of `device`: its teardown, when no command buffer is left.
+@@ -475,7 +512,8 @@
+ 
+ /// Keep `pool` among the spare command pools `pools`, newest last: every one, however many
+ /// command buffers it made and however many spares there are (the module docs).
+-pub(super) fn keep_command_pool(pools: &mut Vec<CommandPool>, pool: CommandPool) {
++pub(super) fn keep_command_pool(pools: &mut Vec<CommandPool>, mut pool: CommandPool) {
++    pool.kept = Some(Instant::now());
+     pools.push(pool);
+ }
+ 
+diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
+--- a/crates/metal2vulkan-runtime/src/memory.rs
++++ b/crates/metal2vulkan-runtime/src/memory.rs
+@@ -2379,9 +2379,20 @@
+     /// pages), that is wired memory the system cannot reclaim (the iPadOS guest's render server
+     /// held 136 MiB of empty blocks at its home screen); the caller trims as its process idles or
+     /// the system reports memory pressure (`Duration::ZERO`: every kept empty block).
++    ///
++    /// The same calls trim the spare command pools a busier spell left (`spares.rs`): those spare
++    /// for ten times `idle` (at least 20 s), all but the 8 newest; on memory pressure
++    /// (`Duration::ZERO`) all but the 2 newest. The answer counts blocks only.
+     pub fn trim_kept_memory(&self, idle: Duration) -> usize {
+         let shared = self.shared();
+-        lock(&shared.memory).trim_kept(shared.vk(), idle)
++        let blocks = lock(&shared.memory).trim_kept(shared.vk(), idle);
++        let (pool_idle, floor) = if idle.is_zero() {
++            (Duration::ZERO, 2)
++        } else {
++            ((idle * 10).max(Duration::from_secs(20)), 8)
++        };
++        shared.spares.trim_command_pools(shared, pool_idle, floor);
++        blocks
+     }
+ }
+ 

@@ -112,7 +112,11 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     # Turnip hands Metal's DontCare and MultisampleResolve stores DONT_CARE (DriverFact::DontCareStoreIsOneOfMetals, measured on the
     # Adreno 840 by gfxprobe dontcare: each texel the earlier one under GMEM, the stored one under SYSMEM): storing them wrote a 4x
     # attachment's samples to memory from every tile, 37 ms against 9 ms a full-screen pass of 64 blended draws.
-    '0021-turnip-dont-care-stores.patch']]
+    '0021-turnip-dont-care-stores.patch',
+    # The spare command pools a busier spell made, released by the kept-memory trims (every 2 s, those spare for 20 s, all but
+    # the 8 newest; on memory pressure all but 2): a pool keeps every command buffer it made and Turnip their command stream
+    # memory, and the render server held 13,890 blobs (390 MiB of wired guest memory) after windowed apps and Maps.
+    '0022-trim-spare-command-pools.patch']]
 
 
 def git_tree(*steps):
