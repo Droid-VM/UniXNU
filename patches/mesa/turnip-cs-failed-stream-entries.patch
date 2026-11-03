@@ -1,0 +1,21 @@
+diff --git a/src/freedreno/vulkan/tu_cs.cc b/src/freedreno/vulkan/tu_cs.cc
+--- a/src/freedreno/vulkan/tu_cs.cc
++++ b/src/freedreno/vulkan/tu_cs.cc
+@@ -262,6 +262,17 @@
+    assert(cs->mode == TU_CS_MODE_GROW);
+    assert(target->mode == TU_CS_MODE_GROW);
+ 
++   /* A stream whose allocation failed has its cursor in the fail sink (tu_cs_fail): its start and
++    * cursor no longer bound commands of its own BO, so it has no entry to add, and the target's
++    * entries are not whole. Pass the failure on instead; tu_EndCommandBuffer reports it.
++    */
++   if (unlikely(cs->status != VK_SUCCESS))
++      return cs->status;
++   if (unlikely(target->status != VK_SUCCESS)) {
++      tu_cs_fail(cs, target->status);
++      return cs->status;
++   }
++
+    if (!tu_cs_is_empty(cs))
+       tu_cs_add_entry(cs);
+ 
