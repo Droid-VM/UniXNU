@@ -1,0 +1,21 @@
+diff --git a/crates/metal2vulkan-runtime/src/shadow.rs b/crates/metal2vulkan-runtime/src/shadow.rs
+--- a/crates/metal2vulkan-runtime/src/shadow.rs
++++ b/crates/metal2vulkan-runtime/src/shadow.rs
+@@ -2734,6 +2734,17 @@
+                 other.changed(&written, changed, Lost::OtherShadow);
+             }
+         }
++        // So is every texture an earlier encoder of the command buffer left carried that this one
++        // has not used (`ShadowCarry`): its image no longer holds the truth, so it is carried no
++        // further and copies in at its next use. DroidVM: a render encoder's copies reach no
++        // `wrote` (Metal does not order its commands), so a rotated framebuffer's pass twin copied
++        // back after a pass left the image its functions sample as an earlier encoder had it:
++        // CoreAnimation's backdrop captures of its framebuffer (a toolbar's glass while the dock
++        // rises over the app, Spotlight's field) blurred the wallpaper drawn before the app, or
++        // black, frame after frame.
++        self.carry
++            .entries
++            .retain(|carried| !carried.copies.shares_truth(&written));
+     }
+ 
+     /// The copies to record, in order, before a command that uses the shadowed textures

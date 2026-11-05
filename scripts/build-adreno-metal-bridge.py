@@ -126,7 +126,10 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     '0024-dont-care-kept-per-attachment-class.patch',
     # Diagnostic: /private/var/ngpu/debug/full-barriers at process start puts a full memory barrier before every pass, copy, blit
     # and dispatch (an A/B for a dependency missing between a pass and a later read of what it rendered).
-    '0025-full-barriers-switch.patch']]
+    '0025-full-barriers-switch.patch',
+    # A shadow's copy back leaves the textures other encoders carried over the same truth to copy in again: a render pass's
+    # store into a rotated framebuffer left the image its later passes sample stale (CoreAnimation's backdrops).
+    '0026-copy-back-drops-carried-shadows.patch']]
 
 
 def git_tree(*steps):
