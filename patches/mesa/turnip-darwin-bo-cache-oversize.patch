@@ -1,0 +1,14 @@
+diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -657,6 +657,10 @@
+       retire->cache = cache;
+       retire->cache_capacity = capacity;
+    }
++   /* A BO larger than its budget is released instead: cached, it stayed as the one just put however far past the budget it held
++    * the cache (DroidVM: a client's 16 MiB budget kept a freed 32 MiB block of the wallpaper's for good). */
++   if (bo->size > (darwin_small(bo->size) ? darwin_cache_small_budget() : darwin_cache_budget()))
++      return false;
+    retire->cache[retire->cache_count++] = {bo->handle, bo->iova, bo->size, ++retire->cache_stamp, bo->mapping, bo->token,
+                                            bo->read_only};
+    retire->cache_bytes += bo->size;

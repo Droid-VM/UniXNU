@@ -1,0 +1,124 @@
+diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -86,6 +86,7 @@
+ };
+ struct darwin_bo_cache_stats {
+    uint64_t lookups, hits, inserts, evictions, flushes, bytes_peak;
++   uint64_t small_lookups, small_hits, small_evictions;   /* of BOs in the small budget (darwin_small) */
+ };
+ 
+ /* The GPU address space as two red-black trees over the free holes (Mesa's rb_tree, the same algorithm as XNU's libkern/tree.h): by
+@@ -112,6 +113,7 @@
+    struct darwin_cached_bo *cache;
+    unsigned cache_count, cache_capacity;
+    uint64_t cache_bytes, cache_stamp;
++   uint64_t small_bytes;   /* of cache_bytes, those of BOs in the small budget */
+    uint32_t pressure_seen;
+    struct darwin_bo_cache_stats cache_stats;
+    struct darwin_va va;
+@@ -574,6 +576,29 @@
+    return (size + step - 1) / step * step;
+ }
+ 
++/* BOs of at most 1 MiB are kept in a budget of their own (TU_DARWIN_BO_CACHE_SMALL_MB, 16 by default; 0: one budget for every BO,
++ * as before), the others in darwin_cache_budget's. On the DroidVM board a new BO is a round trip through the host's one virtio-gpu
++ * worker -- 10-35 ms for an 8 KiB one while a transition runs, about as long as for 64 MiB -- and in the render server the pooled
++ * 64 MiB blocks it frees took most of the shared budget, so the small BOs of command streams and descriptors went almost as soon
++ * as they were cached: 35 % of 20480 allocations reused, 11090 evictions, the misses' new BOs stalling Settings' opening, the app
++ * switcher and Spotlight 100-270 ms each. */
++static uint64_t
++darwin_cache_small_budget(void)
++{
++   static uint64_t budget = UINT64_MAX;
++   if (budget == UINT64_MAX) {
++      const char *text = getenv("TU_DARWIN_BO_CACHE_SMALL_MB");
++      budget = (text && *text ? strtoull(text, NULL, 10) : 16) << 20;
++   }
++   return budget;
++}
++
++static bool
++darwin_small(uint64_t size)
++{
++   return size <= ((uint64_t)1 << 20) && darwin_cache_small_budget();
++}
++
+ static void
+ darwin_cache_log(struct darwin_retire_state *retire)
+ {
+@@ -583,6 +608,9 @@
+            (unsigned long long)(st->hits * 1000 / st->lookups % 10), (unsigned long long)retire->cache_count,
+            (unsigned long long)(retire->cache_bytes >> 20), (unsigned long long)st->evictions, (unsigned long long)st->flushes,
+            (unsigned long long)retire->va.holes);
++   fprintf(stderr, "NativeAdreno BO cache: of BOs up to 1 MiB %llu allocations, %llu reused, %llu KiB cached now, %llu evicted\n",
++           (unsigned long long)st->small_lookups, (unsigned long long)st->small_hits, (unsigned long long)(retire->small_bytes >> 10),
++           (unsigned long long)st->small_evictions);
+ }
+ 
+ /* Drops the cache entry at the index for real. VK_NOT_READY keeps it. */
+@@ -594,6 +622,8 @@
+    if (result != VK_SUCCESS)
+       return result;
+    retire->cache_bytes -= e->size;
++   if (darwin_small(e->size))
++      retire->small_bytes -= e->size;
+    *e = retire->cache[--retire->cache_count];
+    ++retire->cache_stats.evictions;
+    return VK_SUCCESS;
+@@ -630,16 +660,26 @@
+    retire->cache[retire->cache_count++] = {bo->handle, bo->iova, bo->size, ++retire->cache_stamp, bo->mapping, bo->token,
+                                            bo->read_only};
+    retire->cache_bytes += bo->size;
++   const bool small = darwin_small(bo->size);
++   if (small)
++      retire->small_bytes += bo->size;
+    if (retire->cache_bytes > retire->cache_stats.bytes_peak)
+       retire->cache_stats.bytes_peak = retire->cache_bytes;
+    ++retire->cache_stats.inserts;
+-   while (retire->cache_bytes > darwin_cache_budget() && retire->cache_count > 1) {
+-      unsigned oldest = 0;
+-      for (unsigned i = 1; i < retire->cache_count; ++i)
+-         if (retire->cache[i].stamp < retire->cache[oldest].stamp)
+-            oldest = i;
+-      if (darwin_cache_evict(dev, retire, oldest) != VK_SUCCESS)
++   /* Past its budget the least recently cached BOs of the same budget go, never the one just put. */
++   const uint64_t budget = small ? darwin_cache_small_budget() : darwin_cache_budget();
++   while ((small ? retire->small_bytes : retire->cache_bytes - retire->small_bytes) > budget) {
++      int oldest = -1;
++      for (unsigned i = 0; i < retire->cache_count; ++i) {
++         const struct darwin_cached_bo *e = &retire->cache[i];
++         if (e->stamp != retire->cache_stamp && darwin_small(e->size) == small &&
++             (oldest < 0 || e->stamp < retire->cache[oldest].stamp))
++            oldest = (int)i;
++      }
++      if (oldest < 0 || darwin_cache_evict(dev, retire, (unsigned)oldest) != VK_SUCCESS)
+          break;
++      if (small)
++         ++retire->cache_stats.small_evictions;
+    }
+    return true;
+ }
+@@ -649,6 +689,9 @@
+ darwin_cache_get(struct darwin_retire_state *retire, uint64_t size, bool read_only, bool need_mapping, struct darwin_cached_bo *out)
+ {
+    ++retire->cache_stats.lookups;
++   const bool small = darwin_small(size);
++   if (small)
++      ++retire->cache_stats.small_lookups;
+    int best = -1;
+    for (unsigned i = 0; i < retire->cache_count; ++i) {
+       const struct darwin_cached_bo *e = &retire->cache[i];
+@@ -661,8 +704,12 @@
+    if (best >= 0) {
+       *out = retire->cache[best];
+       retire->cache_bytes -= out->size;
++      if (darwin_small(out->size))
++         retire->small_bytes -= out->size;
+       retire->cache[best] = retire->cache[--retire->cache_count];
+       ++retire->cache_stats.hits;
++      if (small)
++         ++retire->cache_stats.small_hits;
+    }
+    if (!(retire->cache_stats.lookups & 4095))
+       darwin_cache_log(retire);

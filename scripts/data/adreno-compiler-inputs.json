@@ -63,7 +63,9 @@
     "patches/mesa/turnip-darwin-va-exhausted-note.patch",
     "patches/mesa/mesa-darwin-total-memory-sysctl.patch",
     "patches/mesa/turnip-msaa-resolved-prefers-gmem.patch",
-    "patches/mesa/turnip-cs-failed-stream-entries.patch"
+    "patches/mesa/turnip-cs-failed-stream-entries.patch",
+    "patches/mesa/turnip-darwin-bo-cache-small-budget.patch",
+    "patches/mesa/turnip-darwin-bo-cache-oversize.patch"
   ],
   "integer_fma_reference": {
     "repository": "https://github.com/ucb-bar/berkeley-softfloat-3",
