@@ -116,7 +116,17 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     # The spare command pools a busier spell made, released by the kept-memory trims (every 2 s, those spare for 20 s, all but
     # the 8 newest; on memory pressure all but 2): a pool keeps every command buffer it made and Turnip their command stream
     # memory, and the render server held 13,890 blobs (390 MiB of wired guest memory) after windowed apps and Maps.
-    '0022-trim-spare-command-pools.patch']]
+    '0022-trim-spare-command-pools.patch',
+    # Diagnostic: /private/var/ngpu/debug/dont-care-store at process start stores every DontCare attachment (STORE), for an
+    # A/B of 0021 against CoreAnimation's material backdrops.
+    '0023-dont-care-store-switch.patch',
+    # Which DontCare attachments keep DONT_CARE, per class (1 single-sampled colors, 2 multisampled resolved, 4 depth/stencil),
+    # 7 by default, as 0021 (the dark dock glass was 0026's carried shadow, not DONT_CARE); /private/var/ngpu/debug/dont-care-mask
+    # overrides the mask for an A/B.
+    '0024-dont-care-kept-per-attachment-class.patch',
+    # Diagnostic: /private/var/ngpu/debug/full-barriers at process start puts a full memory barrier before every pass, copy, blit
+    # and dispatch (an A/B for a dependency missing between a pass and a later read of what it rendered).
+    '0025-full-barriers-switch.patch']]
 
 
 def git_tree(*steps):

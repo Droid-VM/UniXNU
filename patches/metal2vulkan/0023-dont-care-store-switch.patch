@@ -1,0 +1,23 @@
+diff --git a/crates/metal2vulkan-runtime/src/render_target.rs b/crates/metal2vulkan-runtime/src/render_target.rs
+--- a/crates/metal2vulkan-runtime/src/render_target.rs
++++ b/crates/metal2vulkan-runtime/src/render_target.rs
+@@ -399,9 +399,19 @@
+     Stored,
+ }
+ 
++/// Diagnostic (DroidVM): while /private/var/ngpu/debug/dont-care-store exists when the process starts, every attachment
++/// Metal stores `DontCare` or `MultisampleResolve` is stored (`STORE`) whatever the driver's facts say -- the A/B for a pass
++/// that reads back what an earlier one left: CoreAnimation's material backdrops (the dock rising over an app, Spotlight's
++/// search field) blurred the wallpaper or nothing instead of the content beneath under Turnip's GMEM `DONT_CARE`.
++static FORCE_STORE: std::sync::LazyLock<bool> =
++    std::sync::LazyLock::new(|| std::path::Path::new("/private/var/ngpu/debug/dont-care-store").exists());
++
+ impl DontCare {
+     /// How `device` stores such an attachment.
+     pub(super) fn of(device: &Device) -> Self {
++        if *FORCE_STORE {
++            return Self::Stored;
++        }
+         let facts = &device.properties().driver_facts;
+         match facts.contains(&DriverFact::DontCareStoreIsOneOfMetals)
+             || facts.contains(&DriverFact::DontCareStoreIsMetals)

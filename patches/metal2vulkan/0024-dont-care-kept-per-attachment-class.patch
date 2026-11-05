@@ -1,0 +1,54 @@
+diff --git a/crates/metal2vulkan-runtime/src/render_target.rs b/crates/metal2vulkan-runtime/src/render_target.rs
+--- a/crates/metal2vulkan-runtime/src/render_target.rs
++++ b/crates/metal2vulkan-runtime/src/render_target.rs
+@@ -406,6 +406,30 @@
+ static FORCE_STORE: std::sync::LazyLock<bool> =
+     std::sync::LazyLock::new(|| std::path::Path::new("/private/var/ngpu/debug/dont-care-store").exists());
+ 
++/// DroidVM: which attachments Metal stores `DontCare` (or `MultisampleResolve`) keep the device's `DontCare`, a mask -- 1 a color
++/// that does not resolve, 2 a multisampled color that resolves, 4 depth and stencil -- the others being stored (`STORE`), for an
++/// A/B of what 0021's `DontCare` costs or breaks. Turnip renders each pass in GMEM or in system memory as its autotuner picks, and
++/// under `DONT_CARE` leaves the earlier texels in the one and the rendered ones in the other. 7 by default, 0021's (4x samples kept
++/// in GMEM: 37 ms against 9 ms a full-screen pass): storing every class (0) left CoreAnimation's material backdrops as wrong as
++/// before (the dock rising over an app, Spotlight's search field, 2026-11-05), so they are not this. The decimal number in
++/// /private/var/ngpu/debug/dont-care-mask at process start replaces it.
++static KEPT_DONT_CARE: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| {
++    std::fs::read_to_string("/private/var/ngpu/debug/dont-care-mask")
++        .ok()
++        .and_then(|mask| mask.trim().parse().ok())
++        .unwrap_or(7)
++});
++
++impl DontCare {
++    /// `self` for an attachment of `class` (a bit of [`KEPT_DONT_CARE`]) where that class keeps `DontCare`, `Stored` elsewhere.
++    fn kept_for(self, class: u32) -> Self {
++        match *KEPT_DONT_CARE & class {
++            0 => Self::Stored,
++            _ => self,
++        }
++    }
++}
++
+ impl DontCare {
+     /// How `device` stores such an attachment.
+     pub(super) fn of(device: &Device) -> Self {
+@@ -1239,6 +1263,10 @@
+ /// attachment the exact resolve reads after the pass keeps its samples for it, and one whose
+ /// texels are copied as its resolve its texels.
+ fn color_ops(color: &ColorTarget, at: Position, dont_care: DontCare) -> Ops {
++    let dont_care = dont_care.kept_for(match color.resolve.is_some() {
++        true => 2,
++        false => 1,
++    });
+     let exact = color.resolve.as_ref().is_some_and(|r| r.shader.is_some())
+         || color.copied_resolve.is_some();
+     let unheld = color.memoryless
+@@ -1266,7 +1294,7 @@
+     at: Position,
+     dont_care: DontCare,
+ ) -> Ops {
+-    let dont_care = dont_care.unless(ds.hidden);
++    let dont_care = dont_care.kept_for(4).unless(ds.hidden);
+     let later = later_stored(layout);
+     let stored = |aspect, store| match at.last && later.contains(aspect) {
+         true => vk::AttachmentStoreOp::STORE,
