@@ -1,0 +1,121 @@
+diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -836,12 +836,13 @@
+ 
+ static VkResult
+ darwin_map_failure(struct tu_device *dev, uint64_t handle, uint64_t iova,
+-                   uint64_t size, kern_return_t map_error)
++                   uint64_t size, kern_return_t map_error, bool owns_iova = true)
+ {
+    NativeAdrenoAbiBoFree release = {.handle = handle};
+    kern_return_t cleanup = dw_call(NativeAdrenoMethodBoFree, &release, sizeof(release), NULL, 0);
+    if (cleanup == KERN_SUCCESS) {
+-      darwin_free_iova(dev, iova, size);
++      if (owns_iova)   /* a lazy BO's address is its VMA's (darwin_sparse_vma_finish frees it) */
++         darwin_free_iova(dev, iova, size);
+       return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY, "BoMap failed: 0x%x", map_error);
+    }
+    /* A failed map may have modified tables. Unknown cleanup never authorizes
+@@ -864,9 +865,8 @@
+                const char *name)
+ {
+    MESA_TRACE_FUNC();
+-   if (lazy_vma)
+-      return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
+-
++   /* A lazily allocated memory's BO (tu_allocate_lazy_memory, the first pass that needs its memory) is made at its VMA's address,
++    * which the VMA keeps, and is never cached: it goes with the memory, as it came. */
+    VkResult collected = darwin_collect_retired(dev);
+    if (collected != VK_SUCCESS)
+       return collected;
+@@ -874,7 +874,7 @@
+    struct darwin_retire_state *retire = (struct darwin_retire_state *)dev->darwin_retire;
+    /* TU_DARWIN_BO_CACHE=0 turns the cache off (the host checks of the release paths need every free to reach the kernel). */
+    static const bool cache_enabled = debug_get_bool_option("TU_DARWIN_BO_CACHE", true);
+-   const bool cacheable = cache_enabled && !(flags & TU_BO_ALLOC_REPLAYABLE);
++   const bool cacheable = cache_enabled && !(flags & TU_BO_ALLOC_REPLAYABLE) && !lazy_vma;
+    const bool read_only = !!(flags & TU_BO_ALLOC_GPU_READ_ONLY);
+    uint64_t alloc_size = cacheable ? darwin_size_class(size) : size;
+ 
+@@ -900,7 +900,11 @@
+    }
+ 
+    for (bool flushed = false; !reused;) {
+-      VkResult result = darwin_allocate_iova(dev, alloc_size, client_iova, flags, &iova);
++      VkResult result = VK_SUCCESS;
++      if (lazy_vma)
++         iova = lazy_vma->msm.iova;
++      else
++         result = darwin_allocate_iova(dev, alloc_size, client_iova, flags, &iova);
+       if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !flushed) {
+          flushed = true;
+          pthread_mutex_lock(&retire->lock);
+@@ -916,7 +920,8 @@
+       NativeAdrenoAbiBoAllocReply reply = {};
+       kern_return_t kr = dw_call(NativeAdrenoMethodBoAlloc, &alloc, sizeof(alloc), &reply, sizeof(reply));
+       if (kr != KERN_SUCCESS) {
+-         darwin_free_iova(dev, iova, alloc_size);
++         if (!lazy_vma)
++            darwin_free_iova(dev, iova, alloc_size);
+          if (!flushed) {   /* the kernel pool may be held by cached BOs */
+             flushed = true;
+             pthread_mutex_lock(&retire->lock);
+@@ -938,9 +943,11 @@
+       NativeAdrenoAbiBoMapReply mapped = {};
+       kr = dw_call(NativeAdrenoMethodBoMap, &map, sizeof(map), &mapped, sizeof(mapped));
+       if (kr != KERN_SUCCESS) {
+-         return darwin_map_failure(dev, reply.handle, iova, alloc_size, kr);
++         return darwin_map_failure(dev, reply.handle, iova, alloc_size, kr, !lazy_vma);
+       }
+       handle = reply.handle;
++      if (lazy_vma)   /* its address now goes with the BO (darwin_bo_finish), not with the VMA */
++         lazy_vma->msm.backs_lazy_bo = true;
+       break;
+    }
+ 
+@@ -1585,17 +1592,33 @@
+    return VK_SUCCESS;
+ }
+ 
++/* Lazily allocated memory only (has_lazy_bos; no sparse resources): the memory's GPU address at once, its BO made there by the first
++ * pass that needs it (darwin_bo_init's lazy_vma), as the msm backend's set-IOVA path does. DroidVM: a memoryless texture -- a
++ * transient attachment, which Metal keeps in tile memory -- took memory of its own, wired guest pages, though a pass that renders in
++ * GMEM never touches it: the render server's memoryless targets held 45 MiB, the wallpaper's 4x MSAA ones 32. */
+ static VkResult
+ darwin_sparse_vma_init(struct tu_device *dev, struct vk_object_base *base,
+                        struct tu_sparse_vma *out_vma, uint64_t *out_iova,
+                        enum tu_sparse_vma_flags flags, uint64_t size, uint64_t client_iova)
+ {
+-   return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
++   if (flags & TU_SPARSE_VMA_MAP_ZERO)
++      return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
++   const enum tu_bo_alloc_flags bo_flags =
++      (flags & TU_SPARSE_VMA_REPLAYABLE) ? TU_BO_ALLOC_REPLAYABLE : TU_BO_ALLOC_NO_FLAGS;
++   out_vma->flags = flags;
++   out_vma->msm.size = size;
++   out_vma->msm.backs_lazy_bo = false;
++   VkResult result = darwin_allocate_iova(dev, size, client_iova, bo_flags, &out_vma->msm.iova);
++   if (result == VK_SUCCESS)
++      *out_iova = out_vma->msm.iova;
++   return result;
+ }
+ 
+ static void
+ darwin_sparse_vma_finish(struct tu_device *dev, struct tu_sparse_vma *vma)
+ {
++   if (!vma->msm.backs_lazy_bo)
++      darwin_free_iova(dev, vma->msm.iova, vma->msm.size);
+ }
+ 
+ static const struct tu_knl darwin_knl_funcs = {
+@@ -1671,7 +1694,8 @@
+    device->has_set_iova = !!(info->flags & NativeAdrenoDeviceClientIova);
+    device->va_start = info->va_start;
+    device->va_size = info->va_size;
+-   device->has_lazy_bos = false;
++   /* TU_DARWIN_LAZY_BOS=0: no lazily allocated memory type, as before (darwin_sparse_vma_init). */
++   device->has_lazy_bos = device->has_set_iova && debug_get_bool_option("TU_DARWIN_LAZY_BOS", true);
+    device->has_sparse = false;
+    device->has_sparse_prr = false;
+    device->has_raytracing = false;

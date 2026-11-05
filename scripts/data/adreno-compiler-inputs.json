@@ -65,7 +65,8 @@
     "patches/mesa/turnip-msaa-resolved-prefers-gmem.patch",
     "patches/mesa/turnip-cs-failed-stream-entries.patch",
     "patches/mesa/turnip-darwin-bo-cache-small-budget.patch",
-    "patches/mesa/turnip-darwin-bo-cache-oversize.patch"
+    "patches/mesa/turnip-darwin-bo-cache-oversize.patch",
+    "patches/mesa/turnip-darwin-lazy-bos.patch"
   ],
   "integer_fma_reference": {
     "repository": "https://github.com/ucb-bar/berkeley-softfloat-3",
