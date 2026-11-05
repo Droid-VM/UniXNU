@@ -141,7 +141,10 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     '0029-memoryless-backings-cover.patch',
     # The shadows' spare merge scratches go with the idle trim (10 s unused) and on memory pressure: a still wallpaper's
     # drawables kept 64 MiB of them for good.
-    '0030-idle-merge-scratch-spares.patch']]
+    '0030-idle-merge-scratch-spares.patch',
+    # Diagnostics: METAL2VULKAN_BACKING_COVER=0 turns 0029 off for an A/B of the frames; METAL2VULKAN_POOL_REPORT=1 keeps each
+    # pool's blocks (size, used, free ranges, longest) at the idle trim, m2v_pool_report.
+    '0031-backing-cover-switch-and-pool-report.patch']]
 
 
 def git_tree(*steps):

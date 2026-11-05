@@ -1,0 +1,121 @@
+diff --git a/crates/metal2vulkan-runtime/src/attachment_stand_in.rs b/crates/metal2vulkan-runtime/src/attachment_stand_in.rs
+--- a/crates/metal2vulkan-runtime/src/attachment_stand_in.rs
++++ b/crates/metal2vulkan-runtime/src/attachment_stand_in.rs
+@@ -288,7 +288,8 @@
+     /// server held 19 backings, 254 MiB (the pool's bound), every one wired guest memory.
+     fn covers(&self, own: &Target) -> bool {
+         self.backs(own)
+-            || (self.grows_for(own)
++            || (cover()
++                && self.grows_for(own)
+                 && self.extent[0] >= own.extent[0]
+                 && self.extent[1] >= own.extent[1])
+     }
+@@ -316,11 +317,21 @@
+     takes: u64,
+ }
+ 
++/// Whether backings cover attachments of other extents and grow ([`PooledBacking::covers`]):
++/// `METAL2VULKAN_BACKING_COVER=0` keeps each to its own extent, as before, for an A/B of the frames.
++fn cover() -> bool {
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ON.get_or_init(|| std::env::var("METAL2VULKAN_BACKING_COVER").map_or(true, |text| text.trim() != "0"))
++}
++
+ impl BackingPool {
+     /// Drop the backings of `own`'s kind ([`PooledBacking::grows_for`]) that the one at `at`
+     /// covers, but those the pass renders into (`taken`) and it (DroidVM), as [`bound`](Self::bound)
+     /// drops its own: a command buffer that rendered into one holds it until it completes.
+     fn drop_covered(&mut self, at: usize, own: &Target, taken: &[Texture]) {
++        if !cover() {
++            return;
++        }
+         let keep = self.kept[at].backing.texture.clone();
+         let [width, height] = self.kept[at].extent;
+         self.kept.retain(|k| {
+@@ -396,7 +407,7 @@
+         // One made now is as large as the largest of its kind the pool keeps, so that it covers
+         // the attachments those cover too.
+         let [mut width, mut height] = own.extent;
+-        for kept in pool.kept.iter().filter(|k| k.grows_for(own)) {
++        for kept in pool.kept.iter().filter(|k| cover() && k.grows_for(own)) {
+             width = width.max(kept.extent[0]);
+             height = height.max(kept.extent[1]);
+         }
+diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
+--- a/crates/metal2vulkan-runtime/src/memory.rs
++++ b/crates/metal2vulkan-runtime/src/memory.rs
+@@ -1139,6 +1139,32 @@
+ }
+ 
+ impl Memory {
++    /// DroidVM diagnostic: every pool with a block, one line each: "pool B|I<type> n<blocks> <MiB
++    /// placed>/<MiB>" then each block as <MiB>:<percent used>/<free ranges>/<longest free MiB>, a
++    /// dedicated one marked "d" (the idle trim keeps it, [`m2v_pool_report`]).
++    fn pool_report(&self) -> String {
++        let mut text = String::new();
++        for (at, pool) in self.pools.iter().enumerate() {
++            let blocks: Vec<&PoolBlock<Block>> = pool.blocks.iter().flatten().collect();
++            if blocks.is_empty() {
++                continue;
++            }
++            let holds = if at >= self.types.len() { 'I' } else { 'B' };
++            let size: u64 = blocks.iter().map(|b| b.ranges.len()).sum();
++            let used: u64 = blocks.iter().map(|b| b.ranges.used()).sum();
++            text.push_str(&format!("pool {}{} n{} {:.1}/{:.1}:", holds, at % self.types.len(), blocks.len(),
++                used as f64 / 1048576.0, size as f64 / 1048576.0));
++            for block in blocks {
++                let len = block.ranges.len().max(1);
++                text.push_str(&format!(" {:.1}{}:{}/{}/{:.1}", len as f64 / 1048576.0, if block.dedicated { "d" } else { "" },
++                    block.ranges.used() * 100 / len, block.ranges.range_count(),
++                    block.ranges.longest(1) as f64 / 1048576.0));
++            }
++            text.push('\n');
++        }
++        text
++    }
++
+     /// The memory of a device with `properties`, whose largest allocation is
+     /// `max_allocation` bytes, with unified memory or without (`unified`), whose queue families
+     /// are `families`, whose driver is `driver`.
+@@ -2450,6 +2476,10 @@
+             false => (idle * 5).max(Duration::from_secs(10)),
+         };
+         crate::shadow_merge::trim_scratch_spares(scratch_idle);
++        if pool_report_on() {
++            let report = lock(&shared.memory).pool_report();
++            *POOL_REPORT.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = report;
++        }
+         blocks
+     }
+ }
+@@ -2564,3 +2594,29 @@
+     }
+     length
+ }
++
++/// Whether the idle trim keeps a pool report (`METAL2VULKAN_POOL_REPORT=1`, DroidVM diagnostic).
++fn pool_report_on() -> bool {
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ON.get_or_init(|| std::env::var("METAL2VULKAN_POOL_REPORT").is_ok_and(|text| text.trim() == "1"))
++}
++
++/// The last pool report of the process's devices ([`Memory::pool_report`]).
++static POOL_REPORT: Mutex<String> = Mutex::new(String::new());
++
++/// DroidVM diagnostic: the last pool report into `out` (`size` bytes, NUL-terminated); the bytes
++/// written, without the NUL.
++#[unsafe(no_mangle)]
++pub extern "C" fn m2v_pool_report(out: *mut u8, size: usize) -> usize {
++    if out.is_null() || size == 0 {
++        return 0;
++    }
++    let report = POOL_REPORT.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
++    let length = report.len().min(size - 1);
++    // SAFETY: the caller's `size` bytes at `out`.
++    unsafe {
++        std::ptr::copy_nonoverlapping(report.as_ptr(), out, length);
++        *out.add(length) = 0;
++    }
++    length
++}
