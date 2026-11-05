@@ -118,6 +118,9 @@ if result.returncode:
     sys.exit('Build failed; see ' + str(build_log) + '\n' + '\n'.join(
         l for l in build_log.read_text().splitlines() if ': error:' in l or 'fatal error:' in l or l.startswith('FAILED:'))[:3000])
 library = OUT / 'src/freedreno/vulkan/libvulkan_freedreno.dylib'
+# The entrypoints Mesa leaves unimplemented are weak imports bound through the flat namespace (-undefined dynamic_lookup): dyld
+# searched every loaded image for each of them in every process that opened a device. Bound to the library itself they stay NULL.
+subprocess.run([sys.executable, str(ROOT / 'scripts/macho-weak-self-binds.py'), str(library)], check=True)
 symbols = subprocess.run(['nm', '-gU', str(library)], capture_output=True, text=True).stdout
 if ' T _vk_icdGetInstanceProcAddr' not in symbols:
     sys.exit('The library does not export vk_icdGetInstanceProcAddr')
