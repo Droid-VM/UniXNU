@@ -135,7 +135,13 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     '0027-keep-room-cap-from-the-environment.patch',
     # A diagnostic: the live placements by the source line that asked for them (#[track_caller] through the image and buffer
     # helpers), m2v_placement_sites: which of the runtime's own images (shadows, twins, staging) a process's GPU memory holds.
-    '0028-placement-sites.patch']]
+    '0028-placement-sites.patch',
+    # A queue's memoryless color backings serve every single-sampled attachment of their kind they cover, a new one as large
+    # as the largest kept: Core Animation's many extents each kept one (the render server's 254 MiB of backings).
+    '0029-memoryless-backings-cover.patch',
+    # The shadows' spare merge scratches go with the idle trim (10 s unused) and on memory pressure: a still wallpaper's
+    # drawables kept 64 MiB of them for good.
+    '0030-idle-merge-scratch-spares.patch']]
 
 
 def git_tree(*steps):

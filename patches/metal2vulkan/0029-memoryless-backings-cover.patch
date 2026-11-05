@@ -1,0 +1,129 @@
+diff --git a/crates/metal2vulkan-runtime/src/attachment_stand_in.rs b/crates/metal2vulkan-runtime/src/attachment_stand_in.rs
+--- a/crates/metal2vulkan-runtime/src/attachment_stand_in.rs
++++ b/crates/metal2vulkan-runtime/src/attachment_stand_in.rs
+@@ -278,6 +278,31 @@
+             && self.layers == own.layers
+             && self.extent == own.extent
+     }
++
++    /// Whether it backs `own`, or covers it: of its kind ([`grows_for`](Self::grows_for)) and at
++    /// least as wide and as high. A pass renders a memoryless color only inside its own extent,
++    /// the framebuffer's (whose views need only be at least as large, `render_target.rs`), and
++    /// reads nothing a pass before it left (the [`pooled_backing`] docs): so one image serves an
++    /// attachment of any extent it holds. DroidVM: Core Animation's memoryless targets come in
++    /// as many extents as its blurs and backdrops, each kept apart: the iPadOS guest's render
++    /// server held 19 backings, 254 MiB (the pool's bound), every one wired guest memory.
++    fn covers(&self, own: &Target) -> bool {
++        self.backs(own)
++            || (self.grows_for(own)
++                && self.extent[0] >= own.extent[0]
++                && self.extent[1] >= own.extent[1])
++    }
++
++    /// Whether a backing of `own`'s kind may be made at this one's extent: the same pixel format,
++    /// format and layers, one sample. A multisampled backing keeps its exact extent (the sample
++    /// planes' copies and the color resolve read it whole).
++    fn grows_for(&self, own: &Target) -> bool {
++        self.pixel_format == own.texture.pixel_format()
++            && self.format == own.format
++            && self.samples == 1
++            && own.samples == 1
++            && self.layers == own.layers
++    }
+ }
+ 
+ /// The memoryless color backings one command queue keeps for its passes ([`pooled_backing`]): at
+@@ -292,6 +317,21 @@
+ }
+ 
+ impl BackingPool {
++    /// Drop the backings of `own`'s kind ([`PooledBacking::grows_for`]) that the one at `at`
++    /// covers, but those the pass renders into (`taken`) and it (DroidVM), as [`bound`](Self::bound)
++    /// drops its own: a command buffer that rendered into one holds it until it completes.
++    fn drop_covered(&mut self, at: usize, own: &Target, taken: &[Texture]) {
++        let keep = self.kept[at].backing.texture.clone();
++        let [width, height] = self.kept[at].extent;
++        self.kept.retain(|k| {
++            k.backing.texture == keep
++                || taken.contains(&k.backing.texture)
++                || !k.grows_for(own)
++                || width < k.extent[0]
++                || height < k.extent[1]
++        });
++    }
++
+     /// Drop the backings taken least recently while the pool keeps more than its bounds, but
+     /// the last one, just made.
+     fn bound(&mut self) {
+@@ -330,23 +370,47 @@
+     taken: &[Texture],
+ ) -> Result<Target, Error> {
+     let queue = maker.command_queue();
+-    let free = |k: &PooledBacking| k.backs(own) && !taken.contains(&k.backing.texture);
+-    {
++    let free = |k: &PooledBacking| k.covers(own) && !taken.contains(&k.backing.texture);
++    let grown = {
+         let mut pool = lock(queue.memoryless_backings());
+         pool.takes += 1;
+         let takes = pool.takes;
+-        if let Some(found) = pool.kept.iter_mut().find(|k| free(k)) {
+-            found.taken = takes;
+-            let backing = found.backing.clone();
++        // The largest free one that covers it, rendered at the attachment's extent; the smaller
++        // ones of its kind it covers go (DroidVM): one image serves the kind's passes in turn,
++        // and the pool keeps as many as a pass renders into at once.
++        let found = (pool.kept.iter().enumerate())
++            .filter(|(_, k)| free(k))
++            .max_by_key(|(_, k)| k.bytes)
++            .map(|(at, _)| at);
++        if let Some(at) = found {
++            pool.kept[at].taken = takes;
++            let mut backing = pool.kept[at].backing.clone();
++            pool.drop_covered(at, own, taken);
+             drop(pool);
++            backing.extent = own.extent;
+             // Held as one `maker` made: its first batch moves it to `GENERAL` where the command
+             // buffer that made it has not yet submitted a batch.
+             maker.hold_own_texture(backing.texture.clone());
+             return Ok(backing);
+         }
+-    }
++        // One made now is as large as the largest of its kind the pool keeps, so that it covers
++        // the attachments those cover too.
++        let [mut width, mut height] = own.extent;
++        for kept in pool.kept.iter().filter(|k| k.grows_for(own)) {
++            width = width.max(kept.extent[0]);
++            height = height.max(kept.extent[1]);
++        }
++        [width, height]
++    };
+     // Made with no lock held; the pool may keep one another thread made meanwhile beside it.
+-    let made = stand_in(maker, own, false)?;
++    let mut made = match grown == own.extent {
++        true => stand_in(maker, own, false)?,
++        false => {
++            let mut larger = own.clone();
++            larger.extent = grown;
++            stand_in(maker, &larger, false)?
++        }
++    };
+     maker.device().shared().counts.pooled_backing_made();
+     let mut pool = lock(queue.memoryless_backings());
+     pool.takes += 1;
+@@ -356,12 +420,15 @@
+         format: own.format,
+         samples: own.samples,
+         layers: own.layers,
+-        extent: own.extent,
++        extent: grown,
+         bytes: made.texture.placed_bytes().unwrap_or(0),
+         taken: takes,
+         backing: made.clone(),
+     });
++    let at = pool.kept.len() - 1;
++    pool.drop_covered(at, own, taken);
+     pool.bound();
++    made.extent = own.extent;
+     Ok(made)
+ }
+ 
