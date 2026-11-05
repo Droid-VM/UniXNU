@@ -129,7 +129,13 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     '0025-full-barriers-switch.patch',
     # A shadow's copy back leaves the textures other encoders carried over the same truth to copy in again: a render pass's
     # store into a rotated framebuffer left the image its later passes sample stale (CoreAnimation's backdrops).
-    '0026-copy-back-drops-carried-shadows.patch']]
+    '0026-copy-back-drops-carried-shadows.patch',
+    # METAL2VULKAN_KEEP_ROOM_MIB caps the room keep_room keeps in each pool: a free range of half a block, which a pool
+    # whose free bytes were in pieces made another block for (the render server's pooled blocks half empty).
+    '0027-keep-room-cap-from-the-environment.patch',
+    # A diagnostic: the live placements by the source line that asked for them (#[track_caller] through the image and buffer
+    # helpers), m2v_placement_sites: which of the runtime's own images (shadows, twins, staging) a process's GPU memory holds.
+    '0028-placement-sites.patch']]
 
 
 def git_tree(*steps):
