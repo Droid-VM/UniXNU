@@ -1,0 +1,40 @@
+diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -1300,6 +1300,15 @@
+    if (bo->map && bo->darwin_token)
+       TU_RMV(bo_unmap, dev, bo);
+    TU_RMV(bo_destroy, dev, bo);
++
++   /* The BO structs live in a sparse array, indexed by handle: zero the entry to mark it free, and before the handle can go back. The
++    * sweeps below may cache or free it at once (its fence done), and from then another thread's allocation can take the handle and
++    * its entry; zeroed after that, the entry it zeroed was that new, live BO's. Its command streams then read address 0 (the
++    * submission refused, the device lost) or, its entry taken again, another BO's (the GPU ran that BO's memory): an Adreno 840 under
++    * GFXBench Aztec did both, the CP faulting on addresses no BO had and frames "completing" at 1500 fps. */
++   const struct darwin_retired_bo record = {bo->darwin_handle, bo->iova, bo->darwin_alloc_size ? bo->darwin_alloc_size : bo->size,
++                                            bo->map, bo->darwin_token, 0, bo->darwin_alloc_size != 0, bo->darwin_read_only};
++   memset(bo, 0, sizeof(*bo));
+ 
+    struct darwin_retire_state *retire = (struct darwin_retire_state *)dev->darwin_retire;
+    pthread_mutex_lock(&retire->lock);
+@@ -1322,8 +1331,8 @@
+       uint32_t fence = dw.last_fence;
+       pthread_mutex_unlock(&dw.lock);
+       unsigned slot = (retire->head + retire->count) % retire->capacity;
+-      retire->entries[slot] = {bo->darwin_handle, bo->iova, bo->darwin_alloc_size ? bo->darwin_alloc_size : bo->size, bo->map,
+-                               bo->darwin_token, fence, bo->darwin_alloc_size != 0, bo->darwin_read_only};
++      retire->entries[slot] = record;
++      retire->entries[slot].fence = fence;
+       ++retire->count;
+       ++retire->enqueued;
+       darwin_reap_locked(dev, retire);
+@@ -1334,9 +1343,6 @@
+    }
+    pthread_mutex_unlock(&retire->lock);
+ 
+-   /* The BO structs live in a sparse array: zero the entry to mark it free. */
+-   memset(bo, 0, sizeof(*bo));
+-
+    u_rwlock_rdunlock(&dev->dma_bo_lock);
+ }
+ 
