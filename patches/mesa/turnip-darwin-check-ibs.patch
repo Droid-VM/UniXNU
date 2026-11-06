@@ -1,0 +1,213 @@
+diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -35,6 +35,145 @@
+ #include "tu_queue.h"
+ #include "tu_rmv.h"
+ 
++#include <map>
++#include <mutex>
++#include <unordered_set>
++
++/* TU_DARWIN_CHECK_IBS: before a submission goes, every GPU address the command processor will follow from it -- an indirect buffer,
++ * a draw state group, an index buffer, an indirect draw's arguments and count -- must lie in a BO that is live then, read from the
++ * command streams as they stand (indirect buffers and draw states followed three levels deep, each one once). 1 reports what does
++ * not; 2 also refuses the submission (the device is lost) instead of letting the GPU fault on it. An Adreno 840 faulted with the CP
++ * reading an indirect buffer, or the DDE an index or argument, at addresses no BO has (0x3f7ac000, 0x2a9c0000, 0, 0x14e1444c0):
++ * whether such an address was in the stream when it was submitted, or came there after, is what this tells. */
++static int dwc_mode = -1;
++static std::mutex dwc_lock;
++static std::map<uint64_t, struct tu_bo *> dwc_bos;   /* by iova: every live BO */
++static unsigned dwc_reported;
++
++static int
++darwin_check_mode(void)
++{
++   if (dwc_mode < 0)
++      dwc_mode = (int)debug_get_num_option("TU_DARWIN_CHECK_IBS", 0);
++   return dwc_mode;
++}
++
++static void
++darwin_check_bo_live(struct tu_bo *bo, bool live)
++{
++   if (!darwin_check_mode() || !bo->iova)
++      return;
++   std::lock_guard<std::mutex> guard(dwc_lock);
++   if (live) {
++      dwc_bos[bo->iova] = bo;
++      return;
++   }
++   auto it = dwc_bos.find(bo->iova);
++   if (it != dwc_bos.end() && it->second == bo)
++      dwc_bos.erase(it);
++}
++
++/* The live BO that holds [va, va + bytes), or NULL; with dwc_lock held. */
++static struct tu_bo *
++dwc_find(uint64_t va, uint64_t bytes)
++{
++   auto it = dwc_bos.upper_bound(va);
++   if (it == dwc_bos.begin())
++      return NULL;
++   --it;
++   struct tu_bo *bo = it->second;
++   return va >= bo->iova && va + bytes <= bo->iova + bo->size ? bo : NULL;
++}
++
++static unsigned
++dwc_scan(const uint32_t *dw, uint32_t count, uint64_t iova, unsigned level, std::unordered_set<uint64_t> &seen)
++{
++   unsigned bad = 0;
++   auto report = [&](const char *what, uint32_t at, uint64_t va, uint64_t bytes) {
++      ++bad;
++      if (dwc_reported++ >= 20)
++         return;
++      auto near = dwc_bos.upper_bound(va);
++      struct tu_bo *below = near == dwc_bos.begin() ? NULL : std::prev(near)->second;
++      struct tu_bo *above = near == dwc_bos.end() ? NULL : near->second;
++      mesa_loge("TU_DARWIN_CHECK_IBS: %s at 0x%" PRIx64 " (+0x%" PRIx64 " bytes) has no live BO: packet at dword %u of the level-%u "
++                "stream at 0x%" PRIx64 ", header 0x%08x; nearest BOs [0x%" PRIx64 " +0x%" PRIx64 " %s] and [0x%" PRIx64 " %s]",
++                what, va, bytes, at, level, iova, dw[at], below ? below->iova : 0, below ? below->size : 0,
++                below && below->name ? below->name : "-", above ? above->iova : 0, above && above->name ? above->name : "-");
++   };
++   auto follow = [&](const char *what, uint32_t at, uint64_t va, uint32_t dwords) {
++      struct tu_bo *bo = dwc_find(va, (uint64_t)dwords * 4);
++      if (!bo) {
++         report(what, at, va, (uint64_t)dwords * 4);
++         return;
++      }
++      if (level < 3 && bo->map && seen.insert(va).second)
++         bad += dwc_scan((const uint32_t *)((const char *)bo->map + (va - bo->iova)), dwords, va, level + 1, seen);
++   };
++   for (uint32_t i = 0; i < count;) {
++      const uint32_t header = dw[i];
++      uint32_t n;
++      if ((header & 0xf0000000) == CP_TYPE4_PKT) {
++         n = header & 0x7f;
++      } else if ((header & 0xf0000000) == CP_TYPE7_PKT) {
++         n = header & 0x3fff;
++      } else {
++         return bad;   /* not a packet: nothing below is read as one */
++      }
++      if (i + 1 + n > count)
++         return bad;
++      const uint32_t *p = dw + i + 1;
++      auto addr = [&](unsigned k) { return (uint64_t)p[k] | ((uint64_t)p[k + 1] << 32); };
++      auto check = [&](const char *what, uint64_t va, uint64_t bytes) {
++         if (!dwc_find(va, bytes ? bytes : 1))
++            report(what, i, va, bytes);
++      };
++      if ((header & 0xf0000000) == CP_TYPE7_PKT) {
++         switch ((header >> 16) & 0x7f) {
++         case CP_INDIRECT_BUFFER:
++         case CP_INDIRECT_BUFFER_CHAIN:
++            if (n >= 3)
++               follow("indirect buffer", i, addr(0), p[2] & 0xfffff);
++            break;
++         case CP_SET_DRAW_STATE:
++            for (uint32_t g = 0; g + 2 < n; g += 3) {
++               const uint32_t d0 = p[g], dwords = d0 & CP_SET_DRAW_STATE__0_COUNT__MASK;
++               if (!dwords || (d0 & (CP_SET_DRAW_STATE__0_DISABLE | CP_SET_DRAW_STATE__0_DISABLE_ALL_GROUPS |
++                                     CP_SET_DRAW_STATE__0_LOAD_IMMED)))
++                  continue;
++               follow("draw state", i, addr(g + 1), dwords);
++            }
++            break;
++         case CP_DRAW_INDX_OFFSET:
++            if (n >= 7 && p[6])   /* no index fetch past max_index_count 0 */
++               check("index buffer", addr(4), 0);
++            break;
++         case CP_DRAW_INDIRECT_MULTI:
++            if (n == 6) {
++               check("indirect arguments", addr(3), 0);
++            } else if (n == 8) {
++               check("indirect arguments", addr(3), 0);
++               check("indirect count", addr(5), 4);
++            } else if (n == 9) {
++               if (p[5])
++                  check("index buffer", addr(3), 0);
++               check("indirect arguments", addr(6), 0);
++            } else if (n == 11) {
++               if (p[5])
++                  check("index buffer", addr(3), 0);
++               check("indirect arguments", addr(6), 0);
++               check("indirect count", addr(8), 4);
++            }
++            break;
++         default:
++            break;
++         }
++      }
++      i += 1 + n;
++   }
++   return bad;
++}
++
+ /* 'NTNL': first word of a tunnelled call, as served by the driver (NativeAdrenoPublish.cpp). */
+ #define DW_TUNNEL_MAGIC 0x4e544e4cu
+ 
+@@ -977,6 +1116,7 @@
+    }
+ 
+    tu_dump_bo_init(dev, bo);
++   darwin_check_bo_live(bo, true);
+    TU_RMV(bo_allocate, dev, bo);
+ 
+    *out_bo = bo;
+@@ -1032,6 +1172,7 @@
+    bo->map = pointer;
+    bo->never_unmap = true;
+    tu_dump_bo_init(dev, bo);
++   darwin_check_bo_live(bo, true);
+    TU_RMV(bo_allocate, dev, bo);
+    *out_bo = bo;
+    return VK_SUCCESS;
+@@ -1151,6 +1292,7 @@
+       return;
+    }
+ 
++   darwin_check_bo_live(bo, false);
+    tu_debug_bos_del(dev, bo);
+    tu_dump_bo_del(dev, bo);
+ 
+@@ -1201,6 +1343,7 @@
+ 
+ struct tu_darwin_queue_submit {
+    struct util_dynarray commands; /* NativeAdrenoAbiSubmitBuffer */
++   unsigned bad;                  /* addresses TU_DARWIN_CHECK_IBS found no live BO for */
+ };
+ 
+ static void *
+@@ -1232,6 +1375,21 @@
+          .bytes = entries[i].size,
+       };
+    }
++   if (darwin_check_mode()) {
++      std::lock_guard<std::mutex> guard(dwc_lock);
++      std::unordered_set<uint64_t> seen;
++      for (unsigned i = 0; i < num_entries; i++) {
++         const uint64_t iova = entries[i].bo->iova + entries[i].offset;
++         const uint32_t dwords = entries[i].size / 4;
++         if (!dwc_find(iova, entries[i].size)) {
++            ++submit->bad;
++            if (dwc_reported++ < 20)
++               mesa_loge("TU_DARWIN_CHECK_IBS: submitted stream 0x%" PRIx64 " (+0x%x) has no live BO", iova, entries[i].size);
++         } else if (entries[i].bo->map && seen.insert(iova).second) {
++            submit->bad += dwc_scan((const uint32_t *)((const char *)entries[i].bo->map + entries[i].offset), dwords, iova, 0, seen);
++         }
++      }
++   }
+ }
+ 
+ static void
+@@ -1453,6 +1611,9 @@
+ {
+    struct tu_darwin_queue_submit *submit = (struct tu_darwin_queue_submit *)_submit;
+    struct tu_device *dev = queue->device;
++
++   if (submit->bad && darwin_check_mode() >= 2)
++      return vk_device_set_lost(&dev->vk, "TU_DARWIN_CHECK_IBS: %u addresses of the submission have no live BO", submit->bad);
+ 
+    /* Every client submits to the kernel's one ring, which runs jobs in order, and each job's prologue flushes and invalidates the GPU
+     * caches and waits for idle (NativeAdrenoRing::emitPrologue) before its buffers run. A wait on a sync already resolved to a ring

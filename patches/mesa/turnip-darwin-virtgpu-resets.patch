@@ -1,0 +1,53 @@
+diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -1602,6 +1602,8 @@
+          return vk_device_set_lost(&dev->vk, "submit: waiting for ring space failed");
+    }
+ }
++
++static VkResult darwin_device_check_status(struct tu_device *device);
+ 
+ static VkResult
+ darwin_queue_submit(struct tu_queue *queue, void *_submit,
+@@ -1614,6 +1616,16 @@
+ 
+    if (submit->bad && darwin_check_mode() >= 2)
+       return vk_device_set_lost(&dev->vk, "TU_DARWIN_CHECK_IBS: %u addresses of the submission have no live BO", submit->bad);
++
++   /* virtio GPU: a submission the host refused, or a GPU reset KGSL blamed on this context, shows only in the shmem's counters
++    * (GetStatus reads them there, no call): KGSL skips a reset context's later work and still retires its timestamps, so every
++    * fence after it completes at once with nothing drawn -- an Adreno 840 ran GFXBench Aztec at 1300 fps, "OK", after one CP
++    * fault. The device is lost at the next submission instead of only at a vkWaitForFences. */
++   if (dw.virtgpu) {
++      VkResult status = darwin_device_check_status(dev);
++      if (status != VK_SUCCESS)
++         return status;
++   }
+ 
+    /* Every client submits to the kernel's one ring, which runs jobs in order, and each job's prologue flushes and invalidates the GPU
+     * caches and waits for idle (NativeAdrenoRing::emitPrologue) before its buffers run. A wait on a sync already resolved to a ring
+diff --git a/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc b/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc
+--- a/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc
+@@ -36,6 +36,7 @@
+    DWV_MSM_SUBMITQUEUE_NEW = 0xc00c644a, /* DRM_IOCTL_MSM_SUBMITQUEUE_NEW */
+    DWV_MSM_SUBMITQUEUE_CLOSE = 0x4004644b, /* DRM_IOCTL_MSM_SUBMITQUEUE_CLOSE */
+    DWV_MSM_PIPE_3D0 = 0x10,
++   DWV_MSM_PARAM_FAULTS = 0x09,
+    DWV_MSM_PARAM_VA_START = 0x0e,
+    DWV_MSM_PARAM_VA_SIZE = 0x0f,
+    DWV_MSM_BO_CACHED_COHERENT = 0x00080000,
+@@ -255,6 +256,12 @@
+    }
+    if (kr == KERN_SUCCESS)
+       dwv.va_size = vg_get_param(DWV_MSM_PARAM_VA_SIZE, &kr);
++   /* Asking for the fault count is what has drm2kgsl count this context's GPU resets in the shmem's global_faults (GetStatus);
++    * a host without that answers 0 and counts only refused submissions (async_error). */
++   if (kr == KERN_SUCCESS) {
++      kern_return_t faults_kr;
++      (void)vg_get_param(DWV_MSM_PARAM_FAULTS, &faults_kr);
++   }
+    /* One submit queue, at the lowest of the host's priorities (msm: 0 highest), its default: the host's ring priority + 1. Every
+     * submission rides it, so its fences are one increasing sequence, as the NativeAdreno ABI's are. A Vulkan queue asking for a
+     * higher priority moves it (dwv_set_priority). */
