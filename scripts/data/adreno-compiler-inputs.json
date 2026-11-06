@@ -73,7 +73,8 @@
     "patches/mesa/upstream-5b2db4b8-fdl-a8xx-buffer-descriptor-num-elements.patch",
     "patches/mesa/upstream-c88b6ebd-tu-a8xx-bindless-descriptor-invalidate.patch",
     "patches/mesa/turnip-darwin-check-ibs.patch",
-    "patches/mesa/turnip-darwin-virtgpu-resets.patch"
+    "patches/mesa/turnip-darwin-virtgpu-resets.patch",
+    "patches/mesa/turnip-submit-freed-bo-check.patch"
   ],
   "integer_fma_reference": {
     "repository": "https://github.com/ucb-bar/berkeley-softfloat-3",

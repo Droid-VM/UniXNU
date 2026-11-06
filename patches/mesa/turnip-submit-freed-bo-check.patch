@@ -1,0 +1,78 @@
+diff --git a/src/freedreno/vulkan/tu_queue.cc b/src/freedreno/vulkan/tu_queue.cc
+--- a/src/freedreno/vulkan/tu_queue.cc
++++ b/src/freedreno/vulkan/tu_queue.cc
+@@ -73,7 +73,36 @@
+    return priority;
+ }
+ 
++/* A stream whose BO is gone: tu_bo_finish zeroes the BO's slot, so its address reads 0, or another BO's if the slot was taken
++ * again, and the GPU runs whatever is there. A command buffer reset or recorded while it is submitted does this; say whose stream
++ * it is and the command buffer's state (PENDING is what a submission leaves it in; INITIAL or RECORDING means it was reset or is
++ * being recorded again under the submission). DroidVM: an Adreno 840 under GFXBench submitted a stream at address 0. */
++static unsigned tu_freed_stream_reports;
++
+ static void
++check_entries(struct tu_device *dev, const char *what, const struct tu_cmd_buffer *cmd, unsigned index, unsigned count,
++              const struct tu_cs_entry *entries, unsigned num_entries)
++{
++   for (unsigned j = 0; j < num_entries; j++) {
++      const struct tu_bo *bo = entries[j].bo;
++      if (likely(bo && bo->gem_handle && bo->iova))
++         continue;
++      if (tu_freed_stream_reports++ >= 20)
++         return;
++      if (cmd) {
++         mesa_loge("submit: %s %u of %u (%p) stream %u of %u (offset 0x%x, 0x%x bytes) has a freed BO (%p: handle %u iova 0x%" PRIx64
++                   "); command buffer state %d, record result %d, usage 0x%x, %s pool", what, index, count,
++                   (const void *)cmd, j, num_entries, entries[j].offset, entries[j].size, (const void *)bo, bo ? bo->gem_handle : 0,
++                   bo ? bo->iova : 0, (int)cmd->vk.state, (int)cmd->vk.record_result, cmd->usage_flags,
++                   cmd->vk.pool && vk_command_pool_to_handle(cmd->vk.pool) == dev->dynamic_rendering_pool ? "the dynamic rendering" : "an app's");
++      } else {
++         mesa_loge("submit: %s stream %u of %u (offset 0x%x, 0x%x bytes) has a freed BO (%p: handle %u iova 0x%" PRIx64 ")", what, j,
++                   num_entries, entries[j].offset, entries[j].size, (const void *)bo, bo ? bo->gem_handle : 0, bo ? bo->iova : 0);
++      }
++   }
++}
++
++static void
+ submit_add_entries(struct tu_device *dev, void *submit,
+                    struct util_dynarray *dump_cmds,
+                    struct tu_cs_entry *entries, unsigned num_entries)
+@@ -285,6 +314,7 @@
+          tu_cs_emit(&sub_cs, 1);
+ 
+          struct tu_cs_entry entry = tu_cs_end_sub_stream(&cs, &sub_cs);
++         check_entries(queue->device, "visibility stream patchpoint", NULL, 0, 0, &entry, 1);
+          submit_add_entries(queue->device, submit, dump_cmds, &entry, 1);
+       }
+ 
+@@ -485,6 +515,8 @@
+          submit_add_entries(device, submit, &dump_cmds, perf_cs_entry, 1);
+       }
+ 
++      check_entries(device, i < vk_submit->command_buffer_count ? "command buffer" : "inserted command buffer", cmd_buffer, i,
++                    cmdbuf_count, cs->entries, cs->entry_count);
+       submit_add_entries(device, submit, &dump_cmds, cs->entries,
+                          cs->entry_count);
+ 
+@@ -498,6 +530,7 @@
+ 
+    autotune_cs = device->autotune->on_submit(cmd_buffers, cmdbuf_count);
+    if (autotune_cs) {
++      check_entries(device, "autotune", NULL, 0, 0, autotune_cs->entries, autotune_cs->entry_count);
+       submit_add_entries(device, submit, &dump_cmds, autotune_cs->entries,
+                          autotune_cs->entry_count);
+    }
+diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -118,7 +118,8 @@
+       } else if ((header & 0xf0000000) == CP_TYPE7_PKT) {
+          n = header & 0x3fff;
+       } else {
+-         return bad;   /* not a packet: nothing below is read as one */
++         report("no packet", i, iova + (uint64_t)i * 4, header);   /* the header word stands for the size */
++         return bad;   /* nothing below is read as one */
+       }
+       if (i + 1 + n > count)
+          return bad;
