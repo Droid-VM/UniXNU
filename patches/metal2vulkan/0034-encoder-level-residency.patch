@@ -1,0 +1,2030 @@
+diff --git a/crates/metal2vulkan-runtime/src/binding.rs b/crates/metal2vulkan-runtime/src/binding.rs
+index 05cf57d6f..3bd190d7c 100644
+--- a/crates/metal2vulkan-runtime/src/binding.rs
++++ b/crates/metal2vulkan-runtime/src/binding.rs
+@@ -72,8 +72,8 @@ use ash::vk;
+ use metal2vulkan::bind::{
+     AccessClass, BindingPlan, DescriptorBytes, DescriptorRange, DescriptorWrite,
+     FunctionTableWords, HeapElements, HeapSource, ImageSource, ImageViewDesc, IndexBufferRef,
+-    NeutralResource, PushConstantWrite, PushHole, ResourceUse, RootTable, SamplerDescriptor,
+-    SamplerSource, UseTarget, ViewSetup, WriteSource,
++    NeutralResource, PushConstantWrite, PushHole, ResidentReach, ResourceUse, RootTable,
++    SamplerDescriptor, SamplerSource, UseTarget, ViewSetup, WriteSource,
+ };
+ use metal2vulkan::metal::sampler::{OpaqueBlackBorder, SamplerUse};
+ use metal2vulkan::pipeline::{HandleClass, SlotClass, SlotRef, Stage, StorageAttachmentView};
+@@ -87,6 +87,10 @@ pub(super) struct Tables<'a> {
+     stages: &'a [(Stage, &'a ArgumentTable)],
+     /// The resources the encoder made resident, which the bind state lists as used.
+     residency: Option<&'a Residency>,
++    /// The bind state lists none of what the encoder made resident (a render encoder's): the
++    /// plan lists no use of it, and the uses of what `residency` holds are made from the plan's
++    /// `BindingPlan::resident` reach instead, first among the command's ([`uses_into`]).
++    resident_apart: bool,
+     /// A render encoder's pass, whose attachments a draw's input and storage attachments read,
+     /// and the draw's views of its layers (`render_target::viewed`).
+     pass: Option<(&'a PassLayout, ViewSetup)>,
+@@ -162,6 +166,7 @@ impl<'a> Tables<'a> {
+         Tables {
+             stages,
+             residency: None,
++            resident_apart: false,
+             pass: None,
+             attached: None,
+             argument_samplers: &[],
+@@ -345,6 +350,15 @@ impl<'a> Tables<'a> {
+         }
+     }
+ 
++    /// The tables, the bind state listing none of what the encoder made resident where `apart`
++    /// (`resident_apart`).
++    pub(super) fn with_resident_apart(self, apart: bool) -> Tables<'a> {
++        Tables {
++            resident_apart: apart,
++            ..self
++        }
++    }
++
+     /// The tables, with the device's texture table at the layout's texture handle tables.
+     pub(super) fn with_texture_table(self, table: Option<&'a TextureTable>) -> Tables<'a> {
+         Tables {
+@@ -2350,9 +2364,56 @@ fn uses_into(
+     if u32::try_from(resources).is_err() {
+         return Err(internal("a command of 2^32 uses"));
+     }
++    into.made = 0;
++    let (keeps, extended) = match tables.resident_apart {
++        true => apart_uses_into(plan, kept.is_some(), tables, into)?,
++        false => (plan_uses_into(plan, kept, tables, into)?, None),
++    };
++    let CommandUses {
++        uses,
++        others,
++        reaching,
++        named_now,
++        ..
++    } = into;
++    uses.reserve(others.len() + command.uses.len());
++    // Every use but those names its resource (a descriptor, a root table's static, a view):
++    // the keys of `reaching` named are gathered.
++    named_now.clear();
++    let plan_others = others.iter().map(|&at| &plan.uses[at as usize]);
++    for resource in plan_others.chain(command.uses) {
++        let Some(used) = other_use(call, resource, (index, indirect), tables)? else {
++            continue;
++        };
++        if !reaching.is_empty() && reaching.contains(&used.key) {
++            named_now.push(used.key);
++        }
++        uses.push(used);
++    }
++    named_now.sort_unstable();
++    named_now.dedup();
++    let extends = extended.is_some();
++    into.settled = match extended {
++        Some((added, unnamed)) => into.settle_extended(&added, &unnamed),
++        None => into.settle_resident(!keeps),
++    };
++    Ok(keeps || extends)
++}
++
++/// [`uses_into`]'s uses of what the encoder made resident where the plan lists them (a bind state
++/// that lists them): kept where `into`'s are those the plan lists under the residency's
++/// generation (the plan `kept`, or one that lists the same), else made again. Whether it kept
++/// them.
++fn plan_uses_into(
++    plan: &BindingPlan,
++    kept: Option<&Arc<BindingPlan>>,
++    tables: &Tables<'_>,
++    into: &mut CommandUses,
++) -> Result<bool, Error> {
+     let generation = tables.residency.map(Residency::generation);
+     let holds = |of: &mut ResidentOf| kept.is_some_and(|plan| of.holds(plan, generation));
+-    into.made = 0;
++    into.apart_of = None;
++    into.extends = None;
+     let keeps = into.of.as_mut().is_some_and(holds);
+     match keeps {
+         true => {
+@@ -2376,31 +2437,167 @@ fn uses_into(
+             }
+         }
+     }
+-    let CommandUses {
+-        uses,
+-        others,
+-        reaching,
+-        named_now,
+-        ..
+-    } = into;
+-    uses.reserve(others.len() + command.uses.len());
+-    // Every use but those names its resource (a descriptor, a root table's static, a view):
+-    // the keys of `reaching` named are gathered.
+-    named_now.clear();
+-    let plan_others = others.iter().map(|&at| &plan.uses[at as usize]);
+-    for resource in plan_others.chain(command.uses) {
+-        let Some(used) = other_use(call, resource, (index, indirect), tables)? else {
+-            continue;
+-        };
+-        if !reaching.is_empty() && reaching.contains(&used.key) {
+-            named_now.push(used.key);
++    Ok(keeps)
++}
++
++/// What the uses of what an encoder made resident at the start of a [`CommandUses`] were made of
++/// where the bind state lists none of it (`Tables::resident_apart`): the plan's reach, and the
++/// residency's lineage, generation, and count of tokens then.
++#[derive(Clone, Copy, PartialEq, Eq)]
++struct ApartOf {
++    reach: ResidentReach,
++    lineage: u64,
++    generation: u64,
++    through: usize,
++}
++
++/// [`uses_into`]'s uses of what the encoder made resident where the bind state lists none of it
++/// (`Tables::resident_apart`): each of the residency's tokens' uses as the plan's reach makes
++/// them (`ResidentReach::uses_of`), in token order, as a plan that listed them would list them.
++/// Kept (`keeping`: from one command to the next) where `into`'s are of the same reach and the
++/// same residency at the same generation; extended by the tokens it added since where it only
++/// added tokens since (`Residency::rewritten`), under an identity that extends the last one's
++/// (`ResidentPrefix::extends`); else made again. Whether it kept them, and where it extended
++/// them, the keys reached by address it added and those a texture's use took out of them.
++#[allow(clippy::type_complexity)]
++fn apart_uses_into(
++    plan: &BindingPlan,
++    keeping: bool,
++    tables: &Tables<'_>,
++    into: &mut CommandUses,
++) -> Result<(bool, Option<(Vec<ResourceKey>, Vec<ResourceKey>)>), Error> {
++    into.of = None;
++    into.others.clear();
++    for (at, resource) in plan.uses.iter().enumerate() {
++        if let UseTarget::Used(_) = resource.resource {
++            return Err(internal(
++                "a plan lists a used resource its bind state does not",
++            ));
++        }
++        into.others.push(at as u32);
++    }
++    let reach = plan.resident;
++    let Some(residency) = tables.residency else {
++        into.uses.clear();
++        into.reaching.clear();
++        into.resident_named.clear();
++        into.used = 0;
++        into.prefix_stages = vk::PipelineStageFlags2::empty();
++        into.prefix_writes = vk::PipelineStageFlags2::empty();
++        into.apart_of = None;
++        into.extends = None;
++        return Ok((false, None));
++    };
++    let now = ApartOf {
++        reach,
++        lineage: residency.lineage(),
++        generation: residency.generation(),
++        through: residency.count(),
++    };
++    let from = match into.apart_of {
++        Some(of) if keeping && of.reach == reach && of.lineage == now.lineage => {
++            let added_only = residency.rewritten() <= of.generation && of.through <= now.through;
++            (of.generation == now.generation || added_only).then_some(of.through)
++        }
++        _ => None,
++    };
++    into.apart_of = keeping.then_some(now);
++    match from {
++        Some(through) if through == now.through => {
++            into.uses.truncate(into.used);
++            Ok((true, None))
++        }
++        Some(through) => {
++            into.uses.truncate(into.used);
++            let old = (into.prefix, into.used);
++            let mut added = Vec::new();
++            let mut unnamed = Vec::new();
++            let stages = push_apart(
++                reach,
++                residency,
++                through..now.through,
++                tables,
++                into,
++                (&mut added, &mut unnamed),
++            )?;
++            into.prefix_stages |= stages.0;
++            into.prefix_writes |= stages.1;
++            into.made += into.uses.len() - old.1;
++            into.used = into.uses.len();
++            into.extends = (old.0 != 0 && old.1 > 0 && into.used > old.1).then_some(old);
++            if into.used > old.1 {
++                into.prefix = identity();
++            }
++            Ok((false, Some((added, unnamed))))
++        }
++        None => {
++            into.uses.clear();
++            into.reaching.clear();
++            into.resident_named.clear();
++            let (mut added, mut unnamed) = (Vec::new(), Vec::new());
++            let stages = push_apart(
++                reach,
++                residency,
++                0..now.through,
++                tables,
++                into,
++                (&mut added, &mut unnamed),
++            )?;
++            into.prefix_stages = stages.0;
++            into.prefix_writes = stages.1;
++            into.used = into.uses.len();
++            into.made += into.used;
++            into.extends = None;
++            if into.used > 0 {
++                into.prefix = match keeping {
++                    true => identity(),
++                    false => 0,
++                };
++            }
++            Ok((false, None))
+         }
+-        uses.push(used);
+     }
+-    named_now.sort_unstable();
+-    named_now.dedup();
+-    into.settled = into.settle_resident(!keeps);
+-    Ok(keeps)
++}
++
++/// Push into `into`'s uses those `reach` makes of `residency`'s `tokens`, as `resident_uses_into`
++/// makes a plan's: each buffer's (a heap's own, an indirect command buffer's records) reached by
++/// address, its key into `reaching` (and `added`) where no texture's use names it, and each
++/// texture's, its key named (and out of `reaching`, into `unnamed`). Their stages.
++fn push_apart(
++    reach: ResidentReach,
++    residency: &Residency,
++    tokens: std::ops::Range<usize>,
++    tables: &Tables<'_>,
++    into: &mut CommandUses,
++    (added, unnamed): (&mut Vec<ResourceKey>, &mut Vec<ResourceKey>),
++) -> Result<(vk::PipelineStageFlags2, vk::PipelineStageFlags2), Error> {
++    let mut all = vk::PipelineStageFlags2::empty();
++    let mut writes = vk::PipelineStageFlags2::empty();
++    for token in tokens {
++        let used = residency.used_resource(token as u32);
++        for resource in reach.uses_of_resource(&used) {
++            let Some(made) = resident_use(&resource, tables)? else {
++                continue;
++            };
++            all |= made.0.read.stages | made.0.write.stages;
++            writes |= made.0.write.stages;
++            let key = made.0.key;
++            match made.1 {
++                true => {
++                    if into.resident_named.insert(key) && into.reaching.remove(&key) {
++                        unnamed.push(key);
++                    }
++                }
++                false => {
++                    if !into.resident_named.contains(&key) && into.reaching.insert(key) {
++                        added.push(key);
++                    }
++                }
++            }
++            into.uses.push(made.0);
++        }
++    }
++    Ok((all, writes))
+ }
+ 
+ /// Make the uses of what the encoder made resident `plan` lists, as `tables` hold it, first in
+@@ -2427,44 +2624,17 @@ fn resident_uses_into(
+     *used = 0;
+     let mut named = BTreeSet::new();
+     for (at, resource) in plan.uses.iter().enumerate() {
+-        let UseTarget::Used(token) = resource.resource else {
++        if !matches!(resource.resource, UseTarget::Used(_)) {
+             others.push(at as u32);
+             continue;
+-        };
+-        if !resource.access.read && !resource.access.write {
+-            continue;
+-        }
+-        let stages: vk::PipelineStageFlags2 = resource.stages.into();
+-        if stages.is_empty() {
+-            return Err(internal("a command's resource use in no stage"));
+         }
+-        let access = |flags: vk::AccessFlags2, used: bool| match used {
+-            true => Access::new(stages, flags),
+-            false => Access::NONE,
++        let Some((used, texture)) = resident_use(resource, tables)? else {
++            continue;
+         };
+-        let buffer = match tables.used(token) {
+-            Some(Used::Buffer(buffer)) => buffer,
+-            Some(Used::Heap { bytes, .. }) => bytes,
+-            Some(Used::IndirectCommandBuffer(icb)) => icb.storage(),
+-            Some(Used::Texture(texture)) => {
+-                let (read, write) = image_access(resource.class)?;
+-                let used = texture.bound_use(
+-                    access(read, resource.access.read),
+-                    access(write, resource.access.write),
+-                );
+-                named.insert(used.key);
+-                uses.push(used);
+-                continue;
+-            }
+-            None => return Err(internal("a use of a resource the encoder did not use")),
++        match texture {
++            true => named.insert(used.key),
++            false => reaching.insert(used.key),
+         };
+-        let (read, write) = buffer_access(resource.class)?;
+-        let accesses = (
+-            access(read, resource.access.read),
+-            access(write, resource.access.write),
+-        );
+-        let used = bytes_use(resource, buffer, 0, accesses);
+-        reaching.insert(used.key);
+         uses.push(used);
+     }
+     reaching.retain(|key| !named.contains(key));
+@@ -2473,9 +2643,58 @@ fn resident_uses_into(
+     *prefix_stages = (uses.iter()).fold(vk::PipelineStageFlags2::empty(), |all, used| {
+         all | used.read.stages | used.write.stages
+     });
++    into.prefix_writes = (into.uses.iter()).fold(vk::PipelineStageFlags2::empty(), |all, used| {
++        all | used.write.stages
++    });
+     Ok(())
+ }
+ 
++/// The use `resource`, a plan's use of a resource the encoder made resident (`UseTarget::Used`),
++/// makes as `tables` hold it, and whether it is a texture's (named by its key) rather than a
++/// buffer's reached by address (a heap's own buffer, an indirect command buffer's records):
++/// `None` where it neither reads nor writes.
++fn resident_use(
++    resource: &ResourceUse,
++    tables: &Tables<'_>,
++) -> Result<Option<(Use<ResourceKey>, bool)>, Error> {
++    let UseTarget::Used(token) = resource.resource else {
++        return Err(internal(
++            "a use of a resource made resident that names none",
++        ));
++    };
++    if !resource.access.read && !resource.access.write {
++        return Ok(None);
++    }
++    let stages: vk::PipelineStageFlags2 = resource.stages.into();
++    if stages.is_empty() {
++        return Err(internal("a command's resource use in no stage"));
++    }
++    let access = |flags: vk::AccessFlags2, used: bool| match used {
++        true => Access::new(stages, flags),
++        false => Access::NONE,
++    };
++    let buffer = match tables.used(token) {
++        Some(Used::Buffer(buffer)) => buffer,
++        Some(Used::Heap { bytes, .. }) => bytes,
++        Some(Used::IndirectCommandBuffer(icb)) => icb.storage(),
++        Some(Used::Texture(texture)) => {
++            let (read, write) = image_access(resource.class)?;
++            let used = texture.bound_use(
++                access(read, resource.access.read),
++                access(write, resource.access.write),
++            );
++            return Ok(Some((used, true)));
++        }
++        None => return Err(internal("a use of a resource the encoder did not use")),
++    };
++    let (read, write) = buffer_access(resource.class)?;
++    let accesses = (
++        access(read, resource.access.read),
++        access(write, resource.access.write),
++    );
++    Ok(Some((bytes_use(resource, buffer, 0, accesses), false)))
++}
++
+ /// The use `resource`, a use of the plan's or the command's other than of a resource made
+ /// resident, makes as `tables` bind it, a draw's index buffer `index` and argument buffer
+ /// `indirect` (each with its offset): `None` for an unbound slot (a neutral, fresh for the
+@@ -2638,6 +2857,16 @@ pub(super) struct CommandUses {
+     resident_at: u64,
+     /// The pipeline stages of the uses of what the encoder made resident.
+     prefix_stages: vk::PipelineStageFlags2,
++    /// The pipeline stages of their writes.
++    prefix_writes: vk::PipelineStageFlags2,
++    /// What the uses of what the encoder made resident were made of where the bind state lists
++    /// none of it ([`apart_uses_into`]), kept from one command to the next.
++    apart_of: Option<ApartOf>,
++    /// The keys of the textures among those uses ([`apart_uses_into`], which extends them).
++    resident_named: BTreeSet<ResourceKey>,
++    /// The identity and count of the uses the ones of identity `prefix` begin with, where they
++    /// extended those ([`ResidentPrefix::extends`]).
++    extends: Option<(u64, usize)>,
+ }
+ 
+ /// The identities given to [`CommandUses`]' uses of what an encoder made resident, from 1: one of
+@@ -2652,10 +2881,120 @@ fn identity() -> u64 {
+ /// The uses of what an encoder made resident that come first among a draw's
+ /// ([`CommandUses::prefix`]), by identity: two draws' uses of the same identity begin with the same
+ /// `len` uses. What takes a draw's uses may take those of the last one's identity once.
+-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++#[derive(Clone, Copy, PartialEq, Eq)]
+ pub(super) struct ResidentPrefix {
+     pub(super) id: u64,
+     pub(super) len: usize,
++    /// The identity and count of uses these begin with, where they are those uses and more
++    /// (made by extending them as the encoder made more resident, `Tables::resident_apart`):
++    /// what took those may take the uses past them alone.
++    pub(super) extends: Option<(u64, usize)>,
++    /// The pipeline stages these uses read or write in, and those they write in: a consumer of
++    /// some stages' accesses alone takes none of them where they have none there.
++    pub(super) stages: vk::PipelineStageFlags2,
++    pub(super) writes: vk::PipelineStageFlags2,
++}
++
++/// The most lines of identities a consumer of the uses of what an encoder made resident keeps
++/// ([`TakenLines`]).
++pub(super) const LINES: usize = 4;
++
++/// The uses of what an encoder made resident a consumer took, by line: draws of several pipeline
++/// states take turns, and each state's reach makes a line of identities, each extending the last
++/// (`ResidentPrefix::extends`). The latest of each of at most [`LINES`] lines, with what taking
++/// them rests on (`T`): a draw takes those past what one of them took that still stands.
++#[derive(Clone, Copy, PartialEq)]
++pub(super) struct TakenLines<T: Copy> {
++    lines: [Option<((u64, usize), T)>; LINES],
++    next: usize,
++}
++
++impl<T: Copy> std::fmt::Debug for TakenLines<T> {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        let taken: Vec<(u64, usize)> = self
++            .lines
++            .iter()
++            .flatten()
++            .map(|(taken, _)| *taken)
++            .collect();
++        f.debug_tuple("TakenLines").field(&taken).finish()
++    }
++}
++
++impl<T: Copy> Default for TakenLines<T> {
++    fn default() -> TakenLines<T> {
++        TakenLines {
++            lines: [None; LINES],
++            next: 0,
++        }
++    }
++}
++
++impl<T: Copy> TakenLines<T> {
++    /// How many of `prefix`'s uses one of the lines whose rest `stands` took already, and that
++    /// line's rest: the most ([`ResidentPrefix::past`]); none, without one.
++    pub(super) fn past(
++        &self,
++        prefix: ResidentPrefix,
++        stands: impl Fn(&T) -> bool,
++    ) -> (usize, Option<T>) {
++        let mut best = (0, None);
++        for &(taken, rest) in self.lines.iter().flatten() {
++            if !stands(&rest) {
++                continue;
++            }
++            let past = prefix.past(Some(taken));
++            if past > best.0 {
++                best = (past, Some(rest));
++            }
++        }
++        best
++    }
++
++    /// Note `prefix`'s uses taken, resting on `rest`: in place of its line's last (the same, or
++    /// those it extends), else of the line taken longest ago.
++    pub(super) fn took(&mut self, prefix: ResidentPrefix, rest: T) {
++        let now = (prefix.id, prefix.len);
++        let at = (self.lines.iter()).position(|line| {
++            line.is_some_and(|(taken, _)| taken == now || prefix.extends == Some(taken))
++        });
++        let at = at.unwrap_or_else(|| {
++            let at = self.next;
++            self.next = (self.next + 1) % LINES;
++            at
++        });
++        self.lines[at] = Some((now, rest));
++    }
++
++    /// Forget every line.
++    pub(super) fn forget(&mut self) {
++        *self = TakenLines::default();
++    }
++}
++
++impl std::fmt::Debug for ResidentPrefix {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("ResidentPrefix")
++            .field("id", &self.id)
++            .field("len", &self.len)
++            .field("extends", &self.extends)
++            .field("stages", &self.stages.as_raw())
++            .field("writes", &self.writes.as_raw())
++            .finish()
++    }
++}
++
++impl ResidentPrefix {
++    /// How many of these uses a consumer that took those of identity and count `last` took
++    /// already: all where they are those, those they extend where they extend those
++    /// ([`extends`](Self::extends)), else none.
++    pub(super) fn past(&self, last: Option<(u64, usize)>) -> usize {
++        match last {
++            Some(last) if last == (self.id, self.len) => self.len,
++            Some(last) if self.extends == Some(last) => last.1,
++            _ => 0,
++        }
++    }
+ }
+ 
+ /// A draw's [`ResidentPrefix`], with the identity of the keys it reaches through the resident set
+@@ -2683,6 +3022,9 @@ impl CommandUses {
+         let prefix = ResidentPrefix {
+             id: self.prefix,
+             len: self.used,
++            extends: self.extends,
++            stages: self.prefix_stages,
++            writes: self.prefix_writes,
+         };
+         (prefix.len > 0 && prefix.id != 0).then_some(prefix)
+     }
+@@ -2707,7 +3049,7 @@ impl CommandUses {
+     /// identity found ([`prefix`](Self::prefix)), else 0.
+     pub(super) fn apart(&self, version: u64) -> usize {
+         match (self.prefix(), self.apart) {
+-            (Some(prefix), Some(apart)) if apart == (prefix.id, prefix.len, version) => prefix.len,
++            (Some(prefix), Some((id, len, at))) if at == version => prefix.past(Some((id, len))),
+             _ => 0,
+         }
+     }
+@@ -2771,6 +3113,29 @@ impl CommandUses {
+         moved + self.named_now.len()
+     }
+ 
++    /// [`settle_resident`](Self::settle_resident) where the uses of what the encoder made
++    /// resident were extended ([`apart_uses_into`]): `reaching` took the keys `added` and gave
++    /// up those of `unnamed` (named by a texture's use added): those move in `resident` alone,
++    /// with what the last call's other uses named and a use added since took back in it, and
++    /// this call's named out.
++    fn settle_extended(&mut self, added: &[ResourceKey], unnamed: &[ResourceKey]) -> usize {
++        let back = self.named.len() + self.taken.len();
++        self.resident.extend(self.named.iter().copied());
++        self.resident.extend(self.taken.drain(..));
++        self.resident.extend(added.iter().copied());
++        for key in unnamed.iter().chain(&self.named_now) {
++            self.resident.remove(key);
++        }
++        self.named.clone_from(&self.named_now);
++        if self.used > 0 {
++            self.resident_at = match self.prefix {
++                0 => 0,
++                _ => identity(),
++            };
++        }
++        back + added.len() + unnamed.len() + self.named_now.len()
++    }
++
+     /// Add each of `uses`, which name their keys.
+     pub(super) fn extend(&mut self, uses: impl IntoIterator<Item = Use<ResourceKey>>) {
+         for used in uses {
+diff --git a/crates/metal2vulkan-runtime/src/degradation.rs b/crates/metal2vulkan-runtime/src/degradation.rs
+index 15edafeae..1943e6fe1 100644
+--- a/crates/metal2vulkan-runtime/src/degradation.rs
++++ b/crates/metal2vulkan-runtime/src/degradation.rs
+@@ -2847,7 +2847,7 @@ impl Device {
+         &self,
+         call: &'static str,
+         (layout, version): (&PassLayout, Option<u64>),
+-        (uses, _prefix): (&mut CommandUses, ResidentPrefix),
++        (uses, prefix): (&mut CommandUses, ResidentPrefix),
+     ) -> Result<(), Error> {
+         let kind = Degradation::AttachmentReadInPlace;
+         if !self.shared().announced.pending(kind) {
+@@ -2861,7 +2861,8 @@ impl Device {
+             render_target::shares_attachment(layout, uses)?,
+             "a draw's uses checked against the attachments by their identity less than its uses"
+         );
+-        if past == 0 {
++        // Where it walked them (or those past the uses they extend).
++        if past < prefix.len {
+             if let Some(version) = version.filter(|_| !shares) {
+                 uses.apart_from(version);
+             }
+diff --git a/crates/metal2vulkan-runtime/src/fence.rs b/crates/metal2vulkan-runtime/src/fence.rs
+index b041a8a06..c7a81504b 100644
+--- a/crates/metal2vulkan-runtime/src/fence.rs
++++ b/crates/metal2vulkan-runtime/src/fence.rs
+@@ -342,15 +342,18 @@ impl RenderLowering {
+         if scope.is_empty() || after_stages.is_empty() || before_stages.is_empty() {
+             return;
+         }
++        let framebuffer = after_stages.contains(RenderStages::FRAGMENT)
++            && before_stages.intersects(UP_TO_FRAGMENT);
+         if scope == BarrierScope::RENDER_TARGETS {
+-            if after_stages.contains(RenderStages::FRAGMENT)
+-                && before_stages.intersects(UP_TO_FRAGMENT)
+-            {
++            if framebuffer {
+                 self.barrier_between_draws();
+             }
+             return;
+         }
+-        self.barrier_before_next_draw();
++        // Where it orders no write of memory, it orders the attachments' as one over the render
++        // targets would, where it is over textures too: a later draw may sample a color's texture.
++        let attachments = scope.intersects(BarrierScope::TEXTURES | BarrierScope::RENDER_TARGETS);
++        self.barrier_over_memory(framebuffer && attachments);
+     }
+ 
+     /// The lowering of [`RenderCommandEncoder::memory_barrier_with_resources`].
+@@ -368,7 +371,10 @@ impl RenderLowering {
+             self.core().check_device(CALL, resource.device())?;
+         }
+         if !resources.is_empty() && !after_stages.is_empty() && !before_stages.is_empty() {
+-            self.barrier_before_next_draw();
++            let framebuffer = after_stages.contains(RenderStages::FRAGMENT)
++                && before_stages.intersects(UP_TO_FRAGMENT);
++            let textures = (resources.iter()).any(|r| matches!(r, ResourceRef::Texture(_)));
++            self.barrier_over_memory(framebuffer && textures);
+         }
+         Ok(())
+     }
+diff --git a/crates/metal2vulkan-runtime/src/live_bind.rs b/crates/metal2vulkan-runtime/src/live_bind.rs
+index da00ab3a5..b78ed99d9 100644
+--- a/crates/metal2vulkan-runtime/src/live_bind.rs
++++ b/crates/metal2vulkan-runtime/src/live_bind.rs
+@@ -283,6 +283,10 @@ struct SetAside {
+     recent: RecentShapes,
+     listed_at: Option<u64>,
+     read_from: ReadFrom,
++    /// Its draws' uses ([`LiveBind::uses`]): the uses of what the encoder made resident they
++    /// begin with are of its pipeline state's reach (`binding::Tables::resident_apart`), kept and
++    /// extended from one of its draws to the next, whatever states draw between them.
++    uses: CommandUses,
+     /// [`LiveBind::asides`] as it went aside.
+     at: u64,
+ }
+@@ -412,6 +416,7 @@ impl LiveBind {
+         std::mem::swap(&mut self.recent, &mut aside.recent);
+         std::mem::swap(&mut self.listed_at, &mut aside.listed_at);
+         std::mem::swap(&mut self.read_from, &mut aside.read_from);
++        std::mem::swap(&mut self.uses, &mut aside.uses);
+         aside.at = self.asides;
+     }
+ 
+diff --git a/crates/metal2vulkan-runtime/src/noted_apart.rs b/crates/metal2vulkan-runtime/src/noted_apart.rs
+index f1abe0fb3..e2701ee5f 100644
+--- a/crates/metal2vulkan-runtime/src/noted_apart.rs
++++ b/crates/metal2vulkan-runtime/src/noted_apart.rs
+@@ -39,7 +39,7 @@
+ use ash::vk;
+ use std::collections::BTreeSet;
+ 
+-use super::binding::{ReachingPrefix, ResidentPrefix};
++use super::binding::{ReachingPrefix, ResidentPrefix, TakenLines};
+ use super::resource::ResourceKey;
+ use super::tracker::Use;
+ 
+@@ -72,10 +72,18 @@ pub(super) struct NotedApart {
+     /// (`EncoderCore::note_draw`), by identity, with its encoder's core and whether the device
+     /// had a buffer over host pages then: while those stand, a draw that begins with the same
+     /// touched them already.
+-    touched: Option<(u64, ResidentPrefix, bool)>,
++    touched: TakenLines<(u64, bool)>,
++    /// The uses of what the encoder made resident the draws noted lately began with, by line
++    /// (`binding::TakenLines`), each with the encoder's state it was noted into: while that
++    /// stands, a draw of a line whose uses it extends is fresh past them alone.
++    noted: TakenLines<NotedInto>,
+     /// Its whole uses and resident keys, which builds with debug assertions answer by too.
+     #[cfg(debug_assertions)]
+     whole: (Vec<Use<ResourceKey>>, Vec<ResourceKey>),
++    /// The uses of what the encoder made resident of each line `noted` keeps, as noted, which
++    /// builds with debug assertions check a draw's taken by their line against.
++    #[cfg(debug_assertions)]
++    lines_whole: Vec<((u64, usize), Vec<Use<ResourceKey>>)>,
+ }
+ 
+ /// The encoder's state a command is noted into: its core, its parts and held images (counts),
+@@ -105,8 +113,11 @@ impl std::fmt::Debug for NotedApart {
+             aliases,
+             fresh,
+             touched,
++            noted,
+             #[cfg(debug_assertions)]
+                 whole: _,
++            #[cfg(debug_assertions)]
++                lines_whole: _,
+         } = self;
+         (f.debug_struct("NotedApart"))
+             .field("core", core)
+@@ -123,6 +134,7 @@ impl std::fmt::Debug for NotedApart {
+             .field("aliases", aliases)
+             .field("fresh", fresh)
+             .field("touched", touched)
++            .field("noted", noted)
+             .finish()
+     }
+ }
+@@ -210,6 +222,17 @@ impl NotedApart {
+         self.core = Some(into.core);
+         self.stages = stages;
+         self.prefix = Some(prefix);
++        self.noted.took(prefix.prefix, into);
++        #[cfg(debug_assertions)]
++        {
++            let p = prefix.prefix;
++            let lines = &mut self.lines_whole;
++            lines.retain(|(taken, _)| *taken != (p.id, p.len) && p.extends != Some(*taken));
++            lines.push(((p.id, p.len), uses[..p.len].to_vec()));
++            if lines.len() > 2 * crate::binding::LINES {
++                lines.remove(0);
++            }
++        }
+         self.uses.clear();
+         self.uses.extend_from_slice(&uses[prefix.prefix.len..]);
+         self.resident.clear();
+@@ -248,12 +271,8 @@ impl NotedApart {
+         prefix: ResidentPrefix,
+         (core, rebinds): (u64, bool),
+     ) -> usize {
+-        let now = Some((core, prefix, rebinds));
+-        let touched = match self.touched == now {
+-            true => prefix.len,
+-            false => 0,
+-        };
+-        self.touched = now;
++        let (touched, _) = (self.touched).past(prefix, |&then| then == (core, rebinds));
++        self.touched.took(prefix, (core, rebinds));
+         touched
+     }
+ 
+@@ -289,11 +308,14 @@ impl NotedApart {
+         (uses, prefix): (&'s [Use<ResourceKey>], ResidentPrefix),
+         into: NotedInto,
+     ) -> &'s [Use<ResourceKey>] {
+-        let same = self.prefix.is_some_and(|then| then.prefix == prefix);
+-        if self.core != Some(into.core) || NotedApart::into(self) != into || !same {
++        // Past the uses the last command began with: the same, or those these extend
++        // (`ResidentPrefix::extends`), whose uses past them are fresh.
++        let (past, _) = self.noted.past(prefix, |&then| then == into);
++        if self.core != Some(into.core) || NotedApart::into(self) != into || past == 0 {
+             return uses;
+         }
+         self.fresh.clear();
++        self.fresh.extend_from_slice(&uses[past..prefix.len]);
+         let last = &self.uses;
+         let differ = |(at, used): &(usize, &Use<ResourceKey>)| last.get(*at) != Some(*used);
+         self.fresh.extend(
+@@ -303,15 +325,33 @@ impl NotedApart {
+         );
+         #[cfg(debug_assertions)]
+         {
++            // The uses of what the encoder made resident left out are those a line's last noted
++            // draw began with, there (noted into the same state); each of its own left out is one
++            // the last command had (noted then).
++            let line = (self.lines_whole.iter()).any(|((id, len), noted)| {
++                prefix.past(Some((*id, *len))) == past && noted.get(..past) == Some(&uses[..past])
++            });
++            assert!(
++                line,
++                "a draw noted apart found fresh by its uses' line other uses than its line's"
++            );
+             let whole = &self.whole.0;
+-            let differ = |(at, used): &(usize, &Use<ResourceKey>)| whole.get(*at) != Some(*used);
++            let by_key = |list: &'s [Use<ResourceKey>]| {
++                let mut map: std::collections::HashMap<ResourceKey, Vec<&'s Use<ResourceKey>>> =
++                    std::collections::HashMap::new();
++                for used in list {
++                    map.entry(used.key).or_default().push(used);
++                }
++                map
++            };
++            let (had, fresh) = (by_key(whole), by_key(&self.fresh));
++            let among = |map: &std::collections::HashMap<ResourceKey, Vec<&Use<ResourceKey>>>,
++                         used: &Use<ResourceKey>| {
++                map.get(&used.key).is_some_and(|list| list.contains(&used))
++            };
+             assert!(
+-                uses.iter()
+-                    .enumerate()
+-                    .filter(differ)
+-                    .map(|(_, used)| used)
+-                    .eq(&self.fresh),
+-                "a draw noted apart found fresh by its uses' identity other uses than by its uses"
++                (uses[prefix.len..].iter()).all(|used| among(&fresh, used) || among(&had, used)),
++                "a draw noted apart found fresh by its uses' identity fewer uses than by its uses"
+             );
+         }
+         &self.fresh
+diff --git a/crates/metal2vulkan-runtime/src/render.rs b/crates/metal2vulkan-runtime/src/render.rs
+index f0eb7a490..e6047ecd4 100644
+--- a/crates/metal2vulkan-runtime/src/render.rs
++++ b/crates/metal2vulkan-runtime/src/render.rs
+@@ -1479,6 +1479,15 @@ pub(crate) struct RenderLowering {
+     /// barrier after the tile stage, and the draw read the bytes from before the write in every
+     /// run measured, with a barrier before the dispatch too).
+     unordered_dispatches: UnorderedWrites<ResourceKey>,
++    /// Its logs of the uses of what it made resident its draws began with, which its instances
++    /// hold where they lie in (`render/shadows.rs`).
++    resident_logs: shadows::ResidentLogs,
++    /// A command since the last memory barrier over buffers or textures (or since the encoder
++    /// began) may have written memory past the pass's attachments: a draw whose functions store
++    /// to memory (or that runs object, mesh or tessellation stages, or counts visibility), a tile
++    /// dispatch, an execution of indirect commands. Where none may have, the next such barrier
++    /// orders nothing, and the pass does not split there (`fence.rs`).
++    wrote_since_barrier: bool,
+     /// A memory barrier over buffers or textures was encoded: an indexed indirect draw after it
+     /// reads bytes a draw wrote since it in place (`draw_source.rs`'s racing copy is taken only
+     /// before any barrier, where Metal's answer was measured fixed).
+@@ -1561,7 +1570,7 @@ pub(crate) struct RenderLowering {
+     last_retained: LastRetained,
+     /// The residency's generation as a command last noted the heaps of what it made resident
+     /// (`command_encoded`): no command notes them again before it changes.
+-    heaps_noted: Option<u64>,
++    heaps_noted: Option<(u64, u64, usize)>,
+     /// The textures made resident whose bytes a carrier holds, found again as the residency
+     /// changes (`command_encoded`).
+     unreadable: crate::pvrtc::ResidentUnreadable,
+@@ -2027,6 +2036,8 @@ impl RenderLowering {
+             unordered: UnorderedWrites::new(),
+             zero_indices: None,
+             unordered_dispatches: UnorderedWrites::new(),
++            resident_logs: shadows::ResidentLogs::default(),
++            wrote_since_barrier: false,
+             barriered: false,
+             barrier_inside: false,
+             reaches_unnamed: false,
+@@ -3990,6 +4001,7 @@ impl RenderLowering {
+         let RenderLowering {
+             mut core,
+             mut earlier,
++            resident_logs,
+             current,
+             mut layout,
+             passes,
+@@ -4917,7 +4929,10 @@ impl RenderLowering {
+             };
+             let planned = shadows::plan(
+                 &mut core,
+-                order.iter().map(|&(s, bound, _)| (s, bound)),
++                (
++                    order.iter().map(|&(s, bound, _)| (s, bound)),
++                    &resident_logs,
++                ),
+                 &layout,
+                 (reached, drawn_bounds.map(|area| (area, loaded_colors))),
+                 drawn_bounds.is_some().then_some(&drawn),
+@@ -5690,21 +5705,16 @@ impl RenderLowering {
+             &mut object.threadgroup_lengths,
+             &self.object_threadgroup_lengths,
+         );
+-        let kept = resident && self.residency.holds_slots_as(&state.used_resources);
+-        debug_assert!(
+-            !kept || state.used_resources == self.residency.used_resources(),
+-            "a draw's kept used resources that are not its residency's"
+-        );
+-        if !kept {
+-            let used = self.residency.used_resources();
+-            // The shapes it took lately listed the used resources it held (`live_bind.rs`).
+-            if state.used_resources != used {
+-                live.recent.forget();
+-            }
+-            reshape.field(&mut state.used_resources, used);
+-        }
+-        // Listed by token (`Residency::used_resources`); the commit points every root table at
+-        // the command buffer's resident set, which holds them (`State::root_table`).
++        // The state lists none of what the encoder made resident: a draw's uses of it are made
++        // of its plan's reach and the residency (`binding::Tables::resident_apart`), extended as
++        // the encoder makes more resident, so no shape, plan or heap part is of the residency.
++        let _ = resident;
++        if !state.used_resources.is_empty() {
++            live.recent.forget();
++            reshape.field(&mut state.used_resources, Vec::new());
++        }
++        // The commit points every root table at the command buffer's resident set, which holds
++        // what the encoder made resident (`State::root_table`).
+         state.used_in_token_order = true;
+         state.resident_apart = true;
+         live.read_from.made_resident(generation);
+@@ -6418,6 +6428,32 @@ impl RenderLowering {
+         self.barrier |= self.current.recorded;
+         self.unordered.clear();
+         self.barriered = true;
++        self.wrote_since_barrier = false;
++    }
++
++    /// Note that a command may write memory past the pass's attachments (`wrote_since_barrier`).
++    pub(super) fn may_write_memory(&mut self) {
++        self.wrote_since_barrier = true;
++    }
++
++    /// A memory barrier over buffers or textures (`fence.rs`): before the next draw where a
++    /// command since the last one may have written memory past the attachments. Where none may
++    /// have, it orders the attachments' writes alone (what came before the encoder is ordered as
++    /// the encoder is), as one over the render targets does where it is after the fragment stage
++    /// and before one at or before it (`framebuffer`), and the pass goes on in its instance.
++    pub(super) fn barrier_over_memory(&mut self, framebuffer: bool) {
++        if self.wrote_since_barrier {
++            self.barrier_before_next_draw();
++            return;
++        }
++        self.core.device().shared().counts.unneeded_barrier();
++        match framebuffer {
++            true => self.barrier_between_draws(),
++            false => {
++                self.barrier_inside = true;
++                self.barriered = true;
++            }
++        }
+     }
+ 
+     /// Order the fragment stages of the draws after a memory barrier over the render targets
+@@ -7184,6 +7220,16 @@ impl RenderLowering {
+         let tessellation = crate::tessellation::patches(&pipeline.base().graphics);
+         let tessellated = tessellation.is_some();
+         let meshes = pipeline.descriptor().vertex().is_none();
++        // What a memory barrier over buffers or textures after it would order (`fence.rs`).
++        let graphics = &pipeline.base().graphics;
++        if graphics.vertex_writes_memory
++            || graphics.fragment_writes_memory
++            || tessellated
++            || meshes
++            || self.counts_visibility()
++        {
++            self.wrote_since_barrier = true;
++        }
+         if let (
+             Some(t),
+             DrawCall::Patches { control_points, .. }
+@@ -7493,7 +7539,8 @@ impl RenderLowering {
+             heap_part::HeapInputs {
+                 plan: &plan,
+                 layout: &compiled.layout,
+-                generation: self.residency.generation(),
++                // Of no residency: the state lists none of it (`refresh_bind_state`).
++                generation: 0,
+                 listed_at: live.listed_at,
+                 state: &live.state,
+             },
+@@ -8124,6 +8171,7 @@ impl RenderLowering {
+         let mut tables = binding::Tables::new(&stages)
+             .with_pass(layout, views)
+             .with_residency(&self.residency)
++            .with_resident_apart(true)
+             .with_texture_table(texture_table.as_ref())
+             .with_sampler_table(sampler_table.as_ref())
+             .with_sampler_maps(sampler_maps);
+@@ -9284,9 +9332,15 @@ impl RenderLowering {
+         self.run_barrier = false;
+         match uses.prefix() {
+             None => self.gathering().add(&draw_shadows, uses),
+-            Some(prefix) => {
+-                self.gathering().add_draw(&draw_shadows, (uses, prefix));
+-            }
++            // By its place in the encoder's logs (`render/shadows.rs`).
++            Some(prefix) => match self.resident_logs.log((uses, prefix)) {
++                Some(logged) => {
++                    (self.gathering()).add_logged(&draw_shadows, (uses, prefix), logged)
++                }
++                None => {
++                    self.gathering().add_draw(&draw_shadows, (uses, prefix));
++                }
++            },
+         }
+         if !empty && !culled {
+             for source in index.into_iter().chain(indirect) {
+diff --git a/crates/metal2vulkan-runtime/src/render/arguments.rs b/crates/metal2vulkan-runtime/src/render/arguments.rs
+index 07d1f69dc..fab794aa5 100644
+--- a/crates/metal2vulkan-runtime/src/render/arguments.rs
++++ b/crates/metal2vulkan-runtime/src/render/arguments.rs
+@@ -135,11 +135,22 @@ impl RenderLowering {
+     pub(super) fn command_encoded(&mut self, reads: RenderStages) {
+         // The command, encoded, used the heaps of what the encoder made resident: noted once a
+         // change of it, as an earlier command noted those it held then.
+-        let generation = self.residency.generation();
+-        if self.heaps_noted != Some(generation) {
+-            self.core.touch_heaps(self.residency.heaps());
+-            self.heaps_noted = Some(generation);
++        // Of a later generation of the same residency, the heaps of the resources it made
++        // resident since alone: a resource's heap is its own for its life.
++        let residency = &self.residency;
++        let now = (
++            residency.lineage(),
++            residency.generation(),
++            residency.count(),
++        );
++        match self.heaps_noted {
++            Some(noted) if (noted.0, noted.1) == (now.0, now.1) => {}
++            Some((lineage, _, from)) if lineage == now.0 && from <= now.2 => {
++                self.core.touch_heaps(residency.heaps_from(from));
++            }
++            _ => self.core.touch_heaps(residency.heaps()),
+         }
++        self.heaps_noted = Some(now);
+         if reads.is_empty() {
+             return;
+         }
+diff --git a/crates/metal2vulkan-runtime/src/render/executions.rs b/crates/metal2vulkan-runtime/src/render/executions.rs
+index 0f06c82a9..6863e47bb 100644
+--- a/crates/metal2vulkan-runtime/src/render/executions.rs
++++ b/crates/metal2vulkan-runtime/src/render/executions.rs
+@@ -394,6 +394,8 @@ impl RenderLowering {
+     ) -> Result<(), Error> {
+         self.log(|_| RenderCall::Execute(icb.clone(), range.clone()));
+         self.core.check_device(CALL, icb.device())?;
++        // Its commands may write memory a barrier after it orders (`fence.rs`).
++        self.may_write_memory();
+         if !icb.is_render() {
+             if !icb.runs_nothing_in_a_pass() {
+                 return Err(Error::NotImplemented(RuntimeGap::IndirectRenderCommands));
+@@ -2407,6 +2409,8 @@ impl RenderExecution {
+             unordered: UnorderedWrites::new(),
+             zero_indices: None,
+             unordered_dispatches: UnorderedWrites::new(),
++            resident_logs: Default::default(),
++            wrote_since_barrier: false,
+             barriered: false,
+             barrier_inside: false,
+             reaches_unnamed: true,
+diff --git a/crates/metal2vulkan-runtime/src/render/inline_splits.rs b/crates/metal2vulkan-runtime/src/render/inline_splits.rs
+index cd18501fc..67caae584 100644
+--- a/crates/metal2vulkan-runtime/src/render/inline_splits.rs
++++ b/crates/metal2vulkan-runtime/src/render/inline_splits.rs
+@@ -446,7 +446,10 @@ impl RenderLowering {
+         }))?;
+         let planned = shadows::plan(
+             &mut self.core,
+-            std::iter::once((&instance.shadows, bound)),
++            (
++                std::iter::once((&instance.shadows, bound)),
++                &self.resident_logs,
++            ),
+             &self.layout,
+             (true, area.map(|area| (area, &loaded[..]))),
+             area.is_some().then_some(&self.drawn),
+diff --git a/crates/metal2vulkan-runtime/src/render/pass_start_reads.rs b/crates/metal2vulkan-runtime/src/render/pass_start_reads.rs
+index 33baae0fa..05571c413 100644
+--- a/crates/metal2vulkan-runtime/src/render/pass_start_reads.rs
++++ b/crates/metal2vulkan-runtime/src/render/pass_start_reads.rs
+@@ -47,7 +47,7 @@
+ //!   to announce and the bytes the fragment stages wrote and read are as they were then.
+ 
+ use crate::argument_table::ArgumentTable;
+-use crate::binding::ResidentPrefix;
++use crate::binding::{ResidentPrefix, TakenLines};
+ use crate::blit::{reads, writes, TRANSFER};
+ use crate::buffer::Buffer;
+ use crate::degradation::Degradation;
+@@ -213,12 +213,12 @@ pub(super) struct PassStartReads {
+     /// [`add_draw`](Self::add_draw) began with, where no list merged its ranges as it noted
+     /// them, and the lists' merges then: each of those uses' ranges is held as it was taken while
+     /// the lists merge no more, as only a merge drops one.
+-    added: Option<(u64, usize, u64)>,
++    added: TakenLines<u64>,
+     /// Those the last [`check`](Self::check) began with, where none of them had anything to
+     /// announce, with its `compute_after` and the changes then of the bytes the fragment stages
+     /// wrote, and read where one of those uses writes in a stage whose writes count: none has
+     /// while those stand.
+-    announced: Option<(u64, usize, bool, (u64, Option<u64>))>,
++    announced: TakenLines<(bool, (u64, Option<u64>))>,
+ }
+ 
+ /// The tables a draw's stages before its fragments read in place of the encoder's: each with the
+@@ -283,11 +283,9 @@ impl PassStartReads {
+         (uses, prefix): (&[Use<ResourceKey>], ResidentPrefix),
+     ) -> bool {
+         let merges = self.merges();
+-        let now = (prefix.id, prefix.len, merges);
+-        let past = match self.added == Some(now) {
+-            true => prefix.len,
+-            false => 0,
+-        };
++        // Past the same uses, or past those they extend (`ResidentPrefix::extends`), of a line
++        // taken while no list merged since.
++        let (past, _) = self.added.past(prefix, |at| *at == merges);
+         #[cfg(debug_assertions)]
+         for used in &uses[..past] {
+             assert!(
+@@ -298,8 +296,10 @@ impl PassStartReads {
+         self.add(&uses[past..]);
+         // Each use's range is held as it was taken where no list merged as it noted, while no
+         // list merges.
+-        let now = self.merges();
+-        self.added = (now == merges).then_some((prefix.id, prefix.len, now));
++        match self.merges() == merges {
++            true => self.added.took(prefix, merges),
++            false => self.added.forget(),
++        }
+         past == 0
+     }
+ 
+@@ -335,8 +335,8 @@ impl PassStartReads {
+             fragment_reads: self.fragment_reads.clone(),
+             other: self.other.clone(),
+             copies: Vec::new(),
+-            added: None,
+-            announced: None,
++            added: TakenLines::default(),
++            announced: TakenLines::default(),
+         }
+     }
+ 
+@@ -561,15 +561,14 @@ impl PassStartReads {
+         compute_after: bool,
+     ) -> (Found, bool) {
+         let changes = (self.fragment.changes.0, self.fragment_reads.changes.0);
+-        let held = |(id, len, after, (wrote, read)): (u64, usize, bool, (u64, Option<u64>))| {
+-            let same = (prefix.id, prefix.len) == (id, len);
++        let stand = |(after, (wrote, read)): (bool, (u64, Option<u64>))| {
+             let stand = wrote == changes.0 && read.is_none_or(|read| read == changes.1);
+-            same && after == compute_after && stand
+-        };
+-        let past = match self.announced.is_some_and(held) {
+-            true => prefix.len,
+-            false => 0,
++            after == compute_after && stand
+         };
++        // Past the same uses, or past those they extend (`ResidentPrefix::extends`), of a line
++        // whose uses met nothing while what they rest on stands; and whether those wrote.
++        let (past, rest) = self.announced.past(prefix, |&rest| stand(rest));
++        let wrote_before = rest.is_some_and(|(_, (_, read))| read.is_some());
+         let (in_place, ordered) = self.found(&uses[past..], compute_after);
+         #[cfg(debug_assertions)]
+         {
+@@ -586,20 +585,22 @@ impl PassStartReads {
+                 "a pass checked a draw's uses by their identity less than its uses"
+             );
+         }
+-        // Where it walked them, whether those uses met nothing, and what that answer rests on.
+-        if past == 0 {
+-            let len = prefix.len;
++        // Where it walked them (or those past the ones they extend), whether those uses met
++        // nothing, and what that answer rests on.
++        if past < prefix.len {
++            let len = prefix.len - past;
+             let met = [
+                 in_place.as_ref().map(|(at, _)| *at),
+                 ordered.as_ref().map(|(at, ..)| *at),
+             ];
+             let clean = met.iter().all(|at| at.is_none_or(|at| at >= len));
+-            let writes = uses[..len]
+-                .iter()
+-                .any(|used| !(used.write.stages & Self::writers(compute_after)).is_empty());
++            let writes = wrote_before
++                || (uses[past..prefix.len].iter())
++                    .any(|used| !(used.write.stages & Self::writers(compute_after)).is_empty());
+             let read = writes.then_some(changes.1);
+-            self.announced =
+-                clean.then_some((prefix.id, prefix.len, compute_after, (changes.0, read)));
++            if clean {
++                self.announced.took(prefix, (compute_after, (changes.0, read)));
++            }
+         }
+         ((in_place, ordered), past == 0)
+     }
+diff --git a/crates/metal2vulkan-runtime/src/render/shadows.rs b/crates/metal2vulkan-runtime/src/render/shadows.rs
+index b13afdcce..c9b495260 100644
+--- a/crates/metal2vulkan-runtime/src/render/shadows.rs
++++ b/crates/metal2vulkan-runtime/src/render/shadows.rs
+@@ -97,6 +97,11 @@ pub(super) struct InstanceShadows {
+     /// gathered stays until it is cleared, so a draw that begins with the same gathered those
+     /// already.
+     last_prefix: Option<(u64, usize)>,
++    /// The uses of what the encoder made resident its draws began with, by the encoder's log of
++    /// them ([`ResidentLogs`]) and how many of the log's first uses: gathered as the pass plans
++    /// its copies ([`with_resident`](Self::with_resident)), which a pass that uses no shadowed
++    /// texture never does, so an instance holds no list of the resident buffers.
++    resident: Vec<(usize, usize)>,
+     /// `bytes` of an instance the pass went past ([`close`](Self::close)), in its order: a range
+     /// per entry, packed, as an instance holds a list of each buffer its draws reach (every
+     /// resident one) until the encoder ends, and a pass that makes resources resident between its
+@@ -104,6 +109,60 @@ pub(super) struct InstanceShadows {
+     packed: Vec<((ResourceKey, bool), Range<u64>)>,
+ }
+ 
++/// The most logs a render encoder keeps of the uses of what it made resident ([`ResidentLogs`]):
++/// one a pipeline state's reach of it, each extended as the encoder makes more resident.
++const RESIDENT_LOGS: usize = 8;
++
++/// A render encoder's logs of the uses of what it made resident its draws began with, each the
++/// longest of one line of identities each extending the last (`binding::ResidentPrefix::extends`),
++/// so a draw's are its log's first: an instance holds where they lie in a log
++/// (`InstanceShadows::add_logged`), not a list of them, until the pass plans its copies.
++#[derive(Default)]
++pub(super) struct ResidentLogs {
++    logs: Vec<ResidentLog>,
++}
++
++/// One of [`ResidentLogs`]: its uses, and the identity and count of the last draw's that are its
++/// first.
++struct ResidentLog {
++    uses: Vec<Use<ResourceKey>>,
++    last: (u64, usize),
++}
++
++impl ResidentLogs {
++    /// Where a draw's uses of what the encoder made resident, the first `prefix.len` of `uses`,
++    /// lie in a log: the log whose last uses are theirs, or whose last uses they extend (the log
++    /// extended), else a log made of them. `None` where the encoder keeps as many logs as it
++    /// may: the draw's are gathered as they are.
++    pub(super) fn log(
++        &mut self,
++        (uses, prefix): (&[Use<ResourceKey>], ResidentPrefix),
++    ) -> Option<(usize, usize)> {
++        let at = (self.logs.iter())
++            .position(|log| prefix.past(Some(log.last)) == log.last.1 && log.last.1 > 0);
++        let at = match at {
++            Some(at) => at,
++            None if self.logs.len() < RESIDENT_LOGS => {
++                self.logs.push(ResidentLog {
++                    uses: Vec::new(),
++                    last: (0, 0),
++                });
++                self.logs.len() - 1
++            }
++            None => return None,
++        };
++        let log = &mut self.logs[at];
++        let past = match log.last.0 {
++            0 => 0,
++            _ => log.last.1,
++        };
++        log.uses.truncate(past);
++        log.uses.extend_from_slice(&uses[past..prefix.len]);
++        log.last = (prefix.id, prefix.len);
++        Some((at, prefix.len))
++    }
++}
++
+ /// `range` of the buffer `key` as a use, read or written (`write`), for `shadow.rs`, which reads
+ /// a use's buffer, its range, and whether it writes, and nothing else of it.
+ fn bytes_use(key: ResourceKey, write: bool, range: Range<u64>) -> Use<ResourceKey> {
+@@ -286,10 +345,7 @@ impl InstanceShadows {
+         (uses, prefix): (&[Use<ResourceKey>], ResidentPrefix),
+     ) -> bool {
+         let now = Some((prefix.id, prefix.len));
+-        let past = match self.last_prefix == now {
+-            true => prefix.len,
+-            false => 0,
+-        };
++        let past = prefix.past(self.last_prefix);
+         self.add(shadows, &uses[past..]);
+         self.last_prefix = now;
+         #[cfg(debug_assertions)]
+@@ -302,6 +358,41 @@ impl InstanceShadows {
+         past == 0
+     }
+ 
++    /// [`add_draw`](Self::add_draw), the uses of what the encoder made resident they begin with
++    /// held in the encoder's log `logged` (its index, and their count there, `ResidentLogs::log`):
++    /// noted by the log alone, gathered as the pass plans its copies.
++    pub(super) fn add_logged(
++        &mut self,
++        shadows: &[ShadowUse],
++        (uses, prefix): (&[Use<ResourceKey>], ResidentPrefix),
++        logged: (usize, usize),
++    ) {
++        self.add(shadows, &uses[prefix.len..]);
++        match self.resident.iter_mut().find(|(log, _)| *log == logged.0) {
++            Some((_, len)) => *len = (*len).max(logged.1),
++            None => self.resident.push(logged),
++        }
++    }
++
++    /// What it gathered of buffers' bytes and images with the uses of what the encoder made
++    /// resident its draws began with gathered from `logs` ([`add_logged`](Self::add_logged)),
++    /// as their uses ([`uses`](Self::uses)) stand in it where none are held there: `None`.
++    fn with_resident(&self, logs: &ResidentLogs) -> Option<InstanceShadows> {
++        if self.resident.is_empty() {
++            return None;
++        }
++        let mut gathered = InstanceShadows {
++            bytes: self.bytes.clone(),
++            images: self.images.clone(),
++            packed: self.packed.clone(),
++            ..InstanceShadows::default()
++        };
++        for &(log, len) in &self.resident {
++            gathered.add(&[], &logs.logs[log].uses[..len]);
++        }
++        Some(gathered)
++    }
++
+     /// Whether what it gathered holds `used`'s reads and writes (builds with debug assertions:
+     /// [`add_draw`](Self::add_draw)'s check).
+     #[cfg(debug_assertions)]
+@@ -397,7 +488,10 @@ pub(super) fn meets_truths(device: &Device, shadows: &[Arc<ShadowCopies>], used:
+ /// are counted against (`WorkCounts::shadow_attachment_tiles_covered`).
+ pub(super) fn plan<'a>(
+     core: &mut EncoderCore,
+-    instances: impl Iterator<Item = (&'a InstanceShadows, Option<[u32; 4]>)>,
++    (instances, logs): (
++        impl Iterator<Item = (&'a InstanceShadows, Option<[u32; 4]>)>,
++        &ResidentLogs,
++    ),
+     layout: &PassLayout,
+     (reached, drawn): (bool, Option<([u32; 4], &[bool])>),
+     area: Option<&DrawnArea>,
+@@ -425,6 +519,9 @@ pub(super) fn plan<'a>(
+     }
+     let mut copies = Vec::new();
+     for (index, (instance, bound)) in instances.enumerate() {
++        // What it gathered, with the uses of what the encoder made resident held in its logs.
++        let resident = instance.with_resident(logs);
++        let gathered = resident.as_ref().unwrap_or(instance);
+         let bound = bound.filter(|_| drawn.is_some());
+         let attachments = attachment_shadows(layout, reached, drawn, bound);
+         if index == 0 {
+@@ -437,12 +534,12 @@ pub(super) fn plan<'a>(
+         for shadow in attachments.iter().chain(&instance.shadows) {
+             shadow::join(&mut shadows, shadow);
+         }
+-        let uses: Vec<Use<ResourceKey>> = instance.uses().chain(attached.iter().cloned()).collect();
++        let uses: Vec<Use<ResourceKey>> = gathered.uses().chain(attached.iter().cloned()).collect();
+         copies.push(core.plan_shadows(&shadows, &uses)?);
+         match bound.filter(|_| !writes.is_empty()) {
+             Some(area) => {
+                 let uses: Vec<Use<ResourceKey>> =
+-                    instance.uses().chain(others.iter().cloned()).collect();
++                    gathered.uses().chain(others.iter().cloned()).collect();
+                 let within: Vec<Within> = (writes.iter())
+                     .map(|(uses, texels)| Within {
+                         uses: uses.clone(),
+@@ -808,7 +905,9 @@ mod tests {
+         gathered.add(&[], &[bytes(a, 32..48, false)]);
+         let before: Vec<_> = gathered.uses().collect();
+         gathered.close();
+-        assert!(gathered.bytes.is_empty() && gathered.packed.len() == 3 && gathered.last.is_empty());
++        assert!(
++            gathered.bytes.is_empty() && gathered.packed.len() == 3 && gathered.last.is_empty()
++        );
+         let after: Vec<_> = gathered.uses().collect();
+         assert_eq!(before, after);
+         gathered.add(&[], &[bytes(a, 16..32, false)]);
+diff --git a/crates/metal2vulkan-runtime/src/render/tile_dispatch.rs b/crates/metal2vulkan-runtime/src/render/tile_dispatch.rs
+index f21d7223f..aafec42a0 100644
+--- a/crates/metal2vulkan-runtime/src/render/tile_dispatch.rs
++++ b/crates/metal2vulkan-runtime/src/render/tile_dispatch.rs
+@@ -740,6 +740,8 @@ impl RenderLowering {
+         region: Option<Region>,
+     ) -> Result<(), Error> {
+         self.sync_heaps();
++        // A tile function may write memory a barrier after it orders (`fence.rs`).
++        self.may_write_memory();
+         let reads = match self.pipeline.as_ref().map(RenderPipelineState::kind) {
+             Some(RenderStateKind::Tile(state)) if state.kernel().reads_texture_handles() => {
+                 RenderStages::TILE
+diff --git a/crates/metal2vulkan-runtime/src/residency.rs b/crates/metal2vulkan-runtime/src/residency.rs
+index 07d1c8f49..075b6347a 100644
+--- a/crates/metal2vulkan-runtime/src/residency.rs
++++ b/crates/metal2vulkan-runtime/src/residency.rs
+@@ -98,6 +98,26 @@ fn next_generation() -> u64 {
+     GENERATIONS.fetch_add(1, Ordering::Relaxed) + 1
+ }
+ 
++/// The lineages given to residencies of the process ([`Residency::lineage`]).
++static LINEAGES: AtomicU64 = AtomicU64::new(1);
++
++/// A residency's lineage: its own from its making, a new one for each clone, so two residencies
++/// of one lineage are one residency at two of its generations, whose tokens it only ever added
++/// to (and widened, [`Residency::rewritten`]).
++pub(super) struct Lineage(u64);
++
++impl Default for Lineage {
++    fn default() -> Lineage {
++        Lineage(LINEAGES.fetch_add(1, Ordering::Relaxed))
++    }
++}
++
++impl Clone for Lineage {
++    fn clone(&self) -> Lineage {
++        Lineage::default()
++    }
++}
++
+ /// A resource an encoder made resident.
+ #[derive(Clone)]
+ pub(super) enum Used {
+@@ -137,6 +157,12 @@ pub(super) struct Residency {
+     /// A command buffer's: the device's live buffers at its commit, which an address in no
+     /// resource made resident resolves against (`live_buffers.rs`).
+     live: Option<Arc<LiveTable>>,
++    /// Its lineage ([`lineage`](Self::lineage)).
++    lineage: Lineage,
++    /// The generation of its last change of a resource it held (a usage or stages widened), 0
++    /// where none changed: a listing of its resources made at a later generation of its
++    /// lineage holds those of its tokens then as they still are ([`rewritten`](Self::rewritten)).
++    rewritten: u64,
+     /// The module docs' generation: 0 while it holds nothing it was given, else one no other
+     /// residency of the process had, drawn at its last change.
+     generation: u64,
+@@ -262,6 +288,24 @@ impl Residency {
+         self.generation
+     }
+ 
++    /// Its lineage: equal to another's only where both are one residency, at two of its
++    /// generations (a clone takes a lineage of its own).
++    pub(super) fn lineage(&self) -> u64 {
++        self.lineage.0
++    }
++
++    /// The generation at which it last changed a resource it held, 0 where it never did: at a
++    /// generation of its lineage past it, its tokens below their count then are as they were,
++    /// and it holds them first, in order; it only added tokens since.
++    pub(super) fn rewritten(&self) -> u64 {
++        self.rewritten
++    }
++
++    /// How many resources it made resident: their tokens are those below it.
++    pub(super) fn count(&self) -> usize {
++        self.used.len()
++    }
++
+     /// Whether each indirect command buffer made resident holds its ID's slot as `used`, the bind
+     /// state's used resources made of it ([`used_resources`](Self::used_resources)), states: a
+     /// buffer made later with the ID takes the slot (`address.rs`) without changing the residency.
+@@ -354,12 +398,19 @@ impl Residency {
+     /// The heaps of what the encoder made resident: those it used, and those its resident
+     /// buffers, textures and indirect command buffers lie in.
+     pub(super) fn heaps(&self) -> impl Iterator<Item = Heap> + '_ {
+-        self.used.iter().filter_map(|(used, ..)| match used {
+-            Used::Buffer(buffer) => buffer.heap().cloned(),
+-            Used::Texture(texture) => texture.heap().cloned(),
+-            Used::Heap { heap, .. } => Some(heap.clone()),
+-            Used::IndirectCommandBuffer(icb) => icb.heap().cloned(),
+-        })
++        self.heaps_from(0)
++    }
++
++    /// [`heaps`](Self::heaps) of the resources of tokens `from` on.
++    pub(super) fn heaps_from(&self, from: usize) -> impl Iterator<Item = Heap> + '_ {
++        self.used[from.min(self.used.len())..]
++            .iter()
++            .filter_map(|(used, ..)| match used {
++                Used::Buffer(buffer) => buffer.heap().cloned(),
++                Used::Texture(texture) => texture.heap().cloned(),
++                Used::Heap { heap, .. } => Some(heap.clone()),
++                Used::IndirectCommandBuffer(icb) => icb.heap().cloned(),
++            })
+     }
+ 
+     /// Make resident each texture made in a heap the encoder used since the encoder last looked,
+@@ -440,6 +491,7 @@ impl Residency {
+         }
+         if !self.is_empty() {
+             self.generation = next_generation();
++            self.rewritten = self.generation;
+         }
+         self
+     }
+@@ -483,6 +535,7 @@ impl Residency {
+             if (usage, stages) != (*had_usage, *had_stages) {
+                 (*had_usage, *had_stages) = (usage, stages);
+                 self.generation = next_generation();
++                self.rewritten = self.generation;
+             }
+             return None;
+         }
+@@ -509,36 +562,39 @@ impl Residency {
+     /// heap as its own buffer is (`Heap::bytes`), whose range holds every buffer placed in it; a
+     /// texture by its facts and resource ID.
+     pub(super) fn used_resources(&self) -> Vec<UsedResource> {
+-        self.used
+-            .iter()
+-            .zip(0u32..)
+-            .map(|((resource, usage, stages), token)| {
+-                let mut used = match resource {
+-                    Used::Buffer(buffer) => stated(buffer, ResourceClass::Buffer, token),
+-                    Used::Heap { bytes, .. } => stated(bytes, ResourceClass::Heap, token),
+-                    // Reached through its ID only while it holds the ID's slot: a buffer made
+-                    // later with the ID takes it (`address.rs`).
+-                    Used::IndirectCommandBuffer(icb) => {
+-                        let mut used = stated(icb.storage(), ResourceClass::Buffer, token);
+-                        if !icb.holds_id_slot() {
+-                            used.gpu_address = None;
+-                        }
+-                        used
+-                    }
+-                    Used::Texture(texture) => {
+-                        let class = ResourceClass::Texture(texture.facts());
+-                        let mut used = UsedResource::new(class, token);
+-                        used.resource_id = Some(texture.gpu_resource_id().0);
+-                        used
+-                    }
+-                };
+-                used.usage = *usage;
+-                used.stages = *stages;
+-                used
+-            })
++        (0..self.used.len() as u32)
++            .map(|token| self.used_resource(token))
+             .collect()
+     }
+ 
++    /// The bind state's used resource of `token`, one of its tokens
++    /// ([`used_resources`](Self::used_resources)).
++    pub(super) fn used_resource(&self, token: u32) -> UsedResource {
++        let (resource, usage, stages) = &self.used[token as usize];
++        let mut used = match resource {
++            Used::Buffer(buffer) => stated(buffer, ResourceClass::Buffer, token),
++            Used::Heap { bytes, .. } => stated(bytes, ResourceClass::Heap, token),
++            // Reached through its ID only while it holds the ID's slot: a buffer made later with
++            // the ID takes it (`address.rs`).
++            Used::IndirectCommandBuffer(icb) => {
++                let mut used = stated(icb.storage(), ResourceClass::Buffer, token);
++                if !icb.holds_id_slot() {
++                    used.gpu_address = None;
++                }
++                used
++            }
++            Used::Texture(texture) => {
++                let class = ResourceClass::Texture(texture.facts());
++                let mut used = UsedResource::new(class, token);
++                used.resource_id = Some(texture.gpu_resource_id().0);
++                used
++            }
++        };
++        used.usage = *usage;
++        used.stages = *stages;
++        used
++    }
++
+     /// The used resources a tile dispatch reaches: those made resident in the tile stage, under
+     /// their tokens, stated as a compute dispatch's are (no stages; its plan is a kernel's).
+     pub(super) fn tile_resources(&self) -> Vec<UsedResource> {
+diff --git a/crates/metal2vulkan-runtime/src/tracker.rs b/crates/metal2vulkan-runtime/src/tracker.rs
+index 83d9e0fd3..1a68476df 100644
+--- a/crates/metal2vulkan-runtime/src/tracker.rs
++++ b/crates/metal2vulkan-runtime/src/tracker.rs
+@@ -1502,9 +1502,10 @@ impl<K: Copy + Ord + Hash> UnorderedWrites<K> {
+     /// stages and access types: `binding::ResidentPrefix`). Whether it walked them.
+     pub(super) fn add_draw(&mut self, (uses, prefix): (&[Use<K>], ResidentPrefix)) -> bool {
+         let now = Some((prefix.id, prefix.len));
+-        let past = match self.added == now {
++        // None where those write nothing: it adds writes alone.
++        let past = match prefix.writes.is_empty() {
+             true => prefix.len,
+-            false => 0,
++            false => prefix.past(self.added),
+         };
+         #[cfg(debug_assertions)]
+         for used in &uses[..past] {
+@@ -1647,9 +1648,13 @@ impl<K: Copy + Ord + Hash> IndirectReads<K> {
+     /// `binding::ResidentPrefix`). Whether it walked them.
+     pub(super) fn add_draw(&mut self, (uses, prefix): (&[Use<K>], ResidentPrefix)) -> bool {
+         let now = Some((prefix.id, prefix.len));
+-        let past = match self.added == now {
+-            true => prefix.len,
+-            false => 0,
++        // None where those read no indirect arguments: it adds those reads alone.
++        let past = match prefix
++            .stages
++            .intersects(vk::PipelineStageFlags2::DRAW_INDIRECT)
++        {
++            false => prefix.len,
++            true => prefix.past(self.added),
+         };
+         #[cfg(debug_assertions)]
+         for used in &uses[..past] {
+@@ -1775,9 +1780,10 @@ impl<K: Copy + Ord + Hash> GeometryWrites<K> {
+     /// `binding::ResidentPrefix`). Whether it walked them.
+     pub(super) fn add_draw(&mut self, (uses, prefix): (&[Use<K>], ResidentPrefix)) -> bool {
+         let now = Some((prefix.id, prefix.len));
+-        let past = match self.added == now {
+-            true => prefix.len,
+-            false => 0,
++        // None where those write before no fragments: it adds those writes alone.
++        let past = match prefix.writes.intersects(PRE_RASTERIZATION_WRITES) {
++            false => prefix.len,
++            true => prefix.past(self.added),
+         };
+         #[cfg(debug_assertions)]
+         for used in &uses[..past] {
+@@ -1829,6 +1835,31 @@ impl<K: Copy + Ord + Hash> GeometryWrites<K> {
+         let (resident, own) = uses.split_at(prefix.len);
+         let now = (prefix.id, prefix.len);
+         let mut walked = 0;
++        // Those past the uses they extend (`ResidentPrefix::extends`), found against the writes
++        // as they stand, beside those found of those uses then, whose keys written since are
++        // checked again below.
++        if let Some(checked) = self
++            .checked
++            .as_mut()
++            .filter(|c| prefix.extends == Some(c.of))
++        {
++            for used in &resident[checked.of.1..] {
++                let fragment = Self::fragment(used);
++                if fragment.is_empty() {
++                    continue;
++                }
++                meet_writes(
++                    &self.writes,
++                    (&used.key, &used.range),
++                    fragment,
++                    &mut checked.found,
++                );
++                let ranges = checked.fragments.entry(used.key).or_default();
++                ranges.push((used.range.clone(), fragment));
++            }
++            walked = resident.len() - checked.of.1;
++            checked.of = now;
++        }
+         if self
+             .checked
+             .as_ref()
+diff --git a/crates/metal2vulkan-runtime/src/work_counts.rs b/crates/metal2vulkan-runtime/src/work_counts.rs
+index 782a478ff..692cfa3d4 100644
+--- a/crates/metal2vulkan-runtime/src/work_counts.rs
++++ b/crates/metal2vulkan-runtime/src/work_counts.rs
+@@ -199,6 +199,7 @@ pub(crate) struct Counters {
+     prefixed_starts: AtomicU64,
+     command_barriers: AtomicU64,
+     unrun_instances_ended: AtomicU64,
++    unneeded_barriers: AtomicU64,
+     untouched_passes_skipped: AtomicU64,
+     inline_passes: AtomicU64,
+     inline_passes_split: AtomicU64,
+@@ -1519,6 +1520,13 @@ impl Counters {
+             .fetch_add(1, Ordering::Relaxed);
+     }
+ 
++    /// A memory barrier over buffers or textures in a render encoder that no command since the
++    /// last one may have written past its attachments (`fence.rs`): it orders nothing, so the
++    /// pass did not split there.
++    pub(crate) fn unneeded_barrier(&self) {
++        self.unneeded_barriers.fetch_add(1, Ordering::Relaxed);
++    }
++
+     /// A render pass instance its pass replaced or gave up before running it had its draws
+     /// recording given up (`render.rs`, `RenderCommandEncoder::end_unrun`): ended.
+     pub(crate) fn unrun_instance_ended(&self) {
+@@ -3796,6 +3804,10 @@ pub struct WorkCounts {
+     /// may record inline begins its draws' secondary only where a command records into it, so
+     /// one replaced or recording inline before then began none, ended none, and is not counted.
+     pub unrun_instances_ended: u64,
++    /// Memory barriers over buffers or textures in render encoders after no command that may
++    /// have written memory past its attachments since the last such barrier (`fence.rs`): they
++    /// order nothing, and split no pass.
++    pub unneeded_barriers: u64,
+     /// Render passes that changed no texel and ended without recording anything: no draw call,
+     /// no clear, resolve or visibility result buffer, no depth/stencil state with depth writes
+     /// set, every attachment loaded with `Load` or `DontCare` and stored with `Store` or
+@@ -5228,6 +5240,7 @@ impl Device {
+             prefixed_starts: counters.prefixed_starts.load(Ordering::Relaxed),
+             command_barriers: counters.command_barriers.load(Ordering::Relaxed),
+             unrun_instances_ended: counters.unrun_instances_ended.load(Ordering::Relaxed),
++            unneeded_barriers: counters.unneeded_barriers.load(Ordering::Relaxed),
+             untouched_passes_skipped: counters.untouched_passes_skipped.load(Ordering::Relaxed),
+             inline_passes: counters.inline_passes.load(Ordering::Relaxed),
+             inline_passes_split: counters.inline_passes_split.load(Ordering::Relaxed),
+diff --git a/crates/metal2vulkan/src/bind/graphics.rs b/crates/metal2vulkan/src/bind/graphics.rs
+index 6ef1a992d..0ed9e356e 100644
+--- a/crates/metal2vulkan/src/bind/graphics.rs
++++ b/crates/metal2vulkan/src/bind/graphics.rs
+@@ -323,6 +323,7 @@ use crate::bind::state::{
+     offset_alignment, BindShape, BindState, BoundBuffer, BufferShape, FragmentTests,
+     VertexAmplification,
+ };
++use crate::bind::ResidentReach;
+ use crate::cache::{SpecializationKey, VariantKey};
+ use crate::device::profile::portable_vertex_stride;
+ use crate::device::requirements::{VkFeature, VkLimit};
+@@ -2397,20 +2398,14 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
+         });
+     }
+     uses.append(&mut resources.uses);
+-    let reach = |s: metal::RenderStages| {
+-        let mut f = vk::PipelineStageFlags2::empty();
+-        for (flag, stage) in [
+-            (metal::RenderStages::VERTEX, Stage::Vertex),
+-            (metal::RenderStages::FRAGMENT, Stage::Fragment),
+-            (metal::RenderStages::OBJECT, Stage::Object),
+-            (metal::RenderStages::MESH, Stage::Mesh),
+-        ] {
+-            if s.contains(flag) && stages.contains(&stage) {
+-                f |= stage_flags(stage);
+-            }
++    // The pipeline stages a used resource reaches by the render stages it names: those of the
++    // pipeline's.
++    let render = [Stage::Vertex, Stage::Fragment, Stage::Object, Stage::Mesh].map(|stage| {
++        match stages.contains(&stage) {
++            true => stage_flags(stage),
++            false => vk::PipelineStageFlags2::empty(),
+         }
+-        f
+-    };
++    });
+     // The stages whose function may write memory: a vertex or fragment function the compile
+     // found storing nothing writes no used resource (`GraphicsState::vertex_writes_memory`,
+     // `fragment_writes_memory`); an object or mesh function has no such fact.
+@@ -2424,13 +2419,14 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
+         .fold(vk::PipelineStageFlags2::empty(), |all, &stage| {
+             all | stage_flags(stage)
+         });
+-    uses.extend(used_uses(
+-        &shape.used,
+-        p.interface.needs_pointer_translation,
+-        p.interface.needs_handle_translation,
+-        reach,
++    let resident = ResidentReach {
++        pointer: p.interface.needs_pointer_translation,
++        handle: p.interface.needs_handle_translation,
++        render,
++        every: vk::PipelineStageFlags2::empty(),
+         writers,
+-    ));
++    };
++    uses.extend(used_uses(&shape.used, &resident));
+ 
+     let mut diagnostics = resources.diagnostics;
+     let mut template = resources.template;
+@@ -2533,6 +2529,7 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
+         uses: uses.into(),
+         push,
+         diagnostics,
++        resident,
+         compute: None,
+         graphics: Some(GraphicsTemplate {
+             buffers,
+diff --git a/crates/metal2vulkan/src/bind/mod.rs b/crates/metal2vulkan/src/bind/mod.rs
+index 6ff4bd6d3..4a73ccb0e 100644
+--- a/crates/metal2vulkan/src/bind/mod.rs
++++ b/crates/metal2vulkan/src/bind/mod.rs
+@@ -247,7 +247,7 @@ pub use plan::resources::sampler_desc;
+ pub use plan::{
+     AccessClass, BindingPlan, ByteRange, ComputeTemplate, DescriptorWrite, FieldLocation,
+     GraphicsTemplate, ImageSource, ImageViewDesc, PlanDiagnostic, PushFieldPlacement, PushTemplate,
+-    ResourceUse, SamplerSource, UseTarget, VertexBufferBind, ViewSetup, WriteSource,
++    ResidentReach, ResourceUse, SamplerSource, UseTarget, VertexBufferBind, ViewSetup, WriteSource,
+ };
+ pub use rate_map::{
+     RasterizationRateMap, RateMapAxis, RateMapDescriptor, RateMapError, RateMapLayerDescriptor,
+diff --git a/crates/metal2vulkan/src/bind/plan.rs b/crates/metal2vulkan/src/bind/plan.rs
+index 936790f4a..97c31ee73 100644
+--- a/crates/metal2vulkan/src/bind/plan.rs
++++ b/crates/metal2vulkan/src/bind/plan.rs
+@@ -18,6 +18,8 @@ use crate::pipeline::graphics::StorageAttachmentView;
+ use crate::pipeline::interface::{AccessSet, BufferForm, PlacedField, Window};
+ 
+ use crate::bind::shared_list::SharedList;
++use crate::bind::state::{UsedClass, UsedResource, UsedShape};
++use crate::metal;
+ use crate::pipeline::sym::{
+     AccelerationStructureLevel, HandleClass, PushField, SlotRef, SpecKey, Stage,
+ };
+@@ -61,6 +63,96 @@ pub struct BindingPlan {
+     /// The views of a render plan's draws under the shape's vertex amplification; the default, no
+     /// multiview, for a compute plan.
+     pub views: ViewSetup,
++    /// How its functions reach the resources their encoder made resident
++    /// (`BindState::used_resources`): the uses it lists of them, from which a consumer that keeps
++    /// what its encoder made resident apart from the bind state (and lists none there) makes the
++    /// same uses itself ([`ResidentReach::uses_of`]).
++    pub resident: ResidentReach,
++}
++
++/// How a plan's functions reach a resource their encoder made resident ([`BindingPlan::resident`]):
++/// a buffer where a function reads the resident root table (`pointer`), a texture where one
++/// resolves handles (`handle`), a heap where either does; in the pipeline stages its render
++/// stages name of those the pipeline has (`render`, by vertex, fragment, object and mesh), or a
++/// compute plan's kernel whatever they are (`every`); writing in the stages whose function may
++/// write memory alone (`writers`).
++#[non_exhaustive]
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
++#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
++pub struct ResidentReach {
++    pub pointer: bool,
++    pub handle: bool,
++    pub render: [vk::PipelineStageFlags2; 4],
++    pub every: vk::PipelineStageFlags2,
++    pub writers: vk::PipelineStageFlags2,
++}
++
++impl ResidentReach {
++    /// The pipeline stages a used resource made resident for the render stages `stages` reaches.
++    pub fn stages(&self, stages: metal::RenderStages) -> vk::PipelineStageFlags2 {
++        if !self.every.is_empty() {
++            return self.every;
++        }
++        let flags = [
++            metal::RenderStages::VERTEX,
++            metal::RenderStages::FRAGMENT,
++            metal::RenderStages::OBJECT,
++            metal::RenderStages::MESH,
++        ];
++        (flags.iter().zip(self.render)).fold(vk::PipelineStageFlags2::empty(), |all, (f, s)| {
++            match stages.contains(*f) {
++                true => all | s,
++                false => all,
++            }
++        })
++    }
++
++    /// The uses a plan lists of the used resource `token` of shape `used` (none where its
++    /// functions reach it in no stage; a write in the stages whose function may write memory, a
++    /// read in the others, where its usage writes): `BindShape::used`'s, in its order.
++    pub fn uses_of(&self, token: u32, used: &UsedShape) -> impl Iterator<Item = ResourceUse> {
++        let reachable = match used.class {
++            UsedClass::Buffer => self.pointer,
++            UsedClass::Texture(_) => self.handle,
++            UsedClass::Heap => self.pointer || self.handle,
++        };
++        let stages = self.stages(used.stages);
++        let read =
++            (used.usage).intersects(metal::ResourceUsage::READ | metal::ResourceUsage::SAMPLE);
++        let write = used.usage.contains(metal::ResourceUsage::WRITE);
++        let access = match (read, write) {
++            (false, false) => AccessSet::READ_WRITE,
++            (read, write) => AccessSet { read, write },
++        };
++        let class = match used.class {
++            UsedClass::Texture(_) if write => AccessClass::StorageImage,
++            UsedClass::Texture(_) => AccessClass::Sampled,
++            UsedClass::Buffer | UsedClass::Heap => AccessClass::Storage,
++        };
++        let (writing, reading) = match access.write {
++            true => (
++                stages.intersection(self.writers),
++                vk::PipelineStageFlags2::from_raw(stages.as_raw() & !self.writers.as_raw()),
++            ),
++            false => (stages, vk::PipelineStageFlags2::empty()),
++        };
++        let reached = reachable && !stages.is_empty();
++        [(writing, access), (reading, AccessSet::READ)]
++            .into_iter()
++            .filter(move |(stages, _)| reached && !stages.is_empty())
++            .map(move |(stages, access)| ResourceUse {
++                resource: UseTarget::Used(token),
++                access,
++                class,
++                stages,
++                range: None,
++            })
++    }
++
++    /// [`uses_of`](Self::uses_of) a used resource as a bind state lists it.
++    pub fn uses_of_resource(&self, used: &UsedResource) -> impl Iterator<Item = ResourceUse> {
++        self.uses_of(used.token, &UsedShape::of(used))
++    }
+ }
+ 
+ impl BindingPlan {
+diff --git a/crates/metal2vulkan/src/bind/plan/compute.rs b/crates/metal2vulkan/src/bind/plan/compute.rs
+index 171dc8cd7..39e06b320 100644
+--- a/crates/metal2vulkan/src/bind/plan/compute.rs
++++ b/crates/metal2vulkan/src/bind/plan/compute.rs
+@@ -72,6 +72,7 @@ use super::{
+ use crate::bind::heap::{planner, HeapPlanner};
+ use crate::bind::neutral::{zero_buffer_bytes, NeutralResource};
+ use crate::bind::state::{BindShape, StageShape};
++use crate::bind::ResidentReach;
+ use crate::cache::{SpecializationKey, VariantKey};
+ use crate::device::requirements::VkLimit;
+ use crate::device::Device;
+@@ -786,13 +787,14 @@ fn plan(p: &ComputePipeline, device: &Device, shape: &BindShape) -> Result<Bindi
+         .filter(|b| matches!(b.bound, BoundKind::Buffer { .. }))
+         .map(|b| buffer_use(b, compute_stage))
+         .collect();
+-    uses.extend(used_uses(
+-        &shape.used,
+-        p.interface.needs_pointer_translation,
+-        p.interface.needs_handle_translation,
+-        |_| compute_stage,
+-        compute_stage,
+-    ));
++    let resident = ResidentReach {
++        pointer: p.interface.needs_pointer_translation,
++        handle: p.interface.needs_handle_translation,
++        render: Default::default(),
++        every: compute_stage,
++        writers: compute_stage,
++    };
++    uses.extend(used_uses(&shape.used, &resident));
+     uses.append(&mut resources.uses);
+     let mut diagnostics = resources.diagnostics;
+     let mut template = resources.template;
+@@ -856,6 +858,7 @@ fn plan(p: &ComputePipeline, device: &Device, shape: &BindShape) -> Result<Bindi
+         uses: uses.into(),
+         push,
+         diagnostics,
++        resident,
+         graphics: None,
+         compute: Some(ComputeTemplate {
+             buffers,
+diff --git a/crates/metal2vulkan/src/bind/plan/slots.rs b/crates/metal2vulkan/src/bind/plan/slots.rs
+index e280f79c2..5eef8d039 100644
+--- a/crates/metal2vulkan/src/bind/plan/slots.rs
++++ b/crates/metal2vulkan/src/bind/plan/slots.rs
+@@ -4,8 +4,10 @@
+ 
+ use std::collections::BTreeMap;
+ 
+-use super::{AccessClass, BoundKind, ByteRange, PlannedBuffer, ResourceUse, UseTarget};
+-use crate::bind::state::{BindShape, BufferShape, TextureShape, UsedClass, UsedShape};
++use super::{
++    AccessClass, BoundKind, ByteRange, PlannedBuffer, ResidentReach, ResourceUse, UseTarget,
++};
++use crate::bind::state::{BindShape, BufferShape, TextureShape, UsedShape};
+ use crate::device::profile::Limits;
+ use crate::device::requirements::VkFeature;
+ use crate::device::{mechanism, DeviceProfile};
+@@ -14,7 +16,7 @@ use crate::metal;
+ use crate::pipeline::artifact::RuntimeDependency;
+ use crate::pipeline::facts::{Mechanism, RuntimeFact, UniformViewChoice};
+ use crate::pipeline::interface::SlotInterface;
+-use crate::pipeline::interface::{AccessSet, BufferForm, BufferSlot, Window};
++use crate::pipeline::interface::{BufferForm, BufferSlot, Window};
+ use crate::pipeline::layout::{BindingSource, PipelineLayout};
+ use crate::pipeline::sym::{
+     PushField, SampledType, SlotClass, SlotRef, SnapshotForm, SpecKey, Stage,
+@@ -815,55 +817,11 @@ pub(crate) fn buffer_use(b: &PlannedBuffer, stages: vk::PipelineStageFlags2) ->
+ /// is not listed.
+ pub(crate) fn used_uses(
+     used: &BTreeMap<u32, UsedShape>,
+-    pointer: bool,
+-    handle: bool,
+-    stages: impl Fn(metal::RenderStages) -> vk::PipelineStageFlags2,
+-    writers: vk::PipelineStageFlags2,
++    reach: &ResidentReach,
+ ) -> Vec<ResourceUse> {
+-    let mut out = Vec::new();
+-    for (&token, u) in used {
+-        let reachable = match u.class {
+-            UsedClass::Buffer => pointer,
+-            UsedClass::Texture(_) => handle,
+-            UsedClass::Heap => pointer || handle,
+-        };
+-        let stages = stages(u.stages);
+-        if !reachable || stages.is_empty() {
+-            continue;
+-        }
+-        let read = u
+-            .usage
+-            .intersects(metal::ResourceUsage::READ | metal::ResourceUsage::SAMPLE);
+-        let write = u.usage.contains(metal::ResourceUsage::WRITE);
+-        let access = match (read, write) {
+-            (false, false) => AccessSet::READ_WRITE,
+-            (read, write) => AccessSet { read, write },
+-        };
+-        let class = match u.class {
+-            UsedClass::Texture(_) if write => AccessClass::StorageImage,
+-            UsedClass::Texture(_) => AccessClass::Sampled,
+-            UsedClass::Buffer | UsedClass::Heap => AccessClass::Storage,
+-        };
+-        let (writing, reading) = match access.write {
+-            true => (
+-                stages.intersection(writers),
+-                vk::PipelineStageFlags2::from_raw(stages.as_raw() & !writers.as_raw()),
+-            ),
+-            false => (stages, vk::PipelineStageFlags2::empty()),
+-        };
+-        for (stages, access) in [(writing, access), (reading, AccessSet::READ)] {
+-            if !stages.is_empty() {
+-                out.push(ResourceUse {
+-                    resource: UseTarget::Used(token),
+-                    access,
+-                    class,
+-                    stages,
+-                    range: None,
+-                });
+-            }
+-        }
+-    }
+-    out
++    (used.iter())
++        .flat_map(|(&token, u)| reach.uses_of(token, u))
++        .collect()
+ }
+ 
+ #[cfg(test)]
+diff --git a/crates/metal2vulkan/src/bind/state.rs b/crates/metal2vulkan/src/bind/state.rs
+index 747836e45..1041c7710 100644
+--- a/crates/metal2vulkan/src/bind/state.rs
++++ b/crates/metal2vulkan/src/bind/state.rs
+@@ -1926,6 +1926,18 @@ impl FunctionTablesShape {
+     }
+ }
+ 
++impl UsedShape {
++    /// The shape of `used`, listed once (a state that lists a token twice unions them,
++    /// `BindState::used_shape`).
++    pub fn of(used: &UsedResource) -> UsedShape {
++        UsedShape {
++            class: UsedClass::of(used.class),
++            usage: used.usage,
++            stages: used.stages,
++        }
++    }
++}
++
+ /// The shape of one used resource: what a plan's `uses` states about it.
+ #[non_exhaustive]
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

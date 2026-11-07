@@ -176,7 +176,23 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     # 444 -> 150-175 MiB footprint (runtime heap 82-117 MiB), two of its pages at once 153-175; without bundles it lived 5 s
     # (743 MiB) and now ~50 s (each instance still gathers the resident set, which grows with the draws). icb_scale: the same
     # pixels in every mode, its debug assertions in 9 combos; per-draw residency 2000 draws 156 -> 19 MiB while encoding, 2.8 -> 2.2 s.
-    '0033-shared-used-maps-and-plan-lists.patch']]
+    '0033-shared-used-maps-and-plan-lists.patch',
+    # What a render encoder made resident as the encoder's, not each draw's. Its bind state lists none of it (`resident_apart`):
+    # a render plan states how its functions reach it (BindingPlan::resident, ResidentReach) and lists no use of it, so no
+    # shape, plan or heap part is of the residency, and a draw's uses of it are made from the reach and the residency
+    # (binding::apart_uses_into), extended by the tokens the residency added since where it only added (Residency::lineage,
+    # rewritten), under an identity that extends the last (ResidentPrefix::extends). Their consumers take an extended
+    # prefix's tail alone (tracker, noted-apart, pass-start reads, geometry writes, attachment reads, heaps touched), keep a
+    # few lines of identities (TakenLines: WebKit's index clamp and its draw are two pipeline states, each a line), skip a
+    # prefix with no access of their kind (its stages), and each pipeline state's uses go aside with its bind state. A render
+    # pass instance holds the uses it began with by the encoder's logs of them (ResidentLogs), gathered only where the pass
+    # plans shadow copies; a memory barrier over buffers or textures after no command that may have written memory splits
+    # nothing. icb_scale (lavapipe): per-draw residency 1000/2000/4000 draws 473/2212/13966 -> 17/33/68 ms encoding; WebKit's
+    # clamp + barrier + draw pattern 536/2240/10416 -> 40/83/180 ms; direct 2000 draws 113 -> 39 ms; the same pixels, the
+    # debug assertions (every kept and extended answer against one made whole) in 12 combos. renderBundles on 5566: GPU
+    # process 121 -> 68-88 MiB, ~1.75x the frames; without bundles it lives (peak 467 MiB in its first frame of 5000 clamp
+    # barriers, then 258 MiB) and animates at the bundle mode's rate.
+    '0034-encoder-level-residency.patch']]
 
 
 def git_tree(*steps):
