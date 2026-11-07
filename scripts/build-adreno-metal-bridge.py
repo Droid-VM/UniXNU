@@ -144,7 +144,24 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     '0030-idle-merge-scratch-spares.patch',
     # Diagnostics: METAL2VULKAN_BACKING_COVER=0 turns 0029 off for an A/B of the frames; METAL2VULKAN_POOL_REPORT=1 keeps each
     # pool's blocks (size, used, free ranges, longest) at the idle trim, m2v_pool_report.
-    '0031-backing-cover-switch-and-pool-report.patch']]
+    '0031-backing-cover-switch-and-pool-report.patch',
+    # Upstream metal2vulkan's resident-uses series (development, 2026-11-03..05), backported: a draw's work no longer grows with
+    # what its encoder made resident. Each draw had built its resident set, handle tables, heap elements and uses over every
+    # resource the encoder made resident, and noted, gathered and checked them all: a pass of N draws among R resident
+    # resources cost N x R. WebKit's WebGPU makes every resource of its render bundles resident, and replays the bundles'
+    # indirect commands at a host step, so webgpu-samples' renderBundles (5000 draws, ~10000 resident) took over 30 s a frame
+    # and Safari killed the GPU process. Its draws take several meshes in turn, so their plans alternate: the kept uses and
+    # shapes must hold across plans too (ba3e45f1, 537667df, fa99ed2c, dc7b3d5d). Each of its bind groups makes a texture view
+    # of its own, all resident: a draw's heap part (handle tables, heap elements, view checks) and its look at the resident
+    # textures are kept while what they are made of holds (493178c82, 2282779a7, 01a902edd, 7089c6ddb, a1d400d1, f5d7b958, and
+    # 81681968's shadow, pvrtc and residency parts). Commits af7da0a0, 5b5f1847, 81531d6c, 626bd347, 8da041d6, 3b5badc4,
+    # ec85bf89, 1ec132c75, f7e7dc2f, 669b2df5, 1181ebe7, 5a86608e, 6be8045e, 2456ca75 (+ 793516031's name), ba3e45f1,
+    # 537667df, fa99ed2c, dc7b3d5d, 81681968, a1d400d1, f5d7b958, 493178c82, 2282779a7, 01a902edd, 7089c6ddb, each without its
+    # counters (no-ops in work_counts.rs where the code calls them), its tests and the kept-draw (draw_again) and compute
+    # live-dispatch paths this tree lacks. Their debug assertions check every kept answer against one worked out whole.
+    # icb_scale (lavapipe, indexed ICB draws): 5000 among 10000 resident 44.2 s -> 0.20 s a frame; 2000 over 4 meshes, each
+    # with a texture view of its own, 2.5 s -> 0.13 s; the same pixels.
+    '0032-resident-uses-once-per-identity.patch']]
 
 
 def git_tree(*steps):
