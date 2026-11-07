@@ -161,7 +161,22 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     # live-dispatch paths this tree lacks. Their debug assertions check every kept answer against one worked out whole.
     # icb_scale (lavapipe, indexed ICB draws): 5000 among 10000 resident 44.2 s -> 0.20 s a frame; 2000 over 4 meshes, each
     # with a texture view of its own, 2.5 s -> 0.13 s; the same pixels.
-    '0032-resident-uses-once-per-identity.patch']]
+    '0032-resident-uses-once-per-identity.patch',
+    # What an encoder made resident, held once instead of once per shape, plan and render pass instance. WebKit's GPU process held
+    # 342-418 MiB of the runtime's heap for webgpu-samples' renderBundles (5000 draws, 15038 buffers resident), measured with the
+    # plugin's sampled heap sites (client-mem): ~15 shapes of one encoder (one per mesh's buffer length classes) each copied the
+    # 20000-entry used map (BindShape::used) into the settled shape, two plans' memo keys and the plans' own keys, and each shape's
+    # two plans (base and replay variant) listed the resources again. Now: one shared map per used set (UsedShapes: a new shape takes
+    # its recent shapes' map, which is the state's while they stay; its hash made once, its one-level form once), a kept plan holds
+    # the very lists a live plan holds where equal (BindingPlan::share_lists, content-interned above 64 items), and a variant's memo
+    # keeps one plan of shapes alike but for their used resources (BindShape::is_beside_used: without render bundles WebKit makes a
+    # draw's bind group resident before it, so each draw's shape is its own). A render pass instance reserves a buffer's 17 ranges
+    # at its second range, not its first, and one the pass went past packs its gathered bytes and lets go of its last uses
+    # (InstanceShadows::close: WebKit's memory barrier between such draws splits an instance per draw). renderBundles' GPU process
+    # 444 -> 150-175 MiB footprint (runtime heap 82-117 MiB), two of its pages at once 153-175; without bundles it lived 5 s
+    # (743 MiB) and now ~50 s (each instance still gathers the resident set, which grows with the draws). icb_scale: the same
+    # pixels in every mode, its debug assertions in 9 combos; per-draw residency 2000 draws 156 -> 19 MiB while encoding, 2.8 -> 2.2 s.
+    '0033-shared-used-maps-and-plan-lists.patch']]
 
 
 def git_tree(*steps):
