@@ -213,7 +213,16 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     # three words one vec3 load. On 5566 (a840, 1200 MHz) webgpu-samples' deferredRendering: the light pass 60 -> 44.5 ms a frame
     # (u_trace), 14.5-15 -> 19.8 fps shown, the render server's reads of WebKit's surfaces no longer reach their 100 ms cap;
     # MetalCheck passes. SEMANTICS_VERSION 1924: every cached pipeline is made again.
-    '0036-words-indexed-from-one-address.patch']]
+    '0036-words-indexed-from-one-address.patch',
+    # A cube sample's direction goes through Metal's tie handling (face::metal_ties: ties broken x over y over z, components
+    # Metal reads as zero, a zero direction, huge magnitudes) only where it may need it: a direction whose magnitudes are all
+    # at least 2^-125, whose largest is at most 2^125 and one component's alone is left unchanged by that handling, and is
+    # tested first (a dozen instructions; the exact handling a branch). The direction is made before the sampled image, whose
+    # OpSampledImage must stay in the block of the access. ir3 (Adreno 830, noop drm shim), a cube sample of an interpolated
+    # direction: 86 -> 16 instructions on the plain path. The face tests (every device reads Metal's face and texel, ties,
+    # zero, huge, infinities and NaNs) pass unchanged. GFXBench's shaders: 28 fragment shaders sample cubes; on 5566 Car Chase
+    # (car reflections) held 46.4 fps at a thermally capped 578 MHz where 0036 made 47.3 at 726 (~12.3 vs 14.6 Mcycles a frame).
+    '0037-plain-cube-directions-skip-the-tie-handling.patch']]
 
 
 def git_tree(*steps):

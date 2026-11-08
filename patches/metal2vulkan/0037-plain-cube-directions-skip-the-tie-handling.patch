@@ -1,0 +1,162 @@
+diff --git a/crates/metal2vulkan/src/cache/mod.rs b/crates/metal2vulkan/src/cache/mod.rs
+index 513a507e1..c8edeb280 100644
+--- a/crates/metal2vulkan/src/cache/mod.rs
++++ b/crates/metal2vulkan/src/cache/mod.rs
+@@ -60,7 +60,7 @@ mod tests;
+ /// unchanged version, and its bless records the version. Independent of the crate's version and of
+ /// [`ARTIFACT_FORMAT_VERSION`]. The commit that bumps it says what changed; this comment keeps no
+ /// history.
+-pub const SEMANTICS_VERSION: u32 = 1924;
++pub const SEMANTICS_VERSION: u32 = 1925;
+ 
+ /// The byte-layout version of encoded artifacts (`CompiledFunction::to_bytes` and the
+ /// [`PipelineArtifact`] encodings). Every encoded artifact carries it, and a decode under another
+diff --git a/crates/metal2vulkan/src/lower/sampler/emit.rs b/crates/metal2vulkan/src/lower/sampler/emit.rs
+index a89df9358..3e39ea785 100644
+--- a/crates/metal2vulkan/src/lower/sampler/emit.rs
++++ b/crates/metal2vulkan/src/lower/sampler/emit.rs
+@@ -921,6 +921,15 @@ pub(super) fn sampled_value(
+     if let Some(a) = s.anisotropic.as_ref() {
+         return super::anisotropic::sample(cx, fb, s, a, grads);
+     }
++    // A cube's direction is made before the sampled image: its test of a plain direction branches
++    // around Metal's tie handling (`face::metal_ties`), and an `OpSampledImage` must be in the
++    // block of the access that reads it.
++    let direction = match s.op {
++        SampleOp::Sample { .. } | SampleOp::Gather { .. } | SampleOp::Lod { .. } => {
++            Some(plane_direction(cx, fb, s)?)
++        }
++        _ => None,
++    };
+     let (si, image, live) = sampled_image(cx, fb, s.source)?;
+     if let SampleOp::QueryLevel { min } = &s.op {
+         let x = query_level(cx, fb, si, *min)?;
+@@ -975,7 +984,7 @@ pub(super) fn sampled_value(
+         }
+         _ => None,
+     };
+-    let (mut coord, mut grad) = plane_and_gradients(cx, fb, s, grads)?;
++    let (mut coord, mut grad) = plane_and_gradients(cx, fb, s, grads, direction)?;
+     // Pixel coordinates: the plane coordinate (and any gradient) over the level-0 size, always
+     // or behind the runtime sampler's word.
+     if let Some(spec) = pixel_coordinates(cx, fb, s)? {
+@@ -1135,20 +1144,33 @@ pub(super) fn plane_coord(
+     cx.operand(fb, s.coord)
+ }
+ 
++/// The plane coordinate of `s`, a cube's direction with its ties broken as Metal breaks them.
++pub(super) fn plane_direction(
++    cx: &mut EmitCx<'_>,
++    fb: &mut FunctionBuilder<'_>,
++    s: &Sampling,
++) -> BResult<SValue> {
++    let coord = plane_coord(cx, fb, s)?;
++    match s.cube {
++        true => super::face::metal_ties(fb, coord),
++        false => Ok(coord),
++    }
++}
++
+ /// The plane coordinate of `s` and its explicit gradients, read from the AIR operands: a cube's
+-/// direction with its ties broken as Metal breaks them and its gradients as Metal's footprint on
+-/// that face, and a rule-2 sample's the gradients `grads` its switch-at-use hoisted.
++/// direction with its ties broken as Metal breaks them (`direction`, where the caller made it
++/// already) and its gradients as Metal's footprint on that face, and a rule-2 sample's the
++/// gradients `grads` its switch-at-use hoisted.
+ pub(super) fn plane_and_gradients(
+     cx: &mut EmitCx<'_>,
+     fb: &mut FunctionBuilder<'_>,
+     s: &Sampling,
+     grads: Option<(SValue, SValue)>,
++    direction: Option<SValue>,
+ ) -> BResult<(SValue, Option<(SValue, SValue)>)> {
+-    let coord = plane_coord(cx, fb, s)?;
+-    let coord = if s.cube {
+-        super::face::metal_ties(fb, coord)?
+-    } else {
+-        coord
++    let coord = match direction {
++        Some(coord) => coord,
++        None => plane_direction(cx, fb, s)?,
+     };
+     let grad = match &s.op {
+         SampleOp::Sample {
+diff --git a/crates/metal2vulkan/src/lower/sampler/face.rs b/crates/metal2vulkan/src/lower/sampler/face.rs
+index d8fa019c1..b0a1f015c 100644
+--- a/crates/metal2vulkan/src/lower/sampler/face.rs
++++ b/crates/metal2vulkan/src/lower/sampler/face.rs
+@@ -58,13 +58,15 @@
+ //! direction's derivatives sees each broken tie as a face coordinate moved by at most `2^-24`
+ //! (`PrecisionNote::CubeGradientFootprint`).
+ 
++use crate::spirv::builder::constructs::{ArmEnd, ArmFn, Merged};
+ use crate::spirv::builder::FunctionBuilder;
+-use crate::spirv::error::BResult;
++use crate::spirv::error::{BResult, BuildError, ControlRule};
+ use crate::spirv::ids::Value as SValue;
+ use crate::spirv::ir::{BinOp, ConstBits, Constant, ConvOp, GlslOp, Type as SType, UnOp};
+ 
+-/// The estimated words of `metal_ties`: its 89 instructions and 11 constants, at most 6 words each.
+-pub const TIE_WORDS: u32 = 600;
++/// The estimated words of `metal_ties`: its 107 instructions (89 of them the exact handling, 18 the
++/// test and the selection construct around it) and 13 constants, at most 6 words each.
++pub const TIE_WORDS: u32 = 720;
+ 
+ /// `1 - 2^-24`, the largest float below 1: a zero direction's `y` and `z`.
+ const BELOW_ONE: u32 = 0x3f7f_ffff;
+@@ -88,7 +90,55 @@ const MOST_DIVIDED: u32 = 0x7e00_0000;
+ /// magnitude where it ties the major magnitude; but at a tie at `2^-125` the major component is
+ /// one ulp larger instead; every other component passes unchanged. Then a direction whose major
+ /// magnitude is above `2^125` is scaled by `1/2`, or by `1/8` where it is above `2^126`.
++///
++/// Almost every direction is left as it is: one whose magnitudes are all at least `2^-125`, whose
++/// largest is at most `2^125`, and whose largest is one component's alone (the second largest,
++/// `max(min(|x|, |y|), min(max(|x|, |y|), |z|))`, below it) has a major axis every device reads,
++/// no component Metal reads as zero, no tie and no scaling. Such a direction is tested first, in a
++/// dozen instructions, and only another one takes the exact handling (89, in a selection
++/// construct): a GPU runs the test where it ran all of them (Turnip/ir3, a cube sample of an
++/// interpolated direction: 86 instructions with every step a select, 16 on the plain path, the
++/// exact handling a branch a wave takes only for a lane that needs it). A NaN fails every compare
++/// and takes the exact handling; an `FMin`/`FMax` that drops a NaN may pass it, which the exact
++/// handling would also have left unchanged.
+ pub(super) fn metal_ties(fb: &mut FunctionBuilder<'_>, p: SValue) -> BResult<SValue> {
++    let f32_ = fb.module().ty(SType::Float { width: 32 })?;
++    let f32_const = |fb: &mut FunctionBuilder<'_>, x: f32| -> BResult<SValue> {
++        let c = fb.module().constant(Constant::Scalar {
++            ty: f32_,
++            bits: ConstBits(u64::from(x.to_bits())),
++        })?;
++        fb.module().const_value(c)
++    };
++    let a = fb.glsl(GlslOp::FAbs, &[p])?;
++    let ax = fb.composite_extract(a, &[0])?;
++    let ay = fb.composite_extract(a, &[1])?;
++    let az = fb.composite_extract(a, &[2])?;
++    let high_xy = fb.glsl(GlslOp::FMax, &[ax, ay])?;
++    let low_xy = fb.glsl(GlslOp::FMin, &[ax, ay])?;
++    let high = fb.glsl(GlslOp::FMax, &[high_xy, az])?;
++    let low = fb.glsl(GlslOp::FMin, &[low_xy, az])?;
++    let under = fb.glsl(GlslOp::FMin, &[high_xy, az])?;
++    let second = fb.glsl(GlslOp::FMax, &[low_xy, under])?;
++    let least_read = f32_const(fb, f32::from_bits(LEAST_READ))?;
++    let most_divided = f32_const(fb, f32::from_bits(MOST_DIVIDED))?;
++    let read = fb.binary(BinOp::FOrdGreaterThanEqual, low, least_read)?;
++    let divided = fb.binary(BinOp::FOrdLessThanEqual, high, most_divided)?;
++    let alone = fb.binary(BinOp::FOrdLessThan, second, high)?;
++    let ranged = fb.binary(BinOp::LogicalAnd, read, divided)?;
++    let plain = fb.binary(BinOp::LogicalAnd, ranged, alone)?;
++    let unchanged: ArmFn<'_, ()> = Box::new(move |_, _| Ok(ArmEnd::FallThrough(vec![p])));
++    let exact: ArmFn<'_, ()> =
++        Box::new(move |fb, _| Ok(ArmEnd::FallThrough(vec![exact_ties(fb, p)?])));
++    let Merged(merged) = fb.if_(&mut (), plain, unchanged, Some(exact))?;
++    match merged[..] {
++        [q] => Ok(q),
++        _ => Err(BuildError::Control(ControlRule::ArmValues)),
++    }
++}
++
++/// [`metal_ties`]' handling of every direction, each step a select.
++fn exact_ties(fb: &mut FunctionBuilder<'_>, p: SValue) -> BResult<SValue> {
+     let f32_ = fb.module().ty(SType::Float { width: 32 })?;
+     let u32_ = fb.module().ty(SType::Int {
+         width: 32,
