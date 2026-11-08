@@ -202,7 +202,18 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     # noop drm shim) 496 instructions + 363 nops, 37 memory ops, 11 (sy) waits per light -> 398 + 182, 17 (7 loads, the rest the
     # miss counter's atomics in untaken branches), 5; on 5566 the frame's GPU time 73 -> 60 ms at 1200x1200 and 1.2 GHz (Android
     # Chrome on the same phone: ~10 ms). The used-uses tests take the reach (0034 left them building against the old signature).
-    '0035-wide-pointers-carry-their-root-entry.patch']]
+    '0035-wide-pointers-carry-their-root-entry.patch',
+    # A device-address access reaches its words as places of one address: the access's offset splits into its 4 GiB page,
+    # added to the root's address once (the high word's sum alone), and a 32-bit word index, and each word is the place
+    # words[index + j] of that address (psb::split, PsbMem::indexed). Before, every word had a 64-bit device address of its
+    # own (base + 4 * word in u64): on a 32-bit GPU a 32-bit add, a carry compare and a second add per word, which no driver
+    # folds into the load. Turnip lowers such a place to a global load with a 64-bit base and a 32-bit offset (ldg.a), and
+    # merges a leaf's words into one load. A kernel of deferredRendering's shape (a light array read per light through a bind
+    # group's pointer), ir3 over the noop drm shim as an Adreno 830: its light loop 258 -> 217 instructions, the position's
+    # three words one vec3 load. On 5566 (a840, 1200 MHz) webgpu-samples' deferredRendering: the light pass 60 -> 44.5 ms a frame
+    # (u_trace), 14.5-15 -> 19.8 fps shown, the render server's reads of WebKit's surfaces no longer reach their 100 ms cap;
+    # MetalCheck passes. SEMANTICS_VERSION 1924: every cached pipeline is made again.
+    '0036-words-indexed-from-one-address.patch']]
 
 
 def git_tree(*steps):

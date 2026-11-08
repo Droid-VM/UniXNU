@@ -1,0 +1,239 @@
+diff --git a/crates/metal2vulkan/src/cache/mod.rs b/crates/metal2vulkan/src/cache/mod.rs
+index 4c01c9bad..513a507e1 100644
+--- a/crates/metal2vulkan/src/cache/mod.rs
++++ b/crates/metal2vulkan/src/cache/mod.rs
+@@ -60,7 +60,7 @@ mod tests;
+ /// unchanged version, and its bless records the version. Independent of the crate's version and of
+ /// [`ARTIFACT_FORMAT_VERSION`]. The commit that bumps it says what changed; this comment keeps no
+ /// history.
+-pub const SEMANTICS_VERSION: u32 = 1923;
++pub const SEMANTICS_VERSION: u32 = 1924;
+ 
+ /// The byte-layout version of encoded artifacts (`CompiledFunction::to_bytes` and the
+ /// [`PipelineArtifact`] encodings). Every encoded artifact carries it, and a decode under another
+diff --git a/crates/metal2vulkan/src/lower/access/dynamic.rs b/crates/metal2vulkan/src/lower/access/dynamic.rs
+index 7b61b38ed..cb6b7ec9f 100644
+--- a/crates/metal2vulkan/src/lower/access/dynamic.rs
++++ b/crates/metal2vulkan/src/lower/access/dynamic.rs
+@@ -108,7 +108,7 @@ use crate::spirv::ids::{DemoteTy, TypeId, Value as SValue};
+ use crate::spirv::ir::{AtomicOp, BinOp, ConvOp, Scope, Semantics, Type as SType};
+ 
+ use super::local::{self, Home, LocalAccess};
+-use super::psb::PsbMem;
++use super::psb::{self, PsbMem};
+ use super::{
+     is_ptr_ty, not_lowered, operand, refuse, slot_root, static_roots, Access, AccessPlan,
+     BufferReach, IndexForm, SideReach, Target, WideGepTerms,
+@@ -1119,9 +1119,9 @@ fn base_with(
+ }
+ 
+ /// Load (or store `stored`) `leaf` at `d` bytes (a `u64`; `None` for 0) past `b`: the words at
+-/// `host + (a & ~3)` for `a = at + d`, contained: the normative check in `u64`, the access at
+-/// `select(inb, address, sink)`, and a load's value `select(inb, v, 0)`; an out-of-bounds store
+-/// lands in the write-only sink.
++/// `host + (a & ~3)` for `a = at + d` (as [`psb::split`] reaches them), contained: the normative
++/// check in `u64`, the access at `select(inb, address, sink)`, and a load's value
++/// `select(inb, v, 0)`; an out-of-bounds store lands in the write-only sink.
+ pub(super) fn wide_at(
+     fb: &mut FunctionBuilder<'_>,
+     b: WideBase,
+@@ -1133,26 +1133,16 @@ pub(super) fn wide_at(
+         Some(d) => fb.binary(BinOp::IAdd, b.at, d)?,
+         None => b.at,
+     };
+-    let three = k64(fb, 3)?;
+-    let low = fb.binary(BinOp::BitwiseAnd, at, three)?;
+-    let aligned = fb.binary(BinOp::ISub, at, low)?;
+-    let base = fb.binary(BinOp::IAdd, b.host, aligned)?;
+-    let u32_ = fb.module().ty(SType::Int {
+-        width: 32,
+-        signed: false,
+-    })?;
+-    let low = fb.convert(ConvOp::UConvert, low, u32_)?;
+-    let (base, low, inb) = match b.bounds {
++    let split = psb::split(fb, b.host, at)?;
++    let (split, inb) = match b.bounds {
+         Some((size, sink)) => {
+             let inb = contain::in_bounds(fb, at, size, u64::from(leaf.bytes))?;
+-            let base = fb.select(inb, base, sink)?;
+-            let zero = k32(fb, 0)?;
+-            let low = fb.select(inb, low, zero)?;
+-            (base, low, Some(inb))
++            (split.contained(fb, inb, sink)?, Some(inb))
+         }
+-        None => (base, low, None),
++        None => (split, None),
+     };
+-    let mut mem = PsbMem::at(base).with(b.ops);
++    let low = split.low;
++    let mut mem = PsbMem::indexed(split.page, split.word).with(b.ops);
+     match stored {
+         None => {
+             let v = leaf::load(fb, &mut mem, leaf, low)?;
+diff --git a/crates/metal2vulkan/src/lower/access/psb.rs b/crates/metal2vulkan/src/lower/access/psb.rs
+index 4f1a590b1..ad77a6068 100644
+--- a/crates/metal2vulkan/src/lower/access/psb.rs
++++ b/crates/metal2vulkan/src/lower/access/psb.rs
+@@ -23,6 +23,18 @@
+ //!
+ //! The leaf itself (`memory::leaf`) sees a word memory based at the 4-aligned address below the
+ //! access, and the access's byte offset within that word (0 to 3).
++//!
++//! **Word places.** A word memory reaches its words from one 64-bit address and a 32-bit word
++//! index ([`PsbMem::indexed`]): the access's offset `o` (a `u64`) splits into its 4 GiB page,
++//! added to `host` once (`host + (o & !0xFFFF_FFFF)`, the high word's sum alone), and its low
++//! word `u32(o)`, whose word index `u32(o) >> 2` and the leaf's word numbers add in `u32` and never
++//! wrap. Each word is then the place `words[index + j]` of that one address: a driver takes the
++//! address as one base register and the index as an offset in the load itself, where a 64-bit
++//! device address of every word cost a 64-bit sum per word (a 32-bit add, a carry compare and a
++//! second add on a 32-bit GPU). Exact while an access's words lie in one 4 GiB page of the
++//! offset, which holds for every access inside a root of at most 4 GiB (Turnip allocates at most
++//! 4 GiB − 1): only an access across a page boundary of a larger root could see a driver's 32-bit
++//! offset of its last words wrap.
+ 
+ use crate::memory::leaf::{WordMem, WordOps};
+ use crate::spirv::builder::FunctionBuilder;
+@@ -127,40 +139,79 @@ pub fn prepare(
+     let bind = entry_field(fb, table, root, BIND_OFFSET)?;
+     let disp = displacement(fb, m, start)?;
+     let off = fb.binary(BinOp::IAdd, bind, disp)?;
+-    let three = k64(fb, 3)?;
+-    let low = fb.binary(BinOp::BitwiseAnd, off, three)?;
+-    let aligned = fb.binary(BinOp::ISub, off, low)?;
+-    let base = fb.binary(BinOp::IAdd, host, aligned)?;
+-    let u32_ = fb.module().ty(Type::Int {
+-        width: 32,
+-        signed: false,
+-    })?;
+-    let low = fb.convert(ConvOp::UConvert, low, u32_)?;
++    let split = split(fb, host, off)?;
+     if !contained {
+         return Ok(PsbAccess {
+-            mem: PsbMem::at(base),
+-            off: low,
++            mem: PsbMem::indexed(split.page, split.word),
++            off: split.low,
+             inb: None,
+         });
+     }
+     let inb = crate::memory::contain::in_bounds(fb, off, size, u64::from(n))?;
+     let sink = entry_field(fb, table, SINK_ROOT, HOST)?;
+-    let base = fb.select(inb, base, sink)?;
+-    let zero = fb.u32_const(0)?;
+-    let zero = fb.module().const_value(zero)?;
+-    let low = fb.select(inb, low, zero)?;
++    let split = split.contained(fb, inb, sink)?;
+     Ok(PsbAccess {
+-        mem: PsbMem::at(base),
+-        off: low,
++        mem: PsbMem::indexed(split.page, split.word),
++        off: split.low,
+         inb: Some(inb),
+     })
+ }
+ 
++/// A byte offset `o` (a `u64`) from a 4-aligned device address, as a word memory takes it (module
++/// doc, *Word places*).
++#[derive(Clone, Copy, Debug)]
++pub struct Split {
++    /// The address plus `o`'s 4 GiB page (a `u64`, 4-aligned).
++    pub page: Value,
++    /// The word index `u32(o) >> 2` (a `u32`).
++    pub word: Value,
++    /// The byte offset `u32(o) & 3` within that word (a `u32`).
++    pub low: Value,
++}
++
++/// Split offset `off` (a `u64`) from the 4-aligned device address `host` (a `u64`).
++pub fn split(fb: &mut FunctionBuilder<'_>, host: Value, off: Value) -> BResult<Split> {
++    let pages = k64(fb, !0xFFFF_FFFF)?;
++    let high = fb.binary(BinOp::BitwiseAnd, off, pages)?;
++    let page = fb.binary(BinOp::IAdd, host, high)?;
++    let u32_ = fb.module().ty(Type::Int {
++        width: 32,
++        signed: false,
++    })?;
++    let low = fb.convert(ConvOp::UConvert, off, u32_)?;
++    let two = k32(fb, 2)?;
++    let word = fb.binary(BinOp::ShiftRightLogical, low, two)?;
++    let three = k32(fb, 3)?;
++    let low = fb.binary(BinOp::BitwiseAnd, low, three)?;
++    Ok(Split { page, word, low })
++}
++
++impl Split {
++    /// The split of a contained access: `sink`'s word 0 unless `inb`.
++    pub fn contained(self, fb: &mut FunctionBuilder<'_>, inb: Value, sink: Value) -> BResult<Split> {
++        let zero = k32(fb, 0)?;
++        Ok(Split {
++            page: fb.select(inb, self.page, sink)?,
++            word: fb.select(inb, self.word, zero)?,
++            low: fb.select(inb, self.low, zero)?,
++        })
++    }
++}
++
++/// A `u32` constant.
++fn k32(fb: &mut FunctionBuilder<'_>, v: u32) -> BResult<Value> {
++    let c = fb.u32_const(v)?;
++    fb.module().const_value(c)
++}
++
+ /// Words at a 4-aligned device address (a `u64`), loaded and stored with memory operands (a
+ /// coherence and `Volatile`).
+ #[derive(Clone, Copy, Debug)]
+ pub struct PsbMem {
+     base: Value,
++    /// The memory's first word as a word index (a `u32`) from `base` (module doc, *Word places*);
++    /// `None` for word 0, each word then at a device address of its own.
++    index: Option<Value>,
+     ops: WordOps,
+ }
+ 
+@@ -169,6 +220,17 @@ impl PsbMem {
+     pub fn at(base: Value) -> PsbMem {
+         PsbMem {
+             base,
++            index: None,
++            ops: WordOps::default(),
++        }
++    }
++
++    /// The words from word `index` (a `u32`, below 2³⁰ less the words the accesses reach) of the
++    /// 4-aligned device address `base`, each a place of `base`'s word array.
++    pub fn indexed(base: Value, index: Value) -> PsbMem {
++        PsbMem {
++            base,
++            index: Some(index),
+             ops: WordOps::default(),
+         }
+     }
+@@ -184,7 +246,16 @@ impl PsbMem {
+             width: 32,
+             signed: false,
+         })?;
+-        self.typed_ptr(fb, word, u32_)
++        let Some(index) = self.index else {
++            return self.typed_ptr(fb, word, u32_);
++        };
++        let at = fb.binary(BinOp::IAdd, index, word)?;
++        let array = fb.module().ty(Type::RuntimeArray {
++            elem: u32_,
++            stride: Some(4),
++        })?;
++        let words = fb.device_place(self.base, array)?;
++        fb.access_chain(words, &[at])
+     }
+ 
+     /// A `PhysicalStorageBuffer` place of a `pointee` at word `word` (a `u32` index) of the
+@@ -203,6 +274,10 @@ impl PsbMem {
+     /// The device address (a `u64`) of word `word` (a `u32` index) of the memory.
+     pub fn word_address(&self, fb: &mut FunctionBuilder<'_>, word: Value) -> BResult<Value> {
+         let u64_ = u64_ty(fb)?;
++        let word = match self.index {
++            Some(index) => fb.binary(BinOp::IAdd, index, word)?,
++            None => word,
++        };
+         let w = fb.convert(ConvOp::UConvert, word, u64_)?;
+         let four = k64(fb, 4)?;
+         let d = fb.binary(BinOp::IMul, w, four)?;
