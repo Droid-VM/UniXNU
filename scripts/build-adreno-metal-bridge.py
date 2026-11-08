@@ -222,7 +222,19 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     # direction: 86 -> 16 instructions on the plain path. The face tests (every device reads Metal's face and texel, ties,
     # zero, huge, infinities and NaNs) pass unchanged. GFXBench's shaders: 28 fragment shaders sample cubes; on 5566 Car Chase
     # (car reflections) held 46.4 fps at a thermally capped 578 MHz where 0036 made 47.3 at 726 (~12.3 vs 14.6 Mcycles a frame).
-    '0037-plain-cube-directions-skip-the-tie-handling.patch']]
+    '0037-plain-cube-directions-skip-the-tie-handling.patch',
+    # An execution of render commands whose buffer an encoder made resident for writing reads its records at commit, as for
+    # records the CPU alone wrote, once every command buffer that could write them completed (IndirectCommandBuffer::
+    # settled_writes, a count of the GpuWrite holds ever taken) and none was taken since (RenderExecution::writes_unsettled); it
+    # is read as the host step reads such records (validated, faults counted) and its host step records it again where a writer
+    # was pending or appeared before its batch was ready. An execution that may run on the GPU alone (gpu_commands holds) keeps
+    # the old path. gpu_written was for good: WebKit's render bundles took a host step every frame (a GPU round trip, then ~280 ms
+    # of CPU recording on the scheduler's thread for 5000 commands) though their index clamp writes the records only until its
+    # validation is cached. icb_scale (lavapipe, 5000 commands): every frame writing records as before; only the first writing
+    # (WRITE_FRAMES=1), later frames record at commit with no host step; the texels the same in every mode. 5566, webgpu-samples'
+    # renderBundles (5000 bundled draws): 2.3 -> 2.6 fps, GPU busy 48 -> 63%; the recording moved from the scheduler's host step
+    # to WebKit's commit (its work queue thread 73% busy). The device-executing unit tests fail no test the base does not.
+    '0038-settled-gpu-writes-read-at-commit.patch']]
 
 
 def git_tree(*steps):

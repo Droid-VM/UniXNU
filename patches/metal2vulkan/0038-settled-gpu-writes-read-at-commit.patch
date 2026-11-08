@@ -1,0 +1,163 @@
+diff --git a/crates/metal2vulkan-runtime/src/indirect_command_buffer.rs b/crates/metal2vulkan-runtime/src/indirect_command_buffer.rs
+--- a/crates/metal2vulkan-runtime/src/indirect_command_buffer.rs
++++ b/crates/metal2vulkan-runtime/src/indirect_command_buffer.rs
+@@ -1321,6 +1321,8 @@ struct GpuWrites {
+     pending: u32,
+     /// The device's ID stamp (`ResourceIds::stamp`) as the last one completed.
+     end: u64,
++    /// Those ever taken ([`IndirectCommandBuffer::settled_writes`]).
++    begun: u64,
+ }
+ 
+ /// A command buffer's note of a buffer whose records its work may write on the GPU (made
+@@ -2421,7 +2423,11 @@ impl IndirectCommandBuffer {
+         if !self.0.keeping.swap(true, Ordering::AcqRel) {
+             self.device().shared().keepers.add(&self.0.kept);
+         }
+-        lock(&self.0.gpu_writes).pending += 1;
++        {
++            let mut writes = lock(&self.0.gpu_writes);
++            writes.pending += 1;
++            writes.begun += 1;
++        }
+         GpuWrite {
+             device: self.device().clone(),
+             writes: Arc::clone(&self.0.gpu_writes),
+@@ -2462,6 +2468,15 @@ impl IndirectCommandBuffer {
+         })
+     }
+ 
++    /// Where every command buffer that could write the buffer's records on the GPU completed
++    /// ([`GpuWrite`]), the count of them so far: none while one has not. An execution reads
++    /// records the GPU wrote as they stand then, no write of theirs left to land, and a count
++    /// that grew since names a command buffer that may write them later (`render/executions.rs`).
++    pub(super) fn settled_writes(&self) -> Option<u64> {
++        let writes = lock(&self.0.gpu_writes);
++        (writes.pending == 0).then_some(writes.begun)
++    }
++
+     /// The state that held pipeline state ID `named` as the GPU last could write the buffer's
+     /// records ([`window`](Self::window)), released since or not: the state a GPU write of the ID
+     /// resolved it to, as Metal's write resolves the ID as it runs and its record runs that state
+diff --git a/crates/metal2vulkan-runtime/src/render/executions.rs b/crates/metal2vulkan-runtime/src/render/executions.rs
+--- a/crates/metal2vulkan-runtime/src/render/executions.rs
++++ b/crates/metal2vulkan-runtime/src/render/executions.rs
+@@ -762,6 +762,7 @@ impl RenderLowering {
+                 .map_or(IndirectCommandCheckNeeds::ALL, |(_, needs)| *needs),
+             check: check.map(|(check, _)| Mutex::new(check)),
+             read_at: AtomicU64::new(indirect_execute::NOT_READ),
++            read_writes: AtomicU64::new(indirect_execute::NOT_READ),
+             encoder: self.core.command_buffer().state().open_encoder_place(),
+         });
+         // Its commands may name any pipeline state, reading handles in any stage.
+@@ -965,11 +966,22 @@ pub(crate) struct RenderExecution {
+     /// read them after (`IndirectCommandBuffer::cpu_writes`); `indirect_execute::NOT_READ` until
+     /// then ([`rewritten`](Self::rewritten)).
+     read_at: AtomicU64,
++    /// Where `commit` read records the GPU may have written, every command buffer that could
++    /// write them having completed (`IndirectCommandBuffer::settled_writes`), the count of those
++    /// command buffers it read them after; `indirect_execute::NOT_READ` until then, and
++    /// [`UNSETTLED`] where one had not completed as it read them
++    /// ([`writes_unsettled`](Self::writes_unsettled)).
++    read_writes: AtomicU64,
+     /// Its encoder's place among the command buffer's ended encoders, which names a draw of its
+     /// commands that its replay drops (`CommandBuffer::drop_late_draw`).
+     encoder: usize,
+ }
+ 
++/// [`RenderExecution::read_writes`] where a command buffer that could write the records had not
++/// completed as `commit` read them: no count of them equals it, so its host step records the
++/// execution again.
++const UNSETTLED: u64 = u64::MAX - 1;
++
+ /// The encoder's state an execution's draws take: as the call found it, its tables only where
+ /// the buffer inherits them, and the instance it was encoded in.
+ struct Snapshot {
+@@ -2509,6 +2521,29 @@ impl RenderExecution {
+         read_at != indirect_execute::NOT_READ && self.icb.cpu_writes() != read_at
+     }
+ 
++    /// Whether the GPU may write the records it runs after the CPU could read them: an encoder
++    /// made its buffer resident for writing (`IndirectCommandBuffer::gpu_written`, for good), and
++    /// a command buffer that could write them has not completed, or one was encoded since
++    /// `commit` read them ([`read_writes`](Self::read_writes)). Its host step then records it
++    /// once the work before it completed. Where none could, `commit` reads them as they stand,
++    /// as for records the CPU alone wrote, and so does a frame that runs a buffer a kernel
++    /// filled once (WebKit's render bundles: their index clamp writes the records until its
++    /// validation is cached). An execution that may run on the GPU alone (`gpu.rs`) answers the
++    /// flag alone: its form reads the records on the GPU, whatever wrote them.
++    fn writes_unsettled(&self) -> bool {
++        if !self.icb.gpu_written() {
++            return false;
++        }
++        if self.gpu_commands().is_ok() {
++            return true;
++        }
++        let Some(begun) = self.icb.settled_writes() else {
++            return true;
++        };
++        let read = self.read_writes.load(Ordering::Acquire);
++        read != indirect_execute::NOT_READ && read != begun
++    }
++
+     /// Whether its check may see something among its commands, as its buffer's records may hold
+     /// them now ([`check_sees`](Self::check_sees)).
+     fn check_sees_now(&self) -> bool {
+@@ -2526,7 +2561,7 @@ impl RenderExecution {
+         step: bool,
+     ) -> Result<(Vec<Option<Command>>, ReplayFaults), Error> {
+         let (range, faults) = self.range.commands(self.icb.size())?;
+-        if !step {
++        if !step && !self.icb.gpu_written() {
+             if self.range.indirect() {
+                 return Err(internal(
+                     "a range read from a buffer recorded before its host step",
+@@ -2550,6 +2585,19 @@ impl RenderExecution {
+                 ReplayFaults::default(),
+             ));
+         }
++        if !step {
++            if self.range.indirect() {
++                return Err(internal(
++                    "a range read from a buffer recorded before its host step",
++                ));
++            }
++            // Records the GPU may have written, read at `commit` once every command buffer that
++            // could write them completed (`writes_unsettled`), as the host step reads them: the
++            // count of those command buffers first, so one encoded meanwhile records it again.
++            let settled = self.icb.settled_writes().unwrap_or(UNSETTLED);
++            self.read_writes.store(settled, Ordering::Release);
++            self.read_at.store(self.icb.cpu_writes(), Ordering::Release);
++        }
+         let written = self.icb.written_records(range.clone())?;
+         // The caller's check sees each command the step will record, before it records any,
+         // where it may see something.
+@@ -2757,12 +2805,13 @@ impl DeferredPass {
+     }
+ 
+     /// Whether the GPU may write what an execution of the pass reads: its records, where an
+-    /// encoder made its buffer resident for writing (`IndirectCommandBuffer::gpu_written`, for
+-    /// good), or the range it reads from a buffer.
++    /// encoder made its buffer resident for writing and a command buffer that could write them
++    /// has not completed or was encoded since `commit` read them
++    /// (`RenderExecution::writes_unsettled`), or the range it reads from a buffer.
+     pub(crate) fn gpu_written(&self) -> bool {
+         self.executions
+             .iter()
+-            .any(|execution| execution.icb.gpu_written() || execution.range.indirect())
++            .any(|execution| execution.writes_unsettled() || execution.range.indirect())
+     }
+ 
+     /// Whether a pipeline one of its draws or tile dispatches records is still being made, or one
+diff --git a/crates/metal2vulkan-runtime/src/render/executions/gpu.rs b/crates/metal2vulkan-runtime/src/render/executions/gpu.rs
+--- a/crates/metal2vulkan-runtime/src/render/executions/gpu.rs
++++ b/crates/metal2vulkan-runtime/src/render/executions/gpu.rs
+@@ -360,7 +360,7 @@ impl RenderExecution {
+     /// What the buffer's records may hold, the primitive type and the range of an execution that
+     /// may take the GPU form, from the call and that alone (the module docs); else the first rule
+     /// that sends it to the host step.
+-    fn gpu_commands(&self) -> Result<(CommandWrites, PrimitiveType, Range<u32>), HostStepCause> {
++    pub(super) fn gpu_commands(&self) -> Result<(CommandWrites, PrimitiveType, Range<u32>), HostStepCause> {
+         let rule = |holds: bool, rule: &'static str| match holds {
+             true => Ok(()),
+             false => Err(HostStepCause::Rule(rule)),
