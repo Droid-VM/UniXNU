@@ -1,0 +1,1059 @@
+diff --git a/crates/metal2vulkan/src/bind/plan/slots/tests.rs b/crates/metal2vulkan/src/bind/plan/slots/tests.rs
+--- a/crates/metal2vulkan/src/bind/plan/slots/tests.rs
++++ b/crates/metal2vulkan/src/bind/plan/slots/tests.rs
+@@ -6,7 +6,7 @@ use crate::bind::state::{
+ };
+ use crate::device::profile::BufferAccess;
+ use crate::pipeline::facts::{Mechanism, UniformViewChoice};
+-use crate::pipeline::interface::{BufferKind, DescriptorView};
++use crate::pipeline::interface::{AccessSet, BufferKind, DescriptorView};
+ use crate::pipeline::sym::Stage;
+ use crate::spirv::testing::committed_profiles;
+ 
+@@ -222,17 +222,22 @@ fn used_resources_are_listed_when_the_pipeline_reaches_them() {
+         shape.used[&1].usage,
+         metal::ResourceUsage::READ | metal::ResourceUsage::WRITE
+     );
+-    let compute = |_| vk::PipelineStageFlags2::COMPUTE_SHADER;
+-    // The kernel may write memory.
+-    let all = vk::PipelineStageFlags2::COMPUTE_SHADER;
++    // A kernel reaches every used resource in its one stage, and may write memory.
++    let compute = |pointer, handle| ResidentReach {
++        pointer,
++        handle,
++        every: vk::PipelineStageFlags2::COMPUTE_SHADER,
++        writers: vk::PipelineStageFlags2::COMPUTE_SHADER,
++        ..ResidentReach::default()
++    };
+     let tokens = |uses: &[ResourceUse]| -> Vec<(UseTarget, AccessSet, AccessClass)> {
+         uses.iter()
+             .map(|u| (u.resource, u.access, u.class))
+             .collect()
+     };
+-    assert!(used_uses(&shape.used, false, false, compute, all).is_empty());
++    assert!(used_uses(&shape.used, &compute(false, false)).is_empty());
+     assert_eq!(
+-        tokens(&used_uses(&shape.used, true, false, compute, all)),
++        tokens(&used_uses(&shape.used, &compute(true, false))),
+         vec![
+             (
+                 UseTarget::Used(1),
+@@ -247,7 +252,7 @@ fn used_resources_are_listed_when_the_pipeline_reaches_them() {
+         ]
+     );
+     assert_eq!(
+-        tokens(&used_uses(&shape.used, false, true, compute, all)),
++        tokens(&used_uses(&shape.used, &compute(false, true))),
+         vec![
+             (
+                 UseTarget::Used(2),
+@@ -259,15 +264,16 @@ fn used_resources_are_listed_when_the_pipeline_reaches_them() {
+     );
+     // A render plan lists a resource only in the stages it is used in.
+     let vertex = vk::PipelineStageFlags2::VERTEX_SHADER;
+-    let vertex_only = |s: metal::RenderStages| {
+-        if s.contains(metal::RenderStages::VERTEX) {
+-            vk::PipelineStageFlags2::VERTEX_SHADER
+-        } else {
+-            vk::PipelineStageFlags2::empty()
+-        }
++    let empty = vk::PipelineStageFlags2::empty;
++    let vertex_only = ResidentReach {
++        pointer: true,
++        handle: true,
++        render: [vertex, empty(), empty(), empty()],
++        writers: vertex,
++        ..ResidentReach::default()
+     };
+     assert_eq!(
+-        tokens(&used_uses(&shape.used, true, true, vertex_only, vertex)),
++        tokens(&used_uses(&shape.used, &vertex_only)),
+         vec![(
+             UseTarget::Used(2),
+             AccessSet::READ_WRITE,
+@@ -293,18 +299,15 @@ fn used_resources_are_written_only_by_stages_that_write_memory() {
+     let shape = state.shape();
+     let vertex = vk::PipelineStageFlags2::VERTEX_SHADER;
+     let fragment = vk::PipelineStageFlags2::FRAGMENT_SHADER;
+-    let reach = |s: metal::RenderStages| {
+-        let mut f = vk::PipelineStageFlags2::empty();
+-        if s.contains(metal::RenderStages::VERTEX) {
+-            f |= vertex;
+-        }
+-        if s.contains(metal::RenderStages::FRAGMENT) {
+-            f |= fragment;
+-        }
+-        f
+-    };
++    let empty = vk::PipelineStageFlags2::empty;
+     let listed = |writers| -> Vec<(UseTarget, AccessSet, vk::PipelineStageFlags2)> {
+-        used_uses(&shape.used, true, false, reach, writers)
++        let reach = ResidentReach {
++            pointer: true,
++            render: [vertex, fragment, empty(), empty()],
++            writers,
++            ..ResidentReach::default()
++        };
++        used_uses(&shape.used, &reach)
+             .iter()
+             .map(|u| (u.resource, u.access, u.stages))
+             .collect()
+diff --git a/crates/metal2vulkan/src/cache/mod.rs b/crates/metal2vulkan/src/cache/mod.rs
+--- a/crates/metal2vulkan/src/cache/mod.rs
++++ b/crates/metal2vulkan/src/cache/mod.rs
+@@ -60,7 +60,7 @@ mod tests;
+ /// unchanged version, and its bless records the version. Independent of the crate's version and of
+ /// [`ARTIFACT_FORMAT_VERSION`]. The commit that bumps it says what changed; this comment keeps no
+ /// history.
+-pub const SEMANTICS_VERSION: u32 = 1922;
++pub const SEMANTICS_VERSION: u32 = 1923;
+ 
+ /// The byte-layout version of encoded artifacts (`CompiledFunction::to_bytes` and the
+ /// [`PipelineArtifact`] encodings). Every encoded artifact carries it, and a decode under another
+diff --git a/crates/metal2vulkan/src/lower/access/dynamic.rs b/crates/metal2vulkan/src/lower/access/dynamic.rs
+--- a/crates/metal2vulkan/src/lower/access/dynamic.rs
++++ b/crates/metal2vulkan/src/lower/access/dynamic.rs
+@@ -1,26 +1,32 @@
+ //! Dynamic buffer roots and stored pointers.
+ //!
+ //! **Wide pointers.** A buffer pointer whose root set meets the component of the dynamic root
+-//! (`memory::roots`) is the wide fat pointer `u64vec2(root, offset)`: `root` indexes the root
+-//! table (0 null or a resident-set miss, `2 + n` for `[[buffer(n)]]`, `R0 + k` for resident entry
+-//! `k`), and `offset` is the Metal displacement from the entry's `bind_offset` in wrapping 64-bit
+-//! arithmetic (exact, unlike a static pointer's `u32` offset). A parameter is `(2 + n, 0)`; a GEP
+-//! adds its 64-bit datalayout offset (`access::gep_offset_wide`, reading indices through the
+-//! index-extension rule, and extending each by its [`IndexForm`]); casts and `freeze` copy the pair
+-//! and `select` selects it.
++//! (`memory::roots`) is the wide fat pointer `u64vec4(root, at, host, size)`: `root` indexes the
++//! root table (0 null or a resident-set miss, `2 + n` for `[[buffer(n)]]`, `R0 + k` for resident
++//! entry `k`), `at` is the Metal displacement from the allocation's start (the entry's
++//! `bind_offset` plus the displacement from it) in wrapping 64-bit arithmetic (exact, unlike a
++//! static pointer's `u32` offset), and `host` and `size` are the entry's, read once where the
++//! pointer is formed, so no access reads the root table: a driver that cannot prove a store
++//! leaves the table alone would read it again after every store. A parameter is `(2 + n,
++//! bind_offset, host, size)` of its entry, read in the function's first block ([`emit_entry`]); a
++//! GEP adds its 64-bit datalayout offset to `at` (`access::gep_offset_wide`, reading indices
++//! through the index-extension rule, and extending each by its [`IndexForm`]); casts and `freeze`
++//! copy the vector and `select` selects it. The root table is read-only to the dispatch: the binder
++//! writes it before submission and no lowering stores to it, so a field read where the pointer is
++//! formed is the field an access would read.
+ //!
+ //! **Where dynamic roots come from.** A load of a device or constant pointer from memory reads
+ //! its 8-byte guest address (stored pointers are guest addresses): from a buffer through a static
+ //! or a wide pointer, or from a **pointer cell** in the threadgroup arena or an open one in the
+ //! private arena (an alloca holding a pointer is an arena object, never typed; a closed private
+ //! cell forwards its pointers instead, `access::cell`); and `inttoptr` takes one from an `i64`. The
+-//! resident-set search (`memory::roots::resolve`) turns the address into `(root, offset)`, a miss
+-//! into `(0, i)`.
++//! resident-set search (`memory::roots::resolve_wide`) turns the address into `(root, i − guest,
++//! host, size)` of the entry that holds it, a miss into `(0, i, 0, 0)` (the null root's fields).
+ //!
+ //! **Stored and converted pointers**. A buffer pointer stored as a value (into a buffer, a wide
+ //! pointer's allocation, or a pointer cell) is its guest address, an 8-byte leaf, and `ptrtoint` is
+-//! the same address truncated to the integer's width: `guest + bind_offset + offset` of its root
+-//! entry, 0 for the null constant. The memory plan puts every buffer root whose pointer escapes
++//! the same address truncated to the integer's width: `guest + at` of its root entry, 0 for the
++//! null constant. The memory plan puts every buffer root whose pointer escapes
+ //! this way in the dynamic component (`memory::plan`), so such a pointer is wide, its 64-bit offset
+ //! exact, and its slot's root entry written (a slot that is only stored has the window `Whole`:
+ //! pointers recovered from its address may reach any byte). Profile F has no root entries, so its
+@@ -28,11 +34,11 @@
+ //! displacement (`access::pointer`). A pointer into the constant blob has no guest address (the
+ //! blob is no resident allocation) and is refused.
+ //!
+-//! **Accesses** through a wide pointer read the root entry the pointer names at run time (no
+-//! switch: the root table is indexed by the root, so every candidate, static or resident, is one
+-//! code path): `a = bind_offset + offset`, and the leaf's words at `host + (a & ~3)`. Containment
++//! **Accesses** through a wide pointer compute from the fields it carries (no switch: every
++//! candidate, static or resident, is one code path): the leaf's words at `host + (at & ~3)`, and
++//! the sink's address, read once in the function's first block. Containment
+ //! is always on unless the profile has `Containment::UnsafeOff` (robustness does not cover device
+-//! addresses): the normative check `size ≥ n ∧ a ≤ size − n` in `u64`, the access at `select(inb,
++//! addresses): the normative check `size ≥ n ∧ at ≤ size − n` in `u64`, the access at `select(inb,
+ //! address, sink)`, and a load's value `select(inb, v, 0)`; an out-of-bounds store lands in the
+ //! write-only sink. Under `GuestIsolation::On` an access through root 0 (a null pointer or a
+ //! resident-set miss) is counted: word 4 of the `ExecutionStatus` buffer
+@@ -42,11 +48,11 @@
+ //! becomes `BufferForm::Psb` (`access::finish_slots`), so the binder writes its root entry.
+ //!
+ //! **Compares.** `icmp` of wide pointers, or of a wide pointer and the null constant, compares
+-//! their Metal addresses: `guest + bind_offset + offset` of each pointer's root entry, the null
+-//! root's fields being 0 (so a miss `(0, i)` is address `i`, and null is 0). A compare of a wide
++//! their Metal addresses: `guest + at` of each pointer's root entry, the null root's fields being
++//! 0 (so a miss `(0, i, 0, 0)` is address `i`, and null is 0). A compare of a wide
+ //! pointer with a static one is `access::pointer`'s.
+ //!
+-//! **Null constants** (`null`, `undef`, `poison`) are the null root: `(0, 0)` as a `select` side
++//! **Null constants** (`null`, `undef`, `poison`) are the null root: `(0, 0, 0, 0)` as a `select` side
+ //! or a phi's incoming value.
+ //!
+ //! **Coherent accesses** (`air.{load,store}.{device,system}_coherent`) through a wide pointer are
+@@ -227,7 +233,7 @@ pub enum DynStrategy {
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub enum Side {
+     Ptr(ValueId),
+-    /// The null pointer constant (Metal address 0; the wide pointer `(0, 0)`).
++    /// The null pointer constant (Metal address 0; the wide pointer `(0, 0, 0, 0)`).
+     Null,
+ }
+ 
+@@ -239,12 +245,13 @@ pub enum Side {
+ pub const SEARCH_WORDS: u32 = 44 * (roots::SEARCH_STEPS + 1) + 216 + 96;
+ /// SPIR-V words of one use of the search: the root table's address and the call.
+ const CALL_WORDS: u32 = 24;
+-/// SPIR-V words of one wide access before its leaf: three entry reads, the check, the sink
++/// SPIR-V words of one wide access before its leaf: the pointer's fields, the check, the sink
+ /// selects, and the miss counter.
+ const ACCESS_WORDS: u32 = 320;
+-/// SPIR-V words of one wide pointer's Metal address: two entry reads and two additions.
++/// SPIR-V words of one wide pointer's Metal address: an entry read and an addition.
+ const ADDRESS_WORDS: u32 = 72;
+-/// SPIR-V words of one [`WideBase`]: four entry reads, the sink's address, and the miss counter.
++/// SPIR-V words of one [`WideBase`]: the pointer's fields, the sink's address, and the miss
++/// counter.
+ pub const BASE_WORDS: u32 = 256;
+ 
+ impl WideAccess {
+@@ -444,13 +451,13 @@ pub fn lowered_pointer(cx: &SelectCx<'_>, v: Value) -> Result<Option<DemoteTy>,
+     Ok(Some(DemoteTy::FatPtr { wide: true }))
+ }
+ 
+-/// The SPIR-V type of a wide pointer: `u64vec2(root, offset)`.
++/// The SPIR-V type of a wide pointer: `u64vec4(root, at, host, size)`.
+ pub fn wide_type(mb: &mut crate::spirv::builder::ModuleBuilder) -> BResult<TypeId> {
+     let u = mb.ty(SType::Int {
+         width: 64,
+         signed: false,
+     })?;
+-    mb.ty(SType::Vector { elem: u, len: 2 })
++    mb.ty(SType::Vector { elem: u, len: 4 })
+ }
+ 
+ /// Whether buffer parameter `b`'s value is a wide pointer.
+@@ -465,7 +472,9 @@ pub fn select_param(cx: &mut SelectCx<'_>, b: &ParamBinding) -> Result<(), Error
+     Ok(())
+ }
+ 
+-/// The value of a wide buffer parameter, `(2 + n, 0)`, or `None` when `b` is not one.
++/// The value of a wide buffer parameter, `[2 + n, bind_offset, host, size]` of its root entry
++/// (read where the value is first needed: [`emit_entry`] holds it from the function's first
++/// block), or `None` when `b` is not one.
+ pub fn param_value(
+     cx: &mut EmitCx<'_>,
+     fb: &mut FunctionBuilder<'_>,
+@@ -482,9 +491,45 @@ pub fn param_value(
+         _ => return Err(cx.fail(format!("parameter {} is no buffer", b.param))),
+     };
+     let root = k64(fb, u64::from(slot_root(index)))?;
+-    let zero = k64(fb, 0)?;
+-    let ty = wide_type(fb.module())?;
+-    Ok(Some(fb.composite_construct(ty, &[root, zero])?))
++    let table = cx.push_field(fb, PushField::RootTableAddress)?;
++    let at = roots::entry_field(fb, table, root, roots::BIND_OFFSET)?;
++    let host = roots::entry_field(fb, table, root, roots::HOST)?;
++    let size = roots::entry_field(fb, table, root, roots::SIZE)?;
++    Ok(Some(fat(fb, [root, at, host, size])?))
++}
++
++/// The work before the body (the entry hook): in the function's first block, which dominates
++/// every block, read the sink's address and each wide buffer parameter's root entry once, so no
++/// access reads the root table again. The table is read-only to the dispatch: the binder writes
++/// it before submission and no lowering stores to it.
++pub fn emit_entry(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>) -> BResult<()> {
++    let dynamic = &cx.plan.families.access.dynamic;
++    if !dynamic.used {
++        return Ok(());
++    }
++    let params: Vec<u32> = dynamic.params.iter().copied().collect();
++    if cx.plan.families.access.psb_contained {
++        cx.sink_host(fb)?;
++    }
++    for p in params {
++        let Some(v) = cx
++            .plan
++            .values
++            .id(crate::air::ir::Value::Arg(crate::air::ir::ArgIdx::new(p)))
++        else {
++            continue;
++        };
++        let x = cx.operand(fb, v)?;
++        cx.hold(v, x);
++    }
++    Ok(())
++}
++
++/// The sink's address (`host` of the sink's root entry), read in the open block.
++pub(crate) fn read_sink_host(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>) -> BResult<SValue> {
++    let table = cx.push_field(fb, PushField::RootTableAddress)?;
++    let sink = k64(fb, roots::SINK_ROOT)?;
++    roots::entry_field(fb, table, sink, roots::HOST)
+ }
+ 
+ /// The 8-byte leaf of a stored pointer (its guest address, a `u64`).
+@@ -945,9 +990,20 @@ fn index_u64(fb: &mut FunctionBuilder<'_>, x: SValue, form: IndexForm) -> BResul
+     }
+ }
+ 
+-fn pair(fb: &mut FunctionBuilder<'_>, root: SValue, off: SValue) -> BResult<SValue> {
++/// The wide pointer `[root, at, host, size]`.
++fn fat(fb: &mut FunctionBuilder<'_>, parts: [SValue; 4]) -> BResult<SValue> {
+     let ty = wide_type(fb.module())?;
+-    fb.composite_construct(ty, &[root, off])
++    fb.composite_construct(ty, &parts)
++}
++
++/// The fields of wide pointer value `p`: `[root, at, host, size]`.
++fn fields(fb: &mut FunctionBuilder<'_>, p: SValue) -> BResult<[SValue; 4]> {
++    Ok([
++        fb.composite_extract(p, &[0])?,
++        fb.composite_extract(p, &[1])?,
++        fb.composite_extract(p, &[2])?,
++        fb.composite_extract(p, &[3])?,
++    ])
+ }
+ 
+ /// Count an access through root 0 when `live` holds (always without it): `ResidentMisses += 1`,
+@@ -1005,21 +1061,21 @@ pub(super) fn wide_access(
+     wide_at(fb, b, None, &a.leaf, stored)
+ }
+ 
+-/// A wide pointer's allocation resolved in the open block: its root entry's fields and the
+-/// containment bounds, so the leaf accesses at displacements from it (a memory intrinsic's
+-/// units) read no entry again.
++/// A wide pointer's allocation in the open block: the root entry's fields the pointer carries and
++/// the containment bounds, for the leaf accesses at displacements from it (a memory intrinsic's
++/// units).
+ #[derive(Clone, Copy, Debug)]
+ pub struct WideBase {
+     /// The entry's `host` (a `u64`).
+     host: SValue,
+-    /// `bind_offset + offset` (a `u64`).
++    /// The pointer's `at` (a `u64`).
+     at: SValue,
+     /// The entry's `size` and the sink's address, under containment.
+     bounds: Option<(SValue, SValue)>,
+     ops: WordOps,
+ }
+ 
+-/// Resolve wide pointer value `p` (a `u64vec2`) for the accesses of `a`: with its coherence (a
++/// Resolve wide pointer value `p` (a `u64vec4`) for the accesses of `a`: with its coherence (a
+ /// `*_coherent` access's, or the function's own) and volatility. Under isolation an access
+ /// through root 0 is counted here, once, when `live` holds (always without it).
+ pub(super) fn wide_base(
+@@ -1040,19 +1096,12 @@ fn base_with(
+     ops: (Option<Coherence>, bool),
+     live: Option<SValue>,
+ ) -> BResult<WideBase> {
+-    let root = fb.composite_extract(p, &[0])?;
+-    let off = fb.composite_extract(p, &[1])?;
++    let [root, at, host, size] = fields(fb, p)?;
+     if cx.plan.families.access.dynamic.misses {
+         count_miss(cx, fb, root, live)?;
+     }
+-    let table = cx.push_field(fb, PushField::RootTableAddress)?;
+-    let host = roots::entry_field(fb, table, root, roots::HOST)?;
+-    let bind = roots::entry_field(fb, table, root, roots::BIND_OFFSET)?;
+-    let at = fb.binary(BinOp::IAdd, bind, off)?;
+     let bounds = if cx.plan.families.access.psb_contained {
+-        let size = roots::entry_field(fb, table, root, roots::SIZE)?;
+-        let sink = k64(fb, roots::SINK_ROOT)?;
+-        Some((size, roots::entry_field(fb, table, sink, roots::HOST)?))
++        Some((size, cx.sink_host(fb)?))
+     } else {
+         None
+     };
+@@ -1136,7 +1185,7 @@ pub(super) struct AtomicAddress {
+ }
+ 
+ /// Where an atomic of `n` bytes (1, 2, 4, or 8) through wide pointer `ptr` operates: `host +
+-/// ((bind_offset + offset) & ~(w - 1))` of the pointer's root entry for the word size `w =
++/// (at & ~(w - 1))` of the pointer's fields for the word size `w =
+ /// max(n, 4)`, naturally aligned as Metal atomic objects are, and out of bounds the sink's
+ /// address (the in-bounds test is on the `n` bytes, whose containing word the padded size also
+ /// covers). An access through root 0 is counted first under isolation, as a leaf access's is.
+@@ -1147,15 +1196,10 @@ pub(super) fn atomic_address(
+     n: u32,
+ ) -> BResult<AtomicAddress> {
+     let p = cx.operand(fb, ptr)?;
+-    let root = fb.composite_extract(p, &[0])?;
+-    let off = fb.composite_extract(p, &[1])?;
++    let [root, at, host, size] = fields(fb, p)?;
+     if cx.plan.families.access.dynamic.misses {
+         count_miss(cx, fb, root, None)?;
+     }
+-    let table = cx.push_field(fb, PushField::RootTableAddress)?;
+-    let host = roots::entry_field(fb, table, root, roots::HOST)?;
+-    let bind = roots::entry_field(fb, table, root, roots::BIND_OFFSET)?;
+-    let at = fb.binary(BinOp::IAdd, bind, off)?;
+     let word = u64::from(n.max(4));
+     let mask = k64(fb, !(word - 1))?;
+     let aligned = fb.binary(BinOp::BitwiseAnd, at, mask)?;
+@@ -1178,10 +1222,8 @@ pub(super) fn atomic_address(
+             inb: None,
+         });
+     }
+-    let size = roots::entry_field(fb, table, root, roots::SIZE)?;
+     let inb = contain::in_bounds(fb, at, size, u64::from(n))?;
+-    let sink = k64(fb, roots::SINK_ROOT)?;
+-    let sink = roots::entry_field(fb, table, sink, roots::HOST)?;
++    let sink = cx.sink_host(fb)?;
+     let addr = fb.select(inb, addr, sink)?;
+     Ok(AtomicAddress {
+         addr,
+@@ -1221,13 +1263,13 @@ fn truncated(fb: &mut FunctionBuilder<'_>, a: SValue, bits: u8) -> BResult<SValu
+     }
+ }
+ 
+-/// The wide pointer of `side`: the operand, or `(0, 0)` for the null constant.
++/// The wide pointer of `side`: the operand, or `(0, 0, 0, 0)` for the null constant.
+ fn wide_side(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>, side: Side) -> BResult<SValue> {
+     match side {
+         Side::Ptr(p) => cx.operand(fb, p),
+         Side::Null => {
+             let zero = k64(fb, 0)?;
+-            pair(fb, zero, zero)
++            fat(fb, [zero; 4])
+         }
+     }
+ }
+@@ -1241,20 +1283,18 @@ fn metal_address(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>, side: Side)
+     guest_address(cx, fb, p)
+ }
+ 
+-/// The Metal (guest) address of wide pointer value `p` (a `u64vec2`): `guest + bind_offset +
+-/// offset` of its root entry (the null root's fields are 0, so a miss `(0, i)` is `i`).
++/// The Metal (guest) address of wide pointer value `p` (a `u64vec4`): `guest + at` of its root
++/// entry (the null root's fields are 0, so a miss `[0, i, 0, 0]` is `i`).
+ pub(super) fn guest_address(
+     cx: &mut EmitCx<'_>,
+     fb: &mut FunctionBuilder<'_>,
+     p: SValue,
+ ) -> BResult<SValue> {
+     let root = fb.composite_extract(p, &[0])?;
+-    let off = fb.composite_extract(p, &[1])?;
++    let at = fb.composite_extract(p, &[1])?;
+     let table = cx.push_field(fb, PushField::RootTableAddress)?;
+     let guest = roots::entry_field(fb, table, root, roots::GUEST)?;
+-    let bind = roots::entry_field(fb, table, root, roots::BIND_OFFSET)?;
+-    let base = fb.binary(BinOp::IAdd, guest, bind)?;
+-    fb.binary(BinOp::IAdd, base, off)
++    fb.binary(BinOp::IAdd, guest, at)
+ }
+ 
+ /// The Metal (guest) address of static-root fat pointer `fat` whose candidates are `targets`: for
+@@ -1326,8 +1366,8 @@ fn resolve(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>, guest: SValue) ->
+             .call(search, &[table, guest])?
+             .ok_or_else(|| cx.fail("a resident-set search without a result")),
+         None => {
+-            let (root, off) = roots::resolve(fb, table, guest)?;
+-            pair(fb, root, off)
++            let r = roots::resolve_wide(fb, table, guest)?;
++            fat(fb, r)
+         }
+     }
+ }
+@@ -1357,8 +1397,7 @@ pub fn emit(
+     let r = match s {
+         DynStrategy::Gep { base, konst, terms } => {
+             let p = cx.operand(fb, *base)?;
+-            let root = fb.composite_extract(p, &[0])?;
+-            let mut off = fb.composite_extract(p, &[1])?;
++            let [root, mut off, host, size] = fields(fb, p)?;
+             if *konst != 0 {
+                 let c = k64(fb, *konst)?;
+                 off = fb.binary(BinOp::IAdd, off, c)?;
+@@ -1372,7 +1411,7 @@ pub fn emit(
+                 }
+                 off = fb.binary(BinOp::IAdd, off, x)?;
+             }
+-            pair(fb, root, off)?
++            fat(fb, [root, off, host, size])?
+         }
+         DynStrategy::Copy { of } => cx.operand(fb, *of)?,
+         DynStrategy::Select { c, t, f } => {
+@@ -1533,13 +1572,14 @@ pub(super) fn search_start(
+     guest: SValue,
+ ) -> BResult<SValue> {
+     let p = resolve(cx, fb, guest)?;
+-    let root = fb.composite_extract(p, &[0])?;
+-    let off = fb.composite_extract(p, &[1])?;
++    let [root, off, host, size] = fields(fb, p)?;
+     let zero = k64(fb, 0)?;
+     let at_start = fb.binary(BinOp::IEqual, off, zero)?;
+     let root = fb.select(at_start, root, zero)?;
+     let off = fb.select(at_start, off, guest)?;
+-    pair(fb, root, off)
++    let host = fb.select(at_start, host, zero)?;
++    let size = fb.select(at_start, size, zero)?;
++    fat(fb, [root, off, host, size])
+ }
+ 
+ /// The allocation of wide pointer `p` resolved for plain accesses in the function's coherence,
+diff --git a/crates/metal2vulkan/src/lower/access/pointer.rs b/crates/metal2vulkan/src/lower/access/pointer.rs
+--- a/crates/metal2vulkan/src/lower/access/pointer.rs
++++ b/crates/metal2vulkan/src/lower/access/pointer.rs
+@@ -554,23 +554,24 @@ pub fn select(
+ /// The null pointer in representation `ty` (a narrow or wide fat pointer), or `None` for
+ /// another representation.
+ pub fn null_value(fb: &mut FunctionBuilder<'_>, ty: &DemoteTy) -> BResult<Option<SValue>> {
+-    let width = match ty {
+-        DemoteTy::FatPtr { wide: false } => 32,
+-        DemoteTy::FatPtr { wide: true } => 64,
++    // A narrow fat pointer `(root, offset)`; a wide one `(root, at, host, size)`.
++    let (width, len) = match ty {
++        DemoteTy::FatPtr { wide: false } => (32, 2),
++        DemoteTy::FatPtr { wide: true } => (64, 4),
+         _ => return Ok(None),
+     };
+     let elem = fb.module().ty(SType::Int {
+         width,
+         signed: false,
+     })?;
+-    let v2 = fb.module().ty(SType::Vector { elem, len: 2 })?;
++    let vec = fb.module().ty(SType::Vector { elem, len })?;
+     let zero = fb.module().constant(Constant::Scalar {
+         ty: elem,
+         bits: ConstBits(0),
+     })?;
+     let c = fb.module().constant(Constant::Composite {
+-        ty: v2,
+-        parts: [zero, zero].into(),
++        ty: vec,
++        parts: vec![zero; len as usize].into(),
+     })?;
+     Ok(Some(fb.module().const_value(c)?))
+ }
+diff --git a/crates/metal2vulkan/src/lower/access/psb.rs b/crates/metal2vulkan/src/lower/access/psb.rs
+--- a/crates/metal2vulkan/src/lower/access/psb.rs
++++ b/crates/metal2vulkan/src/lower/access/psb.rs
+@@ -74,7 +74,7 @@ fn entry_field(
+     )?;
+     let addr = fb.binary(BinOp::IAdd, table, at)?;
+     let u64_ = u64_ty(fb)?;
+-    let p = fb.device_place(addr, u64_)?;
++    let p = fb.device_place_read_only(addr, u64_)?;
+     fb.load(
+         p,
+         MemAccess {
+diff --git a/crates/metal2vulkan/src/lower/access/table.rs b/crates/metal2vulkan/src/lower/access/table.rs
+--- a/crates/metal2vulkan/src/lower/access/table.rs
++++ b/crates/metal2vulkan/src/lower/access/table.rs
+@@ -101,6 +101,7 @@ pub fn declare(mb: &mut ModuleBuilder, placement: &PushPlacement) -> BResult<Opt
+             rule: LayoutRule::Std140,
+             block: true,
+             members: layout.into(),
++            non_writable: false,
+         }),
+     })?;
+     let global = mb.resource(symbol(placement.stage), StorageClass::Uniform, block)?;
+diff --git a/crates/metal2vulkan/src/lower/emit.rs b/crates/metal2vulkan/src/lower/emit.rs
+--- a/crates/metal2vulkan/src/lower/emit.rs
++++ b/crates/metal2vulkan/src/lower/emit.rs
+@@ -229,6 +229,9 @@ enum Invariant {
+     /// The private list form's base vertex (`stage_io::read_listed_base`), read at entry
+     /// (`stage_io::emit_entry`): the list is read-only to the draw.
+     ListedBase,
++    /// The root table's sink address (`access::dynamic::read_sink_host`), read at entry
++    /// (`access::dynamic::emit_entry`): the root table is read-only to the dispatch.
++    SinkHost,
+ }
+ 
+ impl<'a> EmitCx<'a> {
+@@ -390,6 +393,17 @@ impl<'a> EmitCx<'a> {
+         Ok(v)
+     }
+ 
++    /// The root table's sink address, read once where it dominates: `access::dynamic::emit_entry`
++    /// reads it in the function's first block, so no wide access reads the table for it.
++    pub(crate) fn sink_host(&mut self, fb: &mut FunctionBuilder<'_>) -> BResult<SValue> {
++        if let Some(v) = self.recall(fb, Invariant::SinkHost) {
++            return Ok(v);
++        }
++        let v = access::dynamic::read_sink_host(self, fb)?;
++        self.remember(fb, Invariant::SinkHost, v);
++        Ok(v)
++    }
++
+     /// The work before the body: load each push field the plan places once, in the function's first
+     /// block, where it dominates every block. Where the body first reads a field never moves its
+     /// load, so a read that canonicalization deletes cannot make the others load it again; a placed
+@@ -1311,6 +1325,7 @@ pub fn emit_module(e: &Entry, plan: &Plan, m: &mut Meter) -> Result<Emitted, Err
+                 // The bound values the function reads as data, right after their fields.
+                 .and_then(|()| crate::lower::specialized::emit_entry(&mut em.cx, &mut fb))
+                 .and_then(|()| dispatch::emit_entry(&mut em.cx, &mut fb))
++                .and_then(|()| access::dynamic::emit_entry(&mut em.cx, &mut fb))
+                 .and_then(|()| stage_io::emit_entry(&mut em.cx, &mut fb))
+                 .and_then(|()| tessellation::emit_entry(&mut em.cx, &mut fb))
+                 .and_then(|()| fragment::emit_entry(&mut em.cx, &mut fb))
+diff --git a/crates/metal2vulkan/src/memory/roots.rs b/crates/metal2vulkan/src/memory/roots.rs
+--- a/crates/metal2vulkan/src/memory/roots.rs
++++ b/crates/metal2vulkan/src/memory/roots.rs
+@@ -1,8 +1,9 @@
+ //! Dynamic roots: the root table, the resident-set search, and which roots are wide.
+ //!
+ //! **Wide roots.** A buffer pointer whose root set contains `Dynamic` (a pointer loaded from
+-//! memory or made from an integer) is a *wide* fat pointer `(root: u64, offset: u64)`, the
+-//! offset being the 64-bit Metal displacement from the entry's `bind_offset`. Every value of a
++//! memory or made from an integer) is a *wide* fat pointer `(root, at, host, size: u64)`, `at`
++//! being the 64-bit Metal displacement from the allocation's start and `host` and `size` its root
++//! entry's (`lower::access::dynamic`). Every value of a
+ //! phi, `select`, GEP, or cast has an operand whose root set shares a root with its own, so the
+ //! width is decided per **component**: two roots are connected when some buffer pointer's root
+ //! set holds both, and every root of a component that holds `Dynamic` is wide
+@@ -24,22 +25,28 @@
+ //! [`RESIDENT_COUNT`]); `N` is any count (At most 2¹⁶ before, a larger set
+ //! `BindError::ResidentSetTooLarge`). `R0` counts entries from the table's address modulo 2⁶⁴, so
+ //! the set may lie apart from the table, below it too (a consumer's set shared by many tables,
+-//! `RootTable::resident_fields`).
++//! `RootTable::resident_fields`). Every read of the table, the set and its extents is through a
++//! `NonWritable` place (`FunctionBuilder::device_place_read_only`): the binder writes them, and a
++//! module that writes a root table (a replay preprocess's slot tables) writes another table than
++//! the ones it reads. A driver then merges an access's entry reads with the next access's through
++//! the same root and moves them out of a loop the root does not change in; without the decoration
++//! a fragment shader's loop over a light array read the entry four times per light.
+ //!
+ //! **The search** ([`resolve`]) turns a guest address `i` into a wide pointer: a branch-free
+ //! binary search of [`SEARCH_STEPS`] unrolled steps for the last resident entry whose `guest ≤ i`,
+ //! then a loop of the same step while more than one candidate is left, which only a set of more
+ //! than 2^[`SEARCH_STEPS`] entries enters (one uniform test where every invocation searches one
+ //! table, no further load), then `i − guest ≤ size` (a one-past-the-end pointer stays in its
+-//! allocation). A hit is `(root, i − guest)`; a miss, or an empty set, is `(0, i)`. A module with
++//! allocation). A hit is `(root, i − guest)`, with the entry's `host` and `size` for a wide pointer
++//! ([`resolve_wide`]); a miss, or an empty set, is `(0, i)` (`(0, i, 0, 0)`). A module with
+ //! more than one search defines it once ([`define_resolve`]), as it does the handle-table search,
+ //! and every search is a call of it; a single search is emitted in place. It reads the set as an
+ //! array of typed entries from its first, `table + 32·R0` in 64-bit wrapping arithmetic, one access
+ //! chain per field at an index in `0 .. N`, inside the set whatever `R0` is: an index below an
+ //! array's start is outside it, where SPIR-V gives no address, so a set below the table is reached
+ //! by the integer arithmetic alone. With `N = 0` it reads the table's entry 0. The root it gives is
+-//! `R0` plus the index, modulo 2⁶⁴, which the access reads at `table + 32·root` as every root entry
+-//! is read ([`entry_field`]).
++//! `R0` plus the index, modulo 2⁶⁴, whose entry is at `table + 32·root` as every root entry is
++//! ([`entry_field`]): the entry the search read the wide pointer's `host` and `size` from.
+ 
+ use std::collections::{BTreeMap, BTreeSet};
+ 
+@@ -190,7 +197,7 @@ pub fn entry_field(
+     };
+     let addr = fb.binary(BinOp::IAdd, table, at)?;
+     let u64_ = u64_ty(fb)?;
+-    let p = fb.device_place(addr, u64_)?;
++    let p = fb.device_place_read_only(addr, u64_)?;
+     fb.load(
+         p,
+         MemAccess {
+@@ -249,7 +256,7 @@ pub fn extent_of(
+     let rel = fb.binary(BinOp::IMul, index, eight)?;
+     let addr = fb.binary(BinOp::IAdd, view.extents, rel)?;
+     let u64_ = u64_ty(fb)?;
+-    let p = fb.device_place(addr, u64_)?;
++    let p = fb.device_place_read_only(addr, u64_)?;
+     fb.load(
+         p,
+         MemAccess {
+@@ -260,8 +267,9 @@ pub fn extent_of(
+ }
+ 
+ /// Define the module's resident-set search: a function `fn(table: u64, guest: u64) -> wide`
+-/// (`wide` a `u64vec2`), the wide pointer `(root, offset)` of `guest` through the root table at
+-/// `table` ([`resolve`]). Every search of the module calls it, so its words are paid once.
++/// (`wide` a `u64vec4`), the wide pointer `(root, at, host, size)` of `guest` through the root
++/// table at `table` ([`resolve_wide`]). Every search of the module calls it, so its words are paid
++/// once.
+ pub fn define_resolve(mb: &mut ModuleBuilder, wide: TypeId) -> BResult<FuncId> {
+     let u64_ = mb.ty(Type::Int {
+         width: 64,
+@@ -270,9 +278,9 @@ pub fn define_resolve(mb: &mut ModuleBuilder, wide: TypeId) -> BResult<FuncId> {
+     let mut fb = mb.function(wide)?;
+     let table = fb.param(u64_)?;
+     let guest = fb.param(u64_)?;
+-    let (root, off) = resolve(&mut fb, table, guest)?;
+-    let pair = fb.composite_construct(wide, &[root, off])?;
+-    fb.ret(Some(pair))?;
++    let r = resolve_wide(&mut fb, table, guest)?;
++    let fat = fb.composite_construct(wide, &r)?;
++    fb.ret(Some(fat))?;
+     fb.finish()
+ }
+ 
+@@ -289,7 +297,7 @@ fn entries(fb: &mut FunctionBuilder<'_>, table: Value) -> BResult<Value> {
+         elem: entry,
+         stride: Some(ENTRY_BYTES as u32),
+     })?;
+-    fb.device_place(table, array)
++    fb.device_place_read_only(table, array)
+ }
+ 
+ /// The `u64` field at byte `field` of entry `root` (a `u64`) of [`entries`] `e`.
+@@ -306,6 +314,23 @@ fn field_of(fb: &mut FunctionBuilder<'_>, e: Value, root: Value, field: u64) ->
+     )
+ }
+ 
++/// The wide pointer `[root, at, host, size]` (four `u64`s) of guest address `guest` (a `u64`)
++/// through the resident set of the root table at `table` ([`resolve`]): a hit's `at` is `i −
++/// guest` (a resident entry's `bind_offset` is 0) and `host` and `size` its entry's, read here
++/// once; a miss is `[0, i, 0, 0]`, the null root's fields.
++pub fn resolve_wide(
++    fb: &mut FunctionBuilder<'_>,
++    table: Value,
++    guest: Value,
++) -> BResult<[Value; 4]> {
++    let s = search(fb, table, guest)?;
++    let zero = k64(fb, 0)?;
++    let host = field_of(fb, s.set, s.base, HOST)?;
++    let host = fb.select(s.hit, host, zero)?;
++    let size = fb.select(s.hit, s.size, zero)?;
++    Ok([s.root, s.off, host, size])
++}
++
+ /// The wide pointer `(root, offset)` (two `u64`s) of guest address `guest` (a `u64`) through the
+ /// resident set of the root table at `table` (the module docs' search). The search walks the
+ /// set's entries from its first, `R0` entries from the table; an empty set starts at the null
+@@ -316,6 +341,26 @@ pub fn resolve(
+     table: Value,
+     guest: Value,
+ ) -> BResult<(Value, Value)> {
++    let s = search(fb, table, guest)?;
++    Ok((s.root, s.off))
++}
++
++/// A finished search ([`search`]).
++struct Found {
++    /// The set's entries, from its first.
++    set: Value,
++    /// The last candidate's index in the set.
++    base: Value,
++    /// Its entry's `size`.
++    size: Value,
++    /// Whether it holds the address.
++    hit: Value,
++    root: Value,
++    off: Value,
++}
++
++/// The search of [`resolve`].
++fn search(fb: &mut FunctionBuilder<'_>, table: Value, guest: Value) -> BResult<Found> {
+     let e = entries(fb, table)?;
+     let sink = k64(fb, SINK_ROOT)?;
+     let first = field_of(fb, e, sink, RESIDENT_FIRST)?;
+@@ -343,7 +388,14 @@ pub fn resolve(
+     let found = fb.binary(BinOp::IAdd, start, base)?;
+     let root = fb.select(hit, found, null)?;
+     let off = fb.select(hit, rel, guest)?;
+-    Ok((root, off))
++    Ok(Found {
++        set,
++        base,
++        size,
++        hit,
++        root,
++        off,
++    })
+ }
+ 
+ /// One step of the search: of the `len` candidates from `base` of the set `set`, the half from
+diff --git a/crates/metal2vulkan/src/spirv/builder/module.rs b/crates/metal2vulkan/src/spirv/builder/module.rs
+--- a/crates/metal2vulkan/src/spirv/builder/module.rs
++++ b/crates/metal2vulkan/src/spirv/builder/module.rs
+@@ -705,6 +705,7 @@ impl ModuleBuilder {
+                 rule,
+                 block: true,
+                 members: offsets.clone(),
++                non_writable: false,
+             }),
+         };
+         let ty = match self.ty(block(LayoutRule::Std430)) {
+diff --git a/crates/metal2vulkan/src/spirv/builder/ops/memory.rs b/crates/metal2vulkan/src/spirv/builder/ops/memory.rs
+--- a/crates/metal2vulkan/src/spirv/builder/ops/memory.rs
++++ b/crates/metal2vulkan/src/spirv/builder/ops/memory.rs
+@@ -124,13 +124,32 @@ impl FunctionBuilder<'_> {
+     /// from here. The block takes the pointee's own layout rule, at most std430, so it needs no
+     /// layout feature the pointee does not.
+     pub fn device_place(&mut self, addr: Value, pointee: TypeId) -> BResult<Value> {
++        self.device_block_place(addr, pointee, false)
++    }
++
++    /// [`device_place`](Self::device_place) for memory the module never writes (the root table,
++    /// the resident set: the binder's), its block's member decorated `NonWritable`. A driver
++    /// then treats the loads as it treats uniform reads: merged, hoisted, moved to a preamble.
++    /// The block is a type of its own, apart from the writable one over the same pointee, so a
++    /// store or atomic through any other place keeps its own type.
++    pub fn device_place_read_only(&mut self, addr: Value, pointee: TypeId) -> BResult<Value> {
++        self.device_block_place(addr, pointee, true)
++    }
++
++    fn device_block_place(
++        &mut self,
++        addr: Value,
++        pointee: TypeId,
++        non_writable: bool,
++    ) -> BResult<Value> {
+         let rule = self
+             .mb()
+             .types()
+             .facts(pointee)?
+             .max_rule()
+             .min(LayoutRule::Std430);
+-        let layout = natural_layout(self.mb().types(), rule, true, &[pointee])?;
++        let mut layout = natural_layout(self.mb().types(), rule, true, &[pointee])?;
++        layout.non_writable = non_writable;
+         let block = self.module().ty(Type::Struct {
+             members: [pointee].into(),
+             layout: Some(layout),
+diff --git a/crates/metal2vulkan/src/spirv/builder/ops/tests.rs b/crates/metal2vulkan/src/spirv/builder/ops/tests.rs
+--- a/crates/metal2vulkan/src/spirv/builder/ops/tests.rs
++++ b/crates/metal2vulkan/src/spirv/builder/ops/tests.rs
+@@ -760,6 +760,7 @@ fn device_places_are_block_members_at_offset_zero() {
+             let layout = StructLayout {
+                 rule,
+                 block: true,
++                non_writable: false,
+                 members: [MemberLayout {
+                     offset: 0,
+                     matrix_stride: None,
+@@ -854,6 +855,41 @@ fn device_places_are_block_members_at_offset_zero() {
+     });
+ }
+ 
++/// A read-only device place is a place of the same pointee through a block of its own, the one
++/// whose layout says `non_writable`: the writable place over the same pointee keeps the other.
++#[test]
++fn read_only_device_places_are_blocks_of_their_own() {
++    in_fn(|f, t| {
++        let a64 = p(f, t.u64_);
++        let block_of = |f: &mut FunctionBuilder<'_>, place: Value| -> (TypeId, bool) {
++            let Inst::AccessChain { base, .. } = def_of(f, place) else {
++                panic!("a place is an access chain");
++            };
++            let ptr = ty(f, base);
++            let Ok(Type::Pointer { pointee, .. }) = f.mb().types().get(ptr) else {
++                panic!("a place's base is a pointer");
++            };
++            let Ok(Type::Struct {
++                layout: Some(l), ..
++            }) = f.mb().types().get(*pointee)
++            else {
++                panic!("a place's base points to a block");
++            };
++            (ptr, l.non_writable)
++        };
++        let writable = f.device_place(a64, t.u64_).expect("place");
++        let read_only = f.device_place_read_only(a64, t.u64_).expect("read-only place");
++        assert_eq!(ty(f, read_only), ty(f, writable));
++        let (w, w_flag) = block_of(f, writable);
++        let (r, r_flag) = block_of(f, read_only);
++        assert_ne!(w, r);
++        assert!(!w_flag && r_flag);
++        // Another read-only place over the same pointee is the same block.
++        let again = f.device_place_read_only(a64, t.u64_).expect("read-only place");
++        assert_eq!(block_of(f, again), (r, true));
++    });
++}
++
+ #[test]
+ fn array_length_and_texel_pointer_classes() {
+     let mut b = ModuleBuilder::new();
+diff --git a/crates/metal2vulkan/src/spirv/builder/tests.rs b/crates/metal2vulkan/src/spirv/builder/tests.rs
+--- a/crates/metal2vulkan/src/spirv/builder/tests.rs
++++ b/crates/metal2vulkan/src/spirv/builder/tests.rs
+@@ -87,6 +87,7 @@ impl T {
+             layout: Some(StructLayout {
+                 rule,
+                 block: false,
++                non_writable: false,
+                 members: offsets
+                     .iter()
+                     .map(|o| MemberLayout {
+@@ -477,6 +478,7 @@ fn matrix_members_need_a_valid_matrix_stride() {
+         layout: Some(StructLayout {
+             rule,
+             block: false,
++            non_writable: false,
+             members: [MemberLayout {
+                 offset: 0,
+                 matrix_stride: ms,
+@@ -507,6 +509,7 @@ fn matrix_members_need_a_valid_matrix_stride() {
+         layout: Some(StructLayout {
+             rule: LayoutRule::Std430,
+             block: false,
++            non_writable: false,
+             members: [MemberLayout {
+                 offset: 0,
+                 matrix_stride: Some(16),
+@@ -1346,6 +1349,7 @@ fn operand_rules_are_enforced() {
+             layout: Some(StructLayout {
+                 rule: LayoutRule::Std430,
+                 block: true,
++                non_writable: false,
+                 members: [MemberLayout {
+                     offset: 0,
+                     matrix_stride: None,
+diff --git a/crates/metal2vulkan/src/spirv/ir/types.rs b/crates/metal2vulkan/src/spirv/ir/types.rs
+--- a/crates/metal2vulkan/src/spirv/ir/types.rs
++++ b/crates/metal2vulkan/src/spirv/ir/types.rs
+@@ -115,6 +115,12 @@ pub struct StructLayout {
+     pub rule: LayoutRule,
+     pub block: bool,
+     pub members: Box<[MemberLayout]>,
++    /// Every member is decorated `NonWritable`: the module writes no memory it reaches through
++    /// this struct, so a driver may move, merge and hoist those reads (a physical-storage block
++    /// over memory only the binder writes, [`device_place_read_only`]).
++    ///
++    /// [`device_place_read_only`]: crate::spirv::builder::FunctionBuilder::device_place_read_only
++    pub non_writable: bool,
+ }
+ 
+ /// Image dimensionality.
+@@ -916,6 +922,7 @@ pub fn natural_layout(
+         rule,
+         block,
+         members: out.into_boxed_slice(),
++        non_writable: false,
+     })
+ }
+ 
+diff --git a/crates/metal2vulkan/src/spirv/serialize/mod.rs b/crates/metal2vulkan/src/spirv/serialize/mod.rs
+--- a/crates/metal2vulkan/src/spirv/serialize/mod.rs
++++ b/crates/metal2vulkan/src/spirv/serialize/mod.rs
+@@ -1790,6 +1790,12 @@ impl Ser<'_> {
+                         Op::MemberDecorate,
+                         &[id, i, Decoration::Offset as u32, ml.offset],
+                     )?;
++                    if l.non_writable {
++                        w.inst(
++                            Op::MemberDecorate,
++                            &[id, i, Decoration::NonWritable as u32],
++                        )?;
++                    }
+                     if let Some(ms) = ml.matrix_stride {
+                         w.inst(Op::MemberDecorate, &[id, i, Decoration::ColMajor as u32])?;
+                         w.inst(
+diff --git a/crates/metal2vulkan/src/tests/engine_pointer_memory.rs b/crates/metal2vulkan/src/tests/engine_pointer_memory.rs
+--- a/crates/metal2vulkan/src/tests/engine_pointer_memory.rs
++++ b/crates/metal2vulkan/src/tests/engine_pointer_memory.rs
+@@ -2023,3 +2023,125 @@ fn a_wide_pointers_bits_through_a_cell_are_its_guest_address() {
+         }
+     }
+ }
++
++/// A loop that loads through a pointer read from a buffer, stores through it, and stores to a
++/// static slot each iteration (the store that may alias anything, as far as a driver knows).
++const LOOP_ACCESS: &str = "define void @loop_access(ptr addrspace(1) noundef \"air-buffer-no-alias\" %b0, ptr addrspace(1) noundef \"air-buffer-no-alias\" %b1, i32 %t) {
++entry:
++  %d = load ptr addrspace(1), ptr addrspace(1) %b0, align 8
++  %tz = zext i32 %t to i64
++  %q = getelementptr inbounds i32, ptr addrspace(1) %b1, i64 %tz
++  br label %loop
++
++loop:
++  %i = phi i64 [ 0, %entry ], [ %i1, %loop ]
++  %acc = phi i32 [ 0, %entry ], [ %acc1, %loop ]
++  %k = mul i64 %i, 64
++  %k2 = add i64 %k, %tz
++  %p = getelementptr inbounds i32, ptr addrspace(1) %d, i64 %k2
++  %v = load i32, ptr addrspace(1) %p, align 4
++  %acc1 = xor i32 %acc, %v
++  store i32 %acc1, ptr addrspace(1) %q, align 4
++  %w = getelementptr inbounds i32, ptr addrspace(1) %p, i64 1
++  store i32 %acc1, ptr addrspace(1) %w, align 4
++  %i1 = add i64 %i, 1
++  %done = icmp eq i64 %i1, 16
++  br i1 %done, label %exit, label %loop
++
++exit:
++  ret void
++}
++
++!air.kernel = !{!0}
++!air.version = !{!90}
++!air.language_version = !{!91}
++!0 = !{ptr @loop_access, !1, !2}
++!1 = !{}
++!2 = !{!10, !11, !12}
++!10 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\", !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 8, !\"air.arg_type_align_size\", i32 8, !\"air.arg_type_name\", !\"ulong\", !\"air.arg_name\", !\"b0\"}
++!11 = !{i32 1, !\"air.buffer\", !\"air.location_index\", i32 1, i32 1, !\"air.read_write\", !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4, !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"b1\"}
++!12 = !{i32 2, !\"air.thread_index_in_threadgroup\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"t\"}
++!90 = !{i32 2, i32 8, i32 0}
++!91 = !{!\"Metal\", i32 4, i32 0, i32 0}
++";
++
++/// An access through a wide pointer reads no root entry: the pointer carries its entry's `host`
++/// and `size` from where it was formed (the resident-set search, before the loop), and the sink's
++/// address is read once at entry. So a loop that stores each iteration, which a driver cannot
++/// prove leaves the root table alone, has no `u64` device-address load in its blocks at all
++/// (the old form read `host`, `bind_offset`, `size` and the sink's `host` per access: 8 here).
++#[test]
++fn accesses_through_a_loaded_pointer_read_no_root_entry_in_a_loop() {
++    let Some(bc) = assemble("loop_access", LOOP_ACCESS) else {
++        return;
++    };
++    for (what, p) in profiles() {
++        let (plan, m) = checked(&bc, "loop_access", &p, &LowerInputs::new(), &what);
++        assert_eq!(uses(&plan, "access.dynamic.load"), 1, "{what}");
++        assert_eq!(uses(&plan, "access.dynamic.store"), 1, "{what}");
++        let headers: Vec<(usize, usize)> = m
++            .blocks()
++            .iter()
++            .enumerate()
++            .filter_map(|(i, b)| match b.merge {
++                Some(crate::spirv::ir::Merge::Loop { merge, .. }) => Some((i, merge.index())),
++                _ => None,
++            })
++            .collect();
++        assert!(!headers.is_empty(), "{what}: no loop");
++        let is_entry_load = |ptr| match m.value(ptr).and_then(|d| m.types().get(d.ty)) {
++            Ok(Type::Pointer {
++                class: StorageClass::PhysicalStorageBuffer,
++                pointee,
++            }) => matches!(m.types().get(*pointee), Ok(Type::Int { width: 64, .. })),
++            _ => false,
++        };
++        let is_memory = |ptr| {
++            matches!(
++                m.value(ptr).and_then(|d| m.types().get(d.ty)),
++                Ok(Type::Pointer {
++                    class: StorageClass::PhysicalStorageBuffer | StorageClass::StorageBuffer,
++                    ..
++                })
++            )
++        };
++        let mut kernel_loops = 0;
++        for (header, merge) in headers {
++            // The loop's blocks: those reached from its header short of its merge block.
++            let mut seen = vec![header];
++            let mut work = vec![header];
++            while let Some(b) = work.pop() {
++                let succ: Vec<usize> = match &m.blocks()[b].term {
++                    crate::spirv::ir::Terminator::Branch(t) => vec![t.index()],
++                    crate::spirv::ir::Terminator::CondBranch { t, f, .. } => {
++                        vec![t.index(), f.index()]
++                    }
++                    crate::spirv::ir::Terminator::Switch { default, cases, .. } => {
++                        let mut v = vec![default.index()];
++                        v.extend(cases.iter().map(|(_, c)| c.index()));
++                        v
++                    }
++                    _ => Vec::new(),
++                };
++                for s in succ {
++                    if s != merge && !seen.contains(&s) {
++                        seen.push(s);
++                        work.push(s);
++                    }
++                }
++            }
++            let insts = || seen.iter().flat_map(|&b| &m.blocks()[b].insts);
++            // The kernel's loop, which stores to memory (the resident-set search's own loop over
++            // the table, which stores only its variables, is not one).
++            if !insts().any(|n| matches!(&n.inst, Inst::Store { ptr, .. } if is_memory(*ptr))) {
++                continue;
++            }
++            kernel_loops += 1;
++            let loads = insts()
++                .filter(|n| matches!(&n.inst, Inst::Load { ptr, .. } if is_entry_load(*ptr)))
++                .count();
++            assert_eq!(loads, 0, "{what}: root-entry loads in the loop");
++        }
++        assert_eq!(kernel_loops, 1, "{what}: the kernel's loop");
++    }
++}

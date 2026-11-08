@@ -192,7 +192,17 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     # debug assertions (every kept and extended answer against one made whole) in 12 combos. renderBundles on 5566: GPU
     # process 121 -> 68-88 MiB, ~1.75x the frames; without bundles it lives (peak 467 MiB in its first frame of 5000 clamp
     # barriers, then 258 MiB) and animates at the bundle mode's rate.
-    '0034-encoder-level-residency.patch']]
+    '0034-encoder-level-residency.patch',
+    # An access through a wide pointer (one loaded from memory: WebKit's bind groups are argument buffers) reads no root entry
+    # (upstream ce204a121, backported): the pointer is (root, at, host, size), the entry read once where the pointer is formed,
+    # where before every access read four entry fields again, under no decoration, beside the miss counter's atomics (no driver
+    # could merge or move them). Every read of the root table and the resident set is through a NonWritable place
+    # (FunctionBuilder::device_place_read_only), so a driver may merge and move those too. webgpu-samples' deferredRendering loops
+    # over 128 lights per pixel through such a pointer: its light loop read 20 entry fields per light; ir3 (Adreno 830 over the
+    # noop drm shim) 496 instructions + 363 nops, 37 memory ops, 11 (sy) waits per light -> 398 + 182, 17 (7 loads, the rest the
+    # miss counter's atomics in untaken branches), 5; on 5566 the frame's GPU time 73 -> 60 ms at 1200x1200 and 1.2 GHz (Android
+    # Chrome on the same phone: ~10 ms). The used-uses tests take the reach (0034 left them building against the old signature).
+    '0035-wide-pointers-carry-their-root-entry.patch']]
 
 
 def git_tree(*steps):
