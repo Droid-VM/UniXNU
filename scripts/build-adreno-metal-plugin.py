@@ -256,11 +256,12 @@ FRONTEND_REPLACED = [
     # renders into none ("render encoder: Unsupported ... MTLPixelFormatRGB8_444_2P"), so the layer stayed whatever the surface held:
     # the Weather widget showed rows of stray colour. RenderBox learns its tier by asking supportsFamily: from Apple1 up until the
     # first NO (RB::Device's constructor), so it alone is told Apple2 and draws them in BGRA8. WebKit's WebGPU makes an adapter only for
-    # MTLGPUFamilyApple4 and up (Safari's requestAdapter() answered null), so WebGPU.framework alone is told Apple4; every other caller
-    # keeps the answer.
+    # MTLGPUFamilyApple4 and up (Safari's requestAdapter() answered null), so WebGPU.framework is told Apple4; so is ANGLE
+    # (libANGLE-shared.dylib), which offers ES 3.0, so WebGL 2, only from Apple4 on for a reason this device's tier-2 argument buffers
+    # meet; every other caller keeps the answer.
     ('static void installAnswers(Class cls) {\n',
      'static BOOL (*gFamilyAnswer)(id,SEL,NSInteger);\n'
-     'enum FamilyCaller {FamilyCallerOther,FamilyCallerRenderBox,FamilyCallerWebGPU};\n'
+     'enum FamilyCaller {FamilyCallerOther,FamilyCallerRenderBox,FamilyCallerWebGPU,FamilyCallerANGLE};\n'
      '// The framework whose code is at a return address, looked up once per address: dladdr searches the image\'s symbol table, and\n'
      '// QuartzCore\'s pixel-format queries ask supportsFamily: for every surface it makes (a masked corner, a backdrop, a blur\'s mips) and every\n'
      '// IOSurface it checks -- the render server\'s display thread spent 15% of its running time in that search during page swipes.\n'
@@ -273,6 +274,7 @@ FRONTEND_REPLACED = [
      ' if(dladdr(address,&caller) && caller.dli_fname) {\n'
      '  if(strstr(caller.dli_fname,"/RenderBox.framework/"))kind=FamilyCallerRenderBox;\n'
      '  else if(strstr(caller.dli_fname,"/WebGPU.framework/"))kind=FamilyCallerWebGPU;\n'
+     '  else if(strstr(caller.dli_fname,"/libANGLE-shared.dylib"))kind=FamilyCallerANGLE;\n'
      ' }\n'
      ' std::lock_guard<std::mutex> hold(lock);\n'
      ' if(known.size()<4096)known.emplace(address,kind);\n'
@@ -282,11 +284,16 @@ FRONTEND_REPLACED = [
      '// feature set tables list no WebGPU limits for Apple1 to Apple3, so requestAdapter() answered null and every page saw no WebGPU. The rows\n'
      '// Apple4 adds that this device refuses (gfxprobe families: imageblocks, tile shaders, raster order groups, post-depth coverage) are the\n'
      '// Apple GPUs\' tile-memory features, which WebGPU has no API for, so WebGPU alone is told Apple4 (the family its tables start at).\n'
+     '// WebKit\'s WebGL (ANGLE\'s Metal renderer, WebCore.framework/Frameworks/libANGLE-shared.dylib) offers ES 3.0, so WebGL 2, only from Apple4\n'
+     '// on (ANGLE 09a869c24593, in iPadOS 27\'s WebKit): ES 3.0 needs 12 vertex uniform blocks, which ANGLE binds through an argument buffer,\n'
+     '// and Apple3\'s tier-1 argument buffers count their entries against the 31 buffers a function takes. This device\'s are tier 2, so ANGLE is\n'
+     '// told Apple4 too. Its other Apple4 checks pick what this device does: non-uniform dispatch, render passes without attachments, render\n'
+     '// targets under 4 bytes a pixel, and raster order groups for pixel local storage, which WebKit does not offer pages.\n'
      'static BOOL familyForCaller(id self,SEL _cmd,NSInteger family) {\n'
      ' if(family>=1003 && family<2000) {   // MTLGPUFamilyApple3 to Apple10\n'
      '  const FamilyCaller kind=familyCaller(__builtin_return_address(0));\n'
      '  if(kind==FamilyCallerRenderBox)return NO;\n'
-     '  if(kind==FamilyCallerWebGPU && family==1004)return YES;   // MTLGPUFamilyApple4\n'
+     '  if((kind==FamilyCallerWebGPU || kind==FamilyCallerANGLE) && family==1004)return YES;   // MTLGPUFamilyApple4\n'
      ' }\n'
      ' return gFamilyAnswer(self,_cmd,family);\n'
      '}\n'
