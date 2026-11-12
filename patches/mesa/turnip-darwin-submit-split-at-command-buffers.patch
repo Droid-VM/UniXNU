@@ -1,0 +1,77 @@
+diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -1350,6 +1350,7 @@
+ 
+ struct tu_darwin_queue_submit {
+    struct util_dynarray commands; /* NativeAdrenoAbiSubmitBuffer */
++   struct util_dynarray starts;   /* uint8_t for each command: a kernel submission may begin with it (darwin_entry_sets_thread) */
+    unsigned bad;                  /* addresses TU_DARWIN_CHECK_IBS found no live BO for */
+ };
+ 
+@@ -1365,7 +1366,20 @@
+ {
+    struct tu_darwin_queue_submit *submit = (struct tu_darwin_queue_submit *)_submit;
+    util_dynarray_fini(&submit->commands);
++   util_dynarray_fini(&submit->starts);
+    vk_free(&device->vk.alloc, submit);
++}
++
++/* The stream's first packet is a CP_THREAD_CONTROL: it names the thread and the concurrent binning state itself, as every
++ * command buffer does since a7xx (tu_init_hw). Its later chunks, and the streams queued beside a command buffer (trace, autotune),
++ * do not. */
++static bool
++darwin_entry_sets_thread(const struct tu_cs_entry *entry)
++{
++   if (!entry->bo->map || entry->size < 2 * sizeof(uint32_t))
++      return false;
++   const uint32_t *words = (const uint32_t *)((const char *)entry->bo->map + entry->offset);
++   return words[0] == pm4_pkt7_hdr(CP_THREAD_CONTROL, 1);
+ }
+ 
+ static void
+@@ -1373,6 +1387,9 @@
+                           struct tu_cs_entry *entries, unsigned num_entries)
+ {
+    struct tu_darwin_queue_submit *submit = (struct tu_darwin_queue_submit *)_submit;
++   uint8_t *starts = (uint8_t *)util_dynarray_grow(&submit->starts, uint8_t, num_entries);
++   for (unsigned i = 0; i < num_entries; i++)
++      starts[i] = i == 0 && darwin_entry_sets_thread(&entries[0]);
+    NativeAdrenoAbiSubmitBuffer *cmds = (NativeAdrenoAbiSubmitBuffer *)
+       util_dynarray_grow(&submit->commands, NativeAdrenoAbiSubmitBuffer, num_entries);
+    for (unsigned i = 0; i < num_entries; i++) {
+@@ -1651,8 +1668,32 @@
+    if (total) {
+       const NativeAdrenoAbiSubmitBuffer *all =
+          util_dynarray_element(&submit->commands, NativeAdrenoAbiSubmitBuffer, 0);
+-      for (unsigned at = 0; at < total; at += NativeAdrenoAbiMaxBuffers) {
+-         unsigned count = MIN2(total - at, (unsigned)NativeAdrenoAbiMaxBuffers);
++      const uint8_t *starts = util_dynarray_element(&submit->starts, uint8_t, 0);
++      for (unsigned at = 0, count; at < total; at += count) {
++         count = MIN2(total - at, (unsigned)NativeAdrenoAbiMaxBuffers);
++         /* More buffers than one kernel submission takes: it ends where the next buffer begins a command buffer, never inside
++          * one. Between two submissions the kernel's ring commands name both threads again with concurrent binning on
++          * (CP_THREAD_CONTROL BOTH, no CONCURRENT_BIN_DISABLE), and another context's work may run. A command buffer's later
++          * chunk begun there is executed by BV as well as BR, until its next thread control: BV, with nothing set up for it,
++          * stops for good at the first cache event or blit, and BR waits for it at that thread control ("GPU hang detected",
++          * an Adreno 840 at 5 to 10 % of the starts of a guest's compositor, whose first frames submit a few hundred buffers
++          * at once: every one of 13 KGSL snapshots of it has a submission of exactly 128 buffers, the last a full chunk,
++          * before the stuck one). */
++         if (at + count < total) {
++            unsigned end = at + count;
++            while (end > at && !starts[end])
++               end--;
++            if (end > at) {
++               count = end - at;
++            } else {
++               static bool warned;
++               if (!warned) {
++                  warned = true;
++                  mesa_logw("darwin: %u command buffers' streams with no beginning among them: a kernel submission ends inside one",
++                            count);
++               }
++            }
++         }
+          uint32_t chunk_fence = 0;
+          VkResult result = darwin_submit_chunk(queue, all + at, count, &chunk_fence);
+          if (result != VK_SUCCESS)
