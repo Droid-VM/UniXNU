@@ -78,7 +78,6 @@
     "patches/mesa/turnip-darwin-bo-slot-before-reuse.patch",
     "patches/mesa/upstream-07ea9790-freedreno-a840-2-slice.patch",
     "patches/mesa/upstream-78fd465c-tu-clear-unused-sp-xs-bases.patch",
-    "patches/mesa/turnip-nocb-leave-bv-alone.patch",
     "patches/mesa/turnip-darwin-submit-split-at-command-buffers.patch"
   ],
   "integer_fma_reference": {
