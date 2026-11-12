@@ -75,7 +75,9 @@
     "patches/mesa/turnip-darwin-check-ibs.patch",
     "patches/mesa/turnip-darwin-virtgpu-resets.patch",
     "patches/mesa/turnip-submit-freed-bo-check.patch",
-    "patches/mesa/turnip-darwin-bo-slot-before-reuse.patch"
+    "patches/mesa/turnip-darwin-bo-slot-before-reuse.patch",
+    "patches/mesa/upstream-07ea9790-freedreno-a840-2-slice.patch",
+    "patches/mesa/upstream-78fd465c-tu-clear-unused-sp-xs-bases.patch"
   ],
   "integer_fma_reference": {
     "repository": "https://github.com/ucb-bar/berkeley-softfloat-3",
