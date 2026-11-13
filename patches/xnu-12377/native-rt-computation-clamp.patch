@@ -1,0 +1,26 @@
+A realtime computation past max_rt_quantum is held to it rather than refused, when the constraint allows it (a
+computation below half the constraint is already raised). The board's timer runs at 19.2 MHz: a client that computes its
+policy in another timebase's ticks -- coreaudiod asks 1200000 (50 ms at 24 MHz) -- was refused, every I/O thread stayed
+non-realtime and the HAL's clock never moved. With the 24 MHz timebase userspace sees (droidvm-timebase-24mhz) the request
+fits; this keeps a client that still overshoots realtime. From macOS-DroidVM patches/xnu-12377/0039 (lateautumn233).
+
+diff --git a/osfmk/kern/thread_policy.c b/osfmk/kern/thread_policy.c
+index bb1f51b..cf36182 100644
+--- a/osfmk/kern/thread_policy.c
++++ b/osfmk/kern/thread_policy.c
+@@ -405,6 +405,15 @@ thread_policy_set_internal(
+ 		info = (thread_time_constraint_with_priority_policy_t)policy_info;
+ 
+ 
++		/*
++		 * A computation past the maximum is held to it rather than refused: the board's timer runs at 19.2 MHz,
++		 * where 50 ms is 960000 ticks, and coreaudiod asks for its I/O thread a computation of 1200000 ticks (50 ms
++		 * at Apple's 24 MHz), so every I/O thread it starts stays non-realtime and the HAL's clock never moves.
++		 */
++		if (info->computation > max_rt_quantum && info->constraint >= max_rt_quantum) {
++			info->computation = max_rt_quantum;
++		}
++
+ 		if (info->constraint < info->computation ||
+ 		    info->computation > max_rt_quantum ||
+ 		    info->computation < min_rt_quantum) {

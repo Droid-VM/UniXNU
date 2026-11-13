@@ -18,6 +18,7 @@
 ../../../../../patches/xnu-12377/kernel-sdk-root.patch
 ../../../../../patches/xnu-12377/source-machine-layer.patch
 ../../../../../patches/xnu-12377/native-pac-keys.patch
+../../../../../patches/xnu-12377/native-at-par-sync.patch
 ../../../../../patches/xnu-12377/public-entitlements-v2-header.patch
 ../../../../../patches/xnu-12377/no-apple-cpu-counters.patch
 ../../../../../patches/xnu-12377/apple-only-core-type.patch
@@ -55,6 +56,9 @@
 ../../../../../patches/xnu-12377/native-4k-user-abi.patch
 ../../../../../patches/xnu-12377/native-4k-signature-hash-cache.patch
 ../../../../../patches/xnu-12377/native-4k-shared-region-slide.patch
+../../../../../patches/xnu-12377/native-4k-codelimit-nx.patch
+../../../../../patches/xnu-12377/native-4k-mmap-16k-boundaries.patch
+../../../../../patches/xnu-12377/native-rt-computation-clamp.patch
 ../../../../../patches/xnu-12377/native-text-fixup.patch
 ../../../../../patches/xnu-12377/non-apple-iommu-bootstrap.patch
 ../../../../../patches/xnu-12377/offline-owner-systemos-mount.patch

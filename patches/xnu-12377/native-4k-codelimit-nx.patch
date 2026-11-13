@@ -1,0 +1,29 @@
+A 4 KiB kernel validating a 16 KiB-hashed signature (XNU_NATIVE_CS_HASH_CACHE): a 4 KiB page wholly past
+codeLimit in the last 16 KiB block is answered validated and NX, as the same bytes are on 16 KiB pages (part of the
+partial last page), not tainted. dyld's PrebuiltLoader reads a dylib's code signature through such a page; tainted,
+every loginwindow after the first died with KERN_CODESIGN_ERROR on macOS 27. From macOS-DroidVM patches/xnu-12377/0017
+(lateautumn233), its cs_validate_hash hunk; the crash-log hunk belongs to that line's diagnostics.
+
+diff --git a/bsd/kern/ubc_subr.c b/bsd/kern/ubc_subr.c
+index ef98eb4..d669dac 100644
+--- a/bsd/kern/ubc_subr.c
++++ b/bsd/kern/ubc_subr.c
+@@ -6036,6 +6036,18 @@ cs_validate_hash(
+ #if defined(XNU_NATIVE_CS_HASH_CACHE) && XNU_NATIVE_CS_HASH_CACHE
+ 			if (PAGE_SHIFT == 12 && blob->csb_hash_pageshift == 14) {
+ 				vm_size_t index = (vm_size_t)offset >> PAGE_SHIFT;
++				/*
++				 * A 4K page wholly past codeLimit in the last 16K block: the block's hash stops at
++				 * codeLimit, so on 16K pages these bytes are part of a validated, NX page (the
++				 * partial-page case below). Answer them the same, not tainted: dyld reads the code
++				 * signature (past codeLimit) through such pages.
++				 */
++				if (!(offset & PAGE_MASK) && offset >= codeLimit &&
++				    offset < (off_t)(((uint64_t)codeLimit + 16383) & ~16383ULL)) {
++					*bytes_processed = PAGE_SIZE;
++					*tainted = CS_VALIDATE_NX;
++					return TRUE;
++				}
+ 				if ((offset & PAGE_MASK) || offset >= codeLimit ||
+ 				    blob->csb_native4k_hashes == NULL ||
+ 				    index >= blob->csb_native4k_hash_count ||
