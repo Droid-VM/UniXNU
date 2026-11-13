@@ -1,0 +1,66 @@
+k27-deny-exec=PATH[,PATH...] (default /usr/libexec/mobileactivationd): exec of a listed executable fails with EPERM. launchd
+starts mobileactivationd despite a disabled.plist; in a VM it cannot validate the device identity it needs
+(dealwith_activation: "Failed to validate OIC", "Invalid UIK/UCRT") and crashed every 15 s, each time with a ReportCrash.
+With EPERM launchd's spawn fails and the job's clients get an error from the lookup. Under XNU_TARGET_OS_OSX (the iPadOS
+board keeps its jobs out with the launchd overrides of native-board-launch-policy).
+From macOS-DroidVM patches/xnu-12377/0033 (lateautumn233).
+
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index fc2ebab..80a139d 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7440,6 +7440,42 @@ bad:
+  *	vnode_getattr:???
+  *	vnode_authorize:???
+  */
++#if XNU_TARGET_OS_OSX
++/*
++ * k27 (boot-arg k27-deny-exec=PATH[,PATH...], default /usr/libexec/mobileactivationd): daemons that cannot run on this board and that
++ * launchd does not keep from starting (a seed's disabled.plist is not honoured for every job). mobileactivationd needs the device
++ * identity it validates in dealwith_activation ("Failed to validate OIC", "Invalid UIK/UCRT") and crashed every 15 s, each time with a
++ * ReportCrash. EPERM from exec: launchd's spawn fails, the job's clients get an error from the lookup instead.
++ */
++static TUNABLE_STR(k27_deny_exec, 256, "k27-deny-exec", "/usr/libexec/mobileactivationd");
++
++static bool
++k27_exec_denied(struct vnode *vp)
++{
++	if (k27_deny_exec[0] == '\0') {
++		return false;
++	}
++	char *path = zalloc(ZV_NAMEI);
++	int len = MAXPATHLEN;
++	bool denied = false;
++	if (vn_getpath(vp, path, &len) == 0) {
++		for (const char *n = k27_deny_exec; *n;) {
++			size_t l = 0;
++			while (n[l] && n[l] != ',') {
++				l++;
++			}
++			if (l && strlen(path) == l && strncmp(path, n, l) == 0) {
++				denied = true;
++				break;
++			}
++			n += l + (n[l] == ',');
++		}
++	}
++	zfree(ZV_NAMEI, path);
++	return denied;
++}
++#endif
++
+ static int
+ exec_check_permissions(struct image_params *imgp)
+ {
+@@ -7453,6 +7489,11 @@ exec_check_permissions(struct image_params *imgp)
+ 	if (!vnode_isreg(vp)) {
+ 		return EACCES;
+ 	}
++#if XNU_TARGET_OS_OSX
++	if (k27_exec_denied(vp)) {
++		return EPERM;
++	}
++#endif
+ 
+ 	/* Get the file attributes that we will be using here and elsewhere */
+ 	VATTR_INIT(vap);

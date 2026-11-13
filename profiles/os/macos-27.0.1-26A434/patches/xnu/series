@@ -12,3 +12,5 @@ arch:../../../patches/xnu-12377/darwin26-shared-region.patch
 ../../../../../patches/xnu-12377/macos-kqworkloop-limits.patch
 ../../../../../patches/xnu-12377/macos-end-rename-swap.patch
 ../../../../../patches/xnu-12377/macos-machine-config.patch
+../../../../../patches/xnu-12377/macos-deny-exec.patch
+../../../../../patches/xnu-12377/macos-block-descriptors.patch
