@@ -1,0 +1,14 @@
+# OS patch paths for xnu-12377.121.6, one per line in application order.
+# The four Darwin 26 patches iPadOS 27 takes (profiles/os/ipados-27.0.1-24A446), then macOS's own.
+arch:../../../patches/xnu-12377/zzz-boot-progress.patch
+arch:../../../patches/xnu-12377/darwin26-syscalls.patch
+arch:../../../patches/xnu-12377/darwin26-kpi.patch
+arch:../../../patches/xnu-12377/darwin26-shared-region.patch
+# macOS 27 on xnu-12377 (any macOS 27 guest of this kernel; the DroidVM board's own macOS patches are its macos.series).
+../../../../../patches/xnu-12377/macos-target-kernel.patch
+../../../../../patches/xnu-12377/macos-darwin26-kpi.patch
+../../../../../patches/xnu-12377/macos-shared-region-size.patch
+../../../../../patches/xnu-12377/macos-user-address-space.patch
+../../../../../patches/xnu-12377/macos-kqworkloop-limits.patch
+../../../../../patches/xnu-12377/macos-end-rename-swap.patch
+../../../../../patches/xnu-12377/macos-machine-config.patch

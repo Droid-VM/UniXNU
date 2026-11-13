@@ -1,0 +1,54 @@
+macOS userspace expects the macOS user address space: xzone malloc maps its range groups with VM_FLAGS_FIXED at
+455 to 512 GiB and stops launchd with brk when that fails. On XNU_TARGET_OS_OSX the user address space limit is the
+macOS value (0x7FFFFE000000); the user pmaps already use a 47-bit TTBR0 range. As on 16K macOS, the commpage then lies
+inside the user range, reserved by the VM, so the 4K nesting assertion does not apply (macOS-DroidVM uses the same layout,
+virt-user-va-512g and virt-user-va-commpage-inside, with a 39-bit range).
+This replaces macOS-DroidVM's 0010 (a one-entry L0 over a 39-bit pmap, 512 GiB of user VA) and 0043 (the GPU carveout
+cut at 256 GiB to leave room in those 512 GiB): the shared layer's user pmaps are 47-bit already (T0SZ_USER 17,
+ipados27-bringup), so macOS gets its own 128 TiB and WebKit's 64 GiB Gigacage fits (0022's GIGACAGE_ENABLED=no is not needed). Taken as upstream UniXNU wrote it (origin/main profiles/os/
+macos-27.3-26C5035r, the same xnu-12377 macOS port).
+
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index 72bf02f..55e2f31 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -11677,12 +11677,19 @@ static_assert((_COMM_PAGE32_BASE_ADDRESS & ~ARM_TT_L2_OFFMASK) >= VM_MAX_ADDRESS
+  */
+ 
+ #elif (ARM_PGSHIFT == 12)
++#if !XNU_TARGET_OS_OSX
+ /**
+  * Ensure that 64-bit devices using 4K pages can nest the commpage completely
+  * above the maximum userspace VA.
+  */
+ static_assert((_COMM_PAGE64_BASE_ADDRESS & ~ARM_TT_L1_OFFMASK) >= MACH_VM_MAX_ADDRESS);
+ #else
++/*
++ * macOS userspace on 4K pages: as on 16K macOS (above), the commpage lives within the userspace VA range and the VM
++ * keeps it as a reserved region (vm_reserved_regions).
++ */
++#endif
++#else
+ #error Nested shared page mapping is unsupported on this config
+ #endif
+ 
+diff --git a/osfmk/mach/arm/vm_param.h b/osfmk/mach/arm/vm_param.h
+index 6b12ab1..dc775f8 100644
+--- a/osfmk/mach/arm/vm_param.h
++++ b/osfmk/mach/arm/vm_param.h
+@@ -148,6 +148,15 @@ extern int PAGE_SHIFT_CONST;
+ #undef MACH_VM_MAX_ADDRESS_RAW
+ #define MACH_VM_MAX_ADDRESS_RAW 0x00007FFFFE000000ULL
+ #endif /* defined(XNU_PLATFORM_iPhoneOS) && EXTENDED_USER_VA_SUPPORT */
++#if defined(XNU_PLATFORM_iPhoneOS) && XNU_TARGET_OS_OSX && !EXTENDED_USER_VA_SUPPORT
++/*
++ * macOS userspace gets the macOS user address space: xzone malloc maps its range groups (24 GiB, VM_FLAGS_FIXED) at
++ * 455 to 512 GiB, above the GPU carveout. The user pmaps use a 47-bit TTBR0 range (T0SZ_USER, osfmk/arm64/proc_reg.h);
++ * the commpage nesting region and the GPU carveout stay reserved in every map (vm_reserved_regions).
++ */
++#undef MACH_VM_MAX_ADDRESS_RAW
++#define MACH_VM_MAX_ADDRESS_RAW 0x00007FFFFE000000ULL
++#endif
+ /* threshold for allocations to be placed in the large file range */
+ #define VM_LARGE_FILE_THRESHOLD (1ULL << 30)
+ #define MACH_VM_JUMBO_ADDRESS ((mach_vm_offset_t) 0x0000000FC0000000ULL)
