@@ -32,3 +32,48 @@
 "build" = "26A434"
 "sha256" = "2f016638293c3e641b8b25391a76fbc16563b3711915a5551cf8aa0f5598a5c1"
 "fetch" = ["KernelCache"]
+
+
+# Apple sources of the release that pairs with xnu-12377.121.6, the same pins as the iPadOS 27 profile (public source
+# interfaces; the storage and HID builds compile against them).
+[[source]]
+name = "IOStorageFamily"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/IOStorageFamily.git"
+ref = "IOStorageFamily-337.100.1"
+commit = "7edb88fbae296fb7c8ce2f64e115e116e566d51c"
+
+[[source]]
+name = "IOHIDFamily"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/IOHIDFamily.git"
+ref = "IOHIDFamily-2238.120.5"
+commit = "e31e90a24c27ad6cbe981650d12a1a4124065b03"
+
+[[source]]
+name = "libplatform"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/libplatform.git"
+ref = "libplatform-375.120.2"
+commit = "b7ed7cf5cf7dd12b98672435db2225a860f199d8"
+
+[[source]]
+name = "libdispatch"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/libdispatch.git"
+ref = "libdispatch-1542.100.32"
+commit = "701f4d1a24ae9c6863901bbbb22624b7d1b87321"
+
+[[source]]
+name = "AvailabilityVersions"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/AvailabilityVersions.git"
+ref = "AvailabilityVersions-157.2"
+commit = "149b1777f3e8c2133042d8e188f72e3adf6a7110"
+
+[[source]]
+name = "libpthread"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/libpthread.git"
+ref = "libpthread-539.100.4"
+commit = "1f4f5265b319111142f1bf3a27d4484ef5a98314"
