@@ -1,0 +1,9 @@
+# Opt-in bring-up diagnostics of macOS-DroidVM, each off unless its boot argument is given. To use them, add
+# "os:patches/xnu/diag.series" at the END of the board's macOS patch_series (they apply on top of the board's macos.series).
+../../../../../patches/xnu-12377/diag-reboot-caller-exec-begin.patch
+../../../../../patches/xnu-12377/diag-exec-env.patch
+../../../../../patches/xnu-12377/diag-panic-spin.patch
+../../../../../patches/xnu-12377/diag-stall-dump.patch
+../../../../../patches/xnu-12377/diag-stall-panic.patch
+../../../../../patches/xnu-12377/diag-iokit-log.patch
+../../../../../patches/xnu-12377/diag-mkdir-log.patch

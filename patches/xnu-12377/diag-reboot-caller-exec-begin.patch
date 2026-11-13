@@ -1,0 +1,37 @@
+bring-up diagnostics: reboot() logs its caller; exec-log=2 also logs the start of every image activation
+(Bring-up diagnostics of macOS-DroidVM, off unless their boot argument is given; opt-in: diag.series of
+profiles/os/macos-27.0.1-26A434.)
+From macOS-DroidVM patches/xnu-12377/0016 (lateautumn233).
+
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 3890af7..aea2867 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -2985,6 +2985,14 @@ exec_activate_image(struct image_params *imgp)
+ 	/* Use excpath, which contains the copyin-ed exec path */
+ 	DTRACE_PROC1(exec, uintptr_t, excpath);
+ 
++	/* UniXNU virt boards: exec-log=2 also reports the start of every activation (an exec that never returns) */
++	{
++		int value = 0;
++		if (PE_parse_boot_argn("exec-log", &value, sizeof(value)) && value >= 2) {
++			printf("exec-begin: pid %d %s path %s\n", proc_getpid(current_proc()), current_proc()->p_comm, excpath);
++		}
++	}
++
+ 	ndp = kalloc_type(struct nameidata, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+ 
+ 	NDINIT(ndp, LOOKUP, OP_LOOKUP, FOLLOW | LOCKLEAF | AUDITVNPATH1,
+diff --git a/bsd/kern/kern_xxx.c b/bsd/kern/kern_xxx.c
+index 5626e8a..bc15c54 100644
+--- a/bsd/kern/kern_xxx.c
++++ b/bsd/kern/kern_xxx.c
+@@ -150,6 +150,8 @@ reboot(struct proc *p, struct reboot_args *uap, __unused int32_t *retval)
+ skip_cred_check:
+ #endif
+ #endif
++	/* bring-up diagnostic: who reboots the machine (no panic string reaches the log otherwise) */
++	printf("reboot: pid %d %s opt %#x error %d%s%s\n", proc_pid(p), p->p_comm, uap->opt, error, message ? " message " : "", message ? message : "");
+ 	if (!error) {
+ 		OSBitOrAtomic(P_REBOOT, &p->p_flag);  /* No more signals for this proc */
+ 		error = reboot_kernel(uap->opt, message);

@@ -1,0 +1,58 @@
+k27 diagnostics: k27-mkdir-log=NAME[,NAME] logs the named processes' failed mkdirs (path, error)
+(Bring-up diagnostics of macOS-DroidVM, off unless their boot argument is given; opt-in: diag.series of
+profiles/os/macos-27.0.1-26A434.)
+From macOS-DroidVM patches/xnu-12377/0037 (lateautumn233).
+
+diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
+index 1644482..a772dba 100644
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -10463,6 +10463,38 @@ renameat(__unused proc_t p, struct renameat_args *uap, __unused int32_t *retval)
+ 	           uap->tofd, uap->to, UIO_USERSPACE, 0);
+ }
+ 
++/* k27 diagnostics (k27-mkdir-log=NAME[,NAME]): a failed mkdir of the named processes logs its path and error. */
++static void
++k27_mkdir_log(user_addr_t path, int error)
++{
++	static char names[64];
++	static int parsed = -1;
++	if (parsed < 0) {
++		parsed = PE_parse_boot_arg_str("k27-mkdir-log", names, sizeof(names)) ? 1 : 0;
++	}
++	if (!parsed) {
++		return;
++	}
++	const char *me = proc_best_name(current_proc());
++	size_t len = strlen(me);
++	for (const char *n = names; *n;) {
++		const char *end = strchr(n, ',');
++		if (end == NULL) {
++			end = n + strlen(n);
++		}
++		if ((size_t)(end - n) == len && !strncmp(n, me, len)) {
++			char buf[MAXPATHLEN];
++			size_t copied = 0;
++			if (copyinstr(path, buf, sizeof(buf), &copied)) {
++				strlcpy(buf, "?", sizeof(buf));
++			}
++			printf("k27-mkdir: %s[%d] %s: %d\n", me, proc_selfpid(), buf, error);
++			return;
++		}
++		n = *end ? end + 1 : end;
++	}
++}
++
+ /*
+  * Make a directory file.
+  *
+@@ -10586,6 +10618,9 @@ out:
+ 		vnode_put(dvp);
+ 	}
+ 
++	if (error && segflg == UIO_USERSPACE) {
++		k27_mkdir_log(path, error);
++	}
+ 	return error;
+ }
+ 
