@@ -70,3 +70,5 @@
 ../../../../../patches/xnu-12377/trustcache-runtime-layout.patch
 ../../../../../patches/xnu-12377/fileset-unmapped-call.patch
 ../../../../../patches/xnu-12377/native-4k-block-split.patch
+../../../../../patches/xnu-12377/native-upstream-clang-member-thunks.patch
+../../../../../patches/xnu-12377/native-upstream-clang-kalloc.patch

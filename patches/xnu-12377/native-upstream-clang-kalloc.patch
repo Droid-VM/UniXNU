@@ -1,0 +1,150 @@
+Where an upstream LLVM build of this kernel (macOS-DroidVM builds it with LLVM 21 on Linux) lacks what Apple clang has, each
+under a test of the compiler, so the Apple clang builds of this repository are unchanged:
+- kalloc types: no __builtin_xnu_type_summary/_types_compatible/_type_signature. Every type counts as data (KT_SUMMARY_GRANULES),
+  pointer compatibility checks pass, signatures are empty; kalloc_type_view_init_fixed/_var return at a count of 0 instead
+  of asserting (nothing to place); and the views of Apple's kexts, which carry their real type signatures, are made data
+  only too, so kernel and kexts follow one heap policy.
+- libkern/os/base.h: no "authenticates-null-values" __ptrauth option; null stays unsigned (only xnu-private fields use
+  OS_PTRAUTH_SIGNED_PTR_AUTH_NULL).
+From macOS-DroidVM patches/xnu-12377/0002 (kalloc.h, IOLib.h), 0006 (the empty-view guard) and 0007 (kext views, base.h)
+(lateautumn233).
+
+diff --git a/iokit/IOKit/IOLib.h b/iokit/IOKit/IOLib.h
+index 6b9d740..ebfa41b 100644
+--- a/iokit/IOKit/IOLib.h
++++ b/iokit/IOKit/IOLib.h
+@@ -96,10 +96,15 @@ IOMallocArraySize(vm_size_t hdr_size, vm_size_t elem_size, vm_size_t elem_count)
+ 	return s;
+ }
+ 
++#if __has_builtin(__builtin_xnu_types_compatible)
+ #define IOKIT_TYPE_IS_COMPATIBLE_PTR(ptr, type) \
+ 	(__builtin_xnu_types_compatible(os_get_pointee_type(ptr), type) ||   \
+ 	    __builtin_xnu_types_compatible(os_get_pointee_type(ptr), void))  \
+ 
++#else
++#define IOKIT_TYPE_IS_COMPATIBLE_PTR(ptr, type) 1 /* upstream LLVM: no type compatibility builtin */
++#endif
++
+ #define IOKIT_TYPE_ASSERT_COMPATIBLE_POINTER(ptr, type) \
+ 	_Static_assert(IOKIT_TYPE_IS_COMPATIBLE_PTR(ptr, type), \
+ 	    "Pointer type is not compatible with specified type")
+diff --git a/libkern/os/base.h b/libkern/os/base.h
+index 243507d..0e60280 100644
+--- a/libkern/os/base.h
++++ b/libkern/os/base.h
+@@ -355,7 +355,12 @@ typedef void (^os_block_t)(void);
+ #if __has_feature(ptrauth_calls)
+ #include <ptrauth.h>
+ #define OS_PTRAUTH_SIGNED_PTR(type) __ptrauth(ptrauth_key_process_independent_data, 1, ptrauth_string_discriminator(type))
++#if defined(__apple_build_version__)
+ #define OS_PTRAUTH_SIGNED_PTR_AUTH_NULL(type) __ptrauth(ptrauth_key_process_independent_data, 1, ptrauth_string_discriminator(type), "authenticates-null-values")
++#else
++/* upstream LLVM 21 has no "authenticates-null-values" option; null stays unsigned (only xnu-private fields use this) */
++#define OS_PTRAUTH_SIGNED_PTR_AUTH_NULL(type) __ptrauth(ptrauth_key_process_independent_data, 1, ptrauth_string_discriminator(type))
++#endif
+ #define OS_PTRAUTH_DISCRIMINATOR(str) ptrauth_string_discriminator(str)
+ #define __ptrauth_only
+ #else //  __has_feature(ptrauth_calls)
+diff --git a/osfmk/kern/kalloc.c b/osfmk/kern/kalloc.c
+index 74b028f..cc0b545 100644
+--- a/osfmk/kern/kalloc.c
++++ b/osfmk/kern/kalloc.c
+@@ -1009,7 +1009,23 @@ kalloc_type_view_copy(
+ 		 * Note that KT_VAR_DATA_HEAP is fake "data" heap, variable kalloc_type handles
+ 		 * the actual redirection in the entry points kalloc/kfree_type_var_impl.
+ 		 */
++#if !__has_builtin(__builtin_xnu_type_summary)
++		/*
++		 * Upstream LLVM emits no type summary, so every view of this kernel is data only (and takes the data
++		 * heap above), while the views of Apple's kexts carry their real type signatures: one heap policy for
++		 * both, every kext view is data only too. The entry points read the flag from the view itself.
++		 */
++		if (!kalloc_type_is_data(kt_flags)) {
++			if (type == KTV_FIXED) {
++				((kalloc_type_view_t)cur)->kt_flags |= KT_DATA_ONLY;
++			} else {
++				((kalloc_type_var_view_t)cur)->kt_flags |= KT_DATA_ONLY;
++			}
++		}
++		if (true) {
++#else
+ 		if (kalloc_type_is_data(kt_flags)) {
++#endif
+ 			kalloc_type_func(type, handle_data_view, cur);
+ 			cur += kalloc_type_func(type, view_sz);
+ 			continue;
+@@ -1868,6 +1884,12 @@ kalloc_type_view_init_fixed(void)
+ 	 * all kalloc type views in kt_buffer.
+ 	 */
+ 	kt_count = kalloc_type_view_parse(KTV_FIXED);
++#if !__has_builtin(__builtin_xnu_type_summary)
++	if (kt_count == 0) {
++		/* Upstream LLVM: no type summary, every view is data only and took the data heap, nothing to place. */
++		return;
++	}
++#endif
+ 	assert(kt_count < KALLOC_TYPE_SIZE_MASK);
+ 
+ #if MACH_ASSERT
+@@ -1989,6 +2011,11 @@ kalloc_type_view_init_var(void)
+ 	 */
+ 	kt_count = kalloc_type_view_parse(KTV_VAR);
+ 	assert(kt_count < UINT32_MAX);
++#if !__has_builtin(__builtin_xnu_type_summary)
++	if (kt_count == 0) {
++		return; /* as kalloc_type_view_init_fixed */
++	}
++#endif
+ 
+ #if MACH_ASSERT
+ 	vm_size_t sig_slist_size = (size_t) kt_count * sizeof(uint32_t);
+diff --git a/osfmk/kern/kalloc.h b/osfmk/kern/kalloc.h
+index d491acc..6a53fc6 100644
+--- a/osfmk/kern/kalloc.h
++++ b/osfmk/kern/kalloc.h
+@@ -858,8 +858,14 @@ __options_decl(kt_granule_t, uint32_t, {
+  *
+  * @param type          The type to analyze
+  */
++#if __has_builtin(__builtin_xnu_type_summary)
+ #define KT_SUMMARY_GRANULES(type) \
+ 	(__builtin_xnu_type_summary(type) & KT_SUMMARY_MASK_TYPE_BITS)
++#else
++/* Upstream LLVM has no type summary: every type counts as data (the kext views follow, kalloc.c). */
++#define KT_SUMMARY_GRANULES(type) \
++	((void)sizeof(type), KT_SUMMARY_MASK_DATA & KT_SUMMARY_MASK_TYPE_BITS)
++#endif
+ 
+ /*!
+  * @macro KALLOC_TYPE_SIG_CHECK
+@@ -920,10 +926,15 @@ __options_decl(kt_granule_t, uint32_t, {
+  * @param ptr           the pointer whose type needs to be checked.
+  * @param type          the type which the pointer will be checked against.
+  */
++#if __has_builtin(__builtin_xnu_types_compatible)
+ #define KALLOC_TYPE_IS_COMPATIBLE_PTR(ptr, type)                         \
+ 	(__builtin_xnu_types_compatible(os_get_pointee_type(ptr), type) ||   \
+ 	    __builtin_xnu_types_compatible(os_get_pointee_type(ptr), void))  \
+ 
++#else
++#define KALLOC_TYPE_IS_COMPATIBLE_PTR(ptr, type) 1 /* upstream LLVM: no type compatibility builtin */
++#endif
++
+ #define KALLOC_TYPE_ASSERT_COMPATIBLE_POINTER(ptr, type) \
+ 	_Static_assert(KALLOC_TYPE_IS_COMPATIBLE_PTR(ptr, type), \
+ 	    "Pointer type is not compatible with specified type")
+@@ -1648,7 +1659,12 @@ kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
+ #define KALLOC_TYPE_EMIT_SIG(sig_type, ...)                              \
+ 	(KALLOC_TYPE_CHECK(KT_SUMMARY_MASK_DATA, sig_type, ##__VA_ARGS__) || \
+ 	KALLOC_TYPE_VM_SIZE_CHECK(sig_type, ##__VA_ARGS__))?                 \
+-	"" : __builtin_xnu_type_signature(sig_type)
++	"" : KALLOC_TYPE_SIGNATURE(sig_type)
++#if __has_builtin(__builtin_xnu_type_signature)
++#define KALLOC_TYPE_SIGNATURE(sig_type) __builtin_xnu_type_signature(sig_type)
++#else
++#define KALLOC_TYPE_SIGNATURE(sig_type) "" /* upstream LLVM: no type signature */
++#endif
+ 
+ /*
+  * Kalloc type flags are adjusted to indicate if the type is "data-only" or

@@ -1,0 +1,75 @@
+IOKit's virtual member function comparisons on a compiler without Apple clang's __builtin_load_member_function_pointer
+(upstream LLVM, which macOS-DroidVM builds this kernel with on Linux): there OSMemberFunctionCast of a virtual function
+yields its virtual thunk, the same for every receiver, so
+- IOWorkLoop::eventSourcePerformsWork compared every event source passive and no IOInterruptEventSource ever ran
+  (IOMobileFramebufferLegacy's power state changes): all are active unless marked kPassive (polling a passive source does
+  nothing);
+- IOService::handleRegisterPowerDriver dropped every power informee whose powerStateWillChangeTo compared equal to the
+  root's, overrides included: they are kept.
+Under Apple clang (the iPadOS and macOS builds of this repository) both guards are false and the code is Apple's.
+From macOS-DroidVM patches/xnu-12377/0015 and IOServicePM-virtual-thunk-callbacks (lateautumn233).
+
+diff --git a/iokit/Kernel/IOServicePM.cpp b/iokit/Kernel/IOServicePM.cpp
+index cd18d0d..dfb7a2d 100644
+--- a/iokit/Kernel/IOServicePM.cpp
++++ b/iokit/Kernel/IOServicePM.cpp
+@@ -1261,7 +1261,6 @@ IOService::handleRegisterPowerDriver( IOPMRequest * request )
+ 	IOPMPowerStateIndex   numberOfStates = (IOPMPowerStateIndex) request->fArg2;
+ 	IOPMPowerStateIndex   i, stateIndex;
+ 	IOPMPowerStateIndex   lowestPowerState;
+-	IOService *           root;
+ 	OSIterator *          iter;
+ 
+ 	PM_ASSERT_IN_GATE();
+@@ -1336,7 +1335,12 @@ IOService::handleRegisterPowerDriver( IOPMRequest * request )
+ 		// it does nothing. One ramification of not always registering
+ 		// is the one fewer retain count held.
+ 
+-		root = getPlatform()->getProvider();
++#if !__has_builtin(__builtin_load_member_function_pointer) && __has_feature(ptrauth_member_function_pointer_type_discrimination)
++		// This compiler returns the same virtual thunk for every receiver.
++		// Keep the callbacks: comparing those thunks would discard overrides.
++		{
++#else
++		IOService *root = getPlatform()->getProvider();
+ 		assert(root);
+ 		if (!root ||
+ 		    ((OSMemberFunctionCast(void (*)(void),
+@@ -1347,6 +1351,7 @@ IOService::handleRegisterPowerDriver( IOPMRequest * request )
+ 		    root, &IOService::powerStateWillChangeTo)) !=
+ 		    ((OSMemberFunctionCast(void (*)(void),
+ 		    this, &IOService::powerStateWillChangeTo))))) {
++#endif
+ 			if (fInterestedDrivers->findItem(powerDriver) == NULL) {
+ 				PM_LOCK();
+ 				fInterestedDrivers->appendNewInformee(powerDriver);
+diff --git a/iokit/Kernel/IOWorkLoop.cpp b/iokit/Kernel/IOWorkLoop.cpp
+index 1d93f46..e8e8de3 100644
+--- a/iokit/Kernel/IOWorkLoop.cpp
++++ b/iokit/Kernel/IOWorkLoop.cpp
+@@ -706,7 +706,16 @@ IOWorkLoop::eventSourcePerformsWork(IOEventSource *inEventSource)
+ 		result = false;
+ 	} else if (IOEventSource::kActive & inEventSource->flags) {
+ 		result = true;
+-	} else if (controlG) {
++	}
++#if !__has_builtin(__builtin_load_member_function_pointer) && __has_feature(ptrauth_member_function_pointer_type_discrimination)
++	/*
++	 * Not with this compiler: without Apple clang's __builtin_load_member_function_pointer, OSMemberFunctionCast of a
++	 * virtual function is its virtual thunk, the same for every object, so every event source compared passive and an
++	 * IOInterruptEventSource never ran (IOMobileFramebufferLegacy's power state changes). Polling a passive source is
++	 * harmless (IOEventSource::checkForWork does nothing), so all are active unless marked kPassive.
++	 */
++#else
++	else if (controlG) {
+ 		void *  ptr1;
+ 		void *  ptr2;
+ 
+@@ -717,6 +726,7 @@ IOWorkLoop::eventSourcePerformsWork(IOEventSource *inEventSource)
+ 			result = false;
+ 		}
+ 	}
++#endif
+ 
+ 	return result;
+ }
