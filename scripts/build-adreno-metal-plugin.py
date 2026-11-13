@@ -6,6 +6,7 @@ Output (ignored, never committed): build/adreno-metal-plugin/NativeAdrenoMetal.b
 trust.json with its CDHash. The bundle is staged into the Data seed by add-gpu-plugin-data.py and trusted through an extra
 owner trust module (make-owner-trust-bundle.py); neither changes the original trust modules, AMFI or any Apple signature."""
 import json
+import os
 import plistlib
 import re
 import shutil
@@ -29,8 +30,14 @@ TURNIP = ROOT / ('build/mesa-tu-ios27' if IOS27 else 'build/mesa-tu-ios') / 'src
 if not TURNIP.is_file():
     raise SystemExit('Build Turnip first: python3 scripts/build-turnip-darwin.py --target ' + ('ios27' if IOS27 else 'ios'))
 subprocess.run(['python3', ROOT / 'scripts/gen-turnip-smoke-shaders.py'], check=True)
-# Turnip's first submission, recorded on the host, for the plugin's prefix replay (build/turnip-smoke/TurnipReplay.h).
-subprocess.run(['python3', ROOT / 'scripts/gen-turnip-replay.py'], check=True)
+# Turnip's first submission, recorded on the host, for the plugin's prefix replay (build/turnip-smoke/TurnipReplay.h): a test of
+# NativeAdreno's own command processor, which runs after the shared user test has passed on it. ADRENO_METAL_REPLAY=0 builds
+# without it (NativeAdrenoUserTest.h compiles the replay only when the header is there): a guest whose GPU is not NativeAdreno's
+# own never reaches it, and recording it needs the host simulation of that kernel stack (check-turnip-darwin-host.py).
+if os.environ.get('ADRENO_METAL_REPLAY', '1') != '0':
+    subprocess.run(['python3', ROOT / 'scripts/gen-turnip-replay.py'], check=True)
+else:
+    (ROOT / 'build/turnip-smoke/TurnipReplay.h').unlink(missing_ok=True)
 BRIDGE_TARGET = 'ios27' if IOS27 else 'ios'
 subprocess.run(['python3', ROOT / 'scripts/build-adreno-metal-bridge.py', '--target', BRIDGE_TARGET], check=True)
 BRIDGE = ROOT / 'build/adreno-metal-bridge' / BRIDGE_TARGET / 'libadreno_metal_bridge.a'
