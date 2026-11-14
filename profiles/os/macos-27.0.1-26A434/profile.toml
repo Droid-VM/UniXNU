@@ -30,8 +30,12 @@
 "product" = "VirtualMac2,1"
 "version" = "27.0.1"
 "build" = "26A434"
-"sha256" = "2f016638293c3e641b8b25391a76fbc16563b3711915a5551cf8aa0f5598a5c1"
-"fetch" = ["KernelCache"]
+# The whole IPSW is 2f016638293c3e641b8b25391a76fbc16563b3711915a5551cf8aa0f5598a5c1 (sha256; [ipsw.sha256] would pin members).
+# The virtual Mac's Erase identity (BuildManifest: vma2macosap, ApChipID 0xFE00, ApBoardID 0x20).
+"device_class" = "vma2macosap"
+"chip_id" = 65024
+"board_id" = 32
+"fetch" = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustCache", "Cryptex1,AppTrustCache"]
 
 
 # Apple sources of the release that pairs with xnu-12377.121.6, the same pins as the iPadOS 27 profile (public source
