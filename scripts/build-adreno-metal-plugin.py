@@ -358,7 +358,7 @@ FRONTEND_REPLACED = [
      '@property(nonatomic) NSUInteger heapOffset;\n@property(nonatomic) BOOL counted;   // its surface counted in use (countUse)\n'
      '- (void)countUse;\n@end\n'
      '// The render server counts the surfaces it textures in use while the textures live (countUse).\n'
-     'static const bool gCountsSurfaceUse=!strcmp(getprogname(),"backboardd");\n'
+     'static const bool gCountsSurfaceUse=nativeIsRenderServer();\n'
      '// A no-copy import keeps its pages'),
     ('- (void)dealloc {nmb_texture_release(_handle);if(_surface)CFRelease(_surface);}\n',
      '- (void)dealloc {nmb_texture_release(_handle);if(_surface){if(_counted)IOSurfaceDecrementUseCount(_surface);CFRelease(_surface);}}\n'
