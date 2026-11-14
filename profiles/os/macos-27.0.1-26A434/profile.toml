@@ -39,6 +39,16 @@
 
 
 
+
+# The read-only disks of the guest: the IPSW's OS image (the System volume "Macintosh HD") and Cryptex1,SystemOS, decrypted, as raw
+# disks (the DroidVM board's scripts/root-image-identity.py read these from 043-70867-640.dmg and 043-70701-651.dmg). The owner chain
+# mounts the root and the cryptex by these volume UUIDs and verifies every block against the owner-signed root policies.
+["root"]
+"os_volume_uuid" = "C73696D4-CAC4-40A0-90CB-7D0463E4E3E6"
+"os_image_sha256" = "fbfb1a38af09d65dc86bb9814a13b870d1895e4c435c38fde42e00b52cff21b3"
+"systemos_volume_uuid" = "22A29760-1AB3-4452-B425-721D0DB9626D"
+"systemos_image_sha256" = "5fea3f16f856f3aa1b3f88aa3cedfe75977a36f70a17041d6cf6349ba9a0e4d2"
+
 ["kernel"]
 
 ["kernel"."prelink"]
