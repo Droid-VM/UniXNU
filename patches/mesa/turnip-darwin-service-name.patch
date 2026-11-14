@@ -1,0 +1,43 @@
+Turnip (Darwin, virtio GPU): the accelerator by TU_DARWIN_SERVICE, as the KGSL-proxy path finds it
+
+The virtio-gpu context path looked the accelerator up as IOAcceleratorES, which exists on iPadOS only: on macOS the board publishes
+AGXAccelerator on IOGraphicsFamily IOAccelerator, so the board default was never asked and Turnip fell back to the KGSL proxy
+(refused: VK_ERROR_INITIALIZATION_FAILED in WindowServer). The NativeMetal plugin sets TU_DARWIN_SERVICE=AGXAccelerator on macOS.
+
+diff --git a/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc b/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc
+--- a/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin_virtgpu.cc
+@@ -87,6 +87,15 @@
+ 
+ static kern_return_t vg_call(uint32_t op, const void *in, size_t in_size, void *out, size_t out_size);
+ 
++/* The accelerator the board publishes: TU_DARWIN_SERVICE names its class, as for the KGSL-proxy path (tu_knl_darwin.cc): the plugin
++ * sets AGXAccelerator on macOS, whose Metal discovery finds IOGraphicsFamily's IOAccelerator; iPadOS keeps IOAcceleratorES. */
++static io_service_t
++dwv_service(void)
++{
++   const char *name = getenv("TU_DARWIN_SERVICE");
++   return IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching(name && *name ? name : "IOAcceleratorES"));
++}
++
+ /* Whether the board makes the virtio-gpu context the default 3D path (its kernel answers DROIDVM_VIRTGPU_PARAM_DEFAULT_3D, from
+  * the boot-arg vgpu-3d=1): asked once, over a connection of its own that is closed again. */
+ static bool
+@@ -96,7 +105,7 @@
+    if (answer >= 0)
+       return answer;
+    answer = 0;
+-   io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOAcceleratorES"));
++   io_service_t service = dwv_service();
+    if (!service)
+       return false;
+    kern_return_t kr = IOServiceOpen(service, mach_task_self(), DROIDVM_VIRTGPU_OPEN_TYPE, &dwv.conn);
+@@ -216,7 +225,7 @@
+ kern_return_t
+ dwv_open(void)
+ {
+-   io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOAcceleratorES"));
++   io_service_t service = dwv_service();
+    if (!service)
+       return kIOReturnNotFound;
+    kern_return_t kr = IOServiceOpen(service, mach_task_self(), DROIDVM_VIRTGPU_OPEN_TYPE, &dwv.conn);
