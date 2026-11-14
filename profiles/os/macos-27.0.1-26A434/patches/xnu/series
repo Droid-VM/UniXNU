@@ -14,3 +14,36 @@ arch:../../../patches/xnu-12377/darwin26-shared-region.patch
 ../../../../../patches/xnu-12377/macos-machine-config.patch
 ../../../../../patches/xnu-12377/macos-deny-exec.patch
 ../../../../../patches/xnu-12377/macos-block-descriptors.patch
+
+# The root of macOS on the layout of the iPadOS profiles (the OS image with the SystemOS cryptex over it, Data apart), as upstream's
+# macOS 27.3 profile boots it: profiles/os/macos-27.3-26C5035r/patches/xnu-12377 of UniXNU 14236be, unchanged. Data's firmlinks, the
+# union root as one volume, the read-only system volume, owner-authenticated opens on the root, the Hardware and VM volumes on
+# Data, the application cryptex, GPU bundles and system executables of the addon, the text console, and their configuration and
+# diagnostics. Not taken: upstream's payload, memory-window and wired-memory patches (sheng's own memory and UFS windows), and
+# those this fork does its own way (union readdir, the 24 MHz timebase, code signature hashing, macos-droidvm-k27-parity).
+../xnu-12377/macos-owner-data-firmlinks.patch
+../xnu-12377/macos-verbose-text-console.patch
+../xnu-12377/macos-union-one-volume.patch
+../xnu-12377/macos-exec-log.patch
+../xnu-12377/macos-apfs-boot-shim.patch
+../xnu-12377/macos-read-only-system-volume.patch
+../xnu-12377/macos-rw-held-report.patch
+../xnu-12377/macos-service-port-derive-check.patch
+../xnu-12377/macos-gpu-bundles.patch
+../xnu-12377/macos-owner-root-authenticated-open.patch
+../xnu-12377/macos-hardware-volume.patch
+../xnu-12377/macos-app-cryptex.patch
+../xnu-12377/macos-vm-volume.patch
+../xnu-12377/macos-addon-sbin.patch
+../xnu-12377/xnuconfig-macos-memorystatus-policy.patch
+../xnu-12377/xnuconfig-work-interval-counters.patch
+../xnu-12377/xnuconfig-timebase-trap-count.patch
+../xnu-12377/vmwait-vnode-pager-peek-name.patch
+../xnu-12377/kperf-static-if-builtin-args.patch
+../xnu-12377/cshash-native4k-parallel.patch
+../xnu-12377/gpubundle-system-extensions-view.patch
+../xnu-12377/gpucache-system-shader-cache-view.patch
+../xnu-12377/gpupool-device-pager-close.patch
+../xnu-12377/platform-error-name-address.patch
+../xnu-12377/contig-search-report.patch
+../xnu-12377/kmem-alloc-failure-report.patch
