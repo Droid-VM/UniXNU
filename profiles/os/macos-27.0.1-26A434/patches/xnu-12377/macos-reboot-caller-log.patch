@@ -1,0 +1,14 @@
+reboot(2) names its caller: a macOS guest stopped right after WindowServer first drew ("MACH Reboot", nothing else in the log),
+so the process, its pid, the options and the MAC check's answer are printed before the reboot goes ahead. Diagnostics only.
+--- a/bsd/kern/kern_xxx.c
++++ b/bsd/kern/kern_xxx.c
+@@ -150,6 +150,9 @@
+ skip_cred_check:
+ #endif
+ #endif
++	/* Who asks (a macOS guest stopped right after WindowServer first drew, with nothing else in the log). */
++	printf("reboot: %s[%d] opt %#x error %d%s%s\n", proc_best_name(p), proc_getpid(p), uap->opt, error,
++	    message ? " message " : "", message ? message : "");
+ 	if (!error) {
+ 		OSBitOrAtomic(P_REBOOT, &p->p_flag);  /* No more signals for this proc */
+ 		error = reboot_kernel(uap->opt, message);
