@@ -17,10 +17,10 @@
 # The deployment version of that iOS-platform kernel (macOS-DroidVM's k27 builds with -miphoneos-version-min=26.0).
 "ios_version" = "27.0"
 "abi" = []
-# Packaging stays macOS-DroidVM's for now: its k27 tooling links this kernel into a macOS kernel collection with the macOS
-# kexts and the board's own kexts (overlay/kext), boots the single APFS container and supplies the device tree. So this
-# profile has no [kernel.prelink], [adt] or [root] table yet: `unixnu build --os macos-27.0.1-26A434 kernel` builds the
-# kernel, the collection is k27/kc-build27.py's.
+# Packaged like the iPadOS profiles: XnuPrelink links this kernel into the virtual Mac's kernel collection (macOS kernel
+# collections keep their symbol tables, so the kexts' kernel imports pair by name: XnuPrelink's fileset_names.py), and the
+# board adds its own kexts. Root images, Data seed and device tree as on iPadOS (the OS image with the SystemOS cryptex over
+# it, Data apart, the owner chain verifying the roots), the layout upstream's macOS profile boots.
 # Opt-in bring-up diagnostics of that line: patches/xnu/diag.series (add "os:patches/xnu/diag.series" at the end of the
 # board's macOS patch_series).
 
@@ -37,6 +37,19 @@
 "board_id" = 32
 "fetch" = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustCache", "Cryptex1,AppTrustCache"]
 
+
+
+["kernel"]
+
+["kernel"."prelink"]
+"tool" = "kits/XnuPrelink/emit_prelink.py"
+"kernel" = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
+# kernelcache.release.vma2 decompressed. It keeps full symbol tables on the kernel and every kext: the prelink map is built
+# from names, and the collection stays at its linked addresses (0xfffffe0007004000).
+"kernelcache_sha256" = "ca55ea8c4c86170e870380ae5501b8b43adb2d2d3db28be4531b3040653be203"
+"slide" = "0"
+# _amfi_register_mac_policy: calls _initializeAppleMobileFileIntegrity and returns 0; the kernel patch calls it early.
+"early_security_init" = "com.apple.driver.AppleMobileFileIntegrity=0xfffffe0008611a98"
 
 # Apple sources of the release that pairs with xnu-12377.121.6, the same pins as the iPadOS 27 profile (public source
 # interfaces; the storage and HID builds compile against them).
