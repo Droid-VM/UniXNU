@@ -234,7 +234,12 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     # (WRITE_FRAMES=1), later frames record at commit with no host step; the texels the same in every mode. 5566, webgpu-samples'
     # renderBundles (5000 bundled draws): 2.3 -> 2.6 fps, GPU busy 48 -> 63%; the recording moved from the scheduler's host step
     # to WebKit's commit (its work queue thread 73% busy). The device-executing unit tests fail no test the base does not.
-    '0038-settled-gpu-writes-read-at-commit.patch']]
+    '0038-settled-gpu-writes-read-at-commit.patch',
+    # A two-plane YCbCr texture whose planes its functions read in place is made over the planes alone where the process sets
+    # METAL2VULKAN_YCBCR_PLANES_ONLY=1, which the Metal plugin does for macOS's WindowServer: no image of converted texels and no
+    # staging copy, about 100 MiB per 4096x2160 texture, for each surface of the lock screen's Aerial wallpaper pool the server keeps
+    # a texture of (Droid-VM/macOS-DroidVM's P4, its metal2vulkan-macos/0001). Unset, nothing changes.
+    '0039-ycbcr-planes-only-where-asked.patch']]
 
 
 def git_tree(*steps):
