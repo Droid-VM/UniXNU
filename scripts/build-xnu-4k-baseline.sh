@@ -456,7 +456,7 @@ OWNER_DATA_HEADER=$ROOT/build/xnu/owner-data-volume.h
 # xnu-10063's names the 21H461 OS volume itself, so an iPadOS 17 profile carries none.
 MANIFEST_NEEDS_ROOT_UUID=0
 case "$XNU_TAG" in xnu-10063*) ;; *) MANIFEST_NEEDS_ROOT_UUID=$OWNER_BOOT_MANIFEST ;; esac
-python3 - "$OWNER_DATA_HEADER" "$OWNER_DATA_MOUNT" "$NATIVE_RAM_BLOCK" "${XNU_OWNER_DATA_VOLUME_UUID:-}" "${XNU_OWNER_CACHE_VOLUME_UUID:-}" "${XNU_OWNER_ROOT_VOLUME_UUID:-}" "$MANIFEST_NEEDS_ROOT_UUID" <<'PY_DATA_UUID'
+python3 - "$OWNER_DATA_HEADER" "$OWNER_DATA_MOUNT" "$NATIVE_RAM_BLOCK" "${XNU_OWNER_DATA_VOLUME_UUID:-}" "${XNU_OWNER_CACHE_VOLUME_UUID:-}" "${XNU_OWNER_ROOT_VOLUME_UUID:-}" "$MANIFEST_NEEDS_ROOT_UUID" "${XNU_OWNER_APP_VOLUME_UUID:-}" <<'PY_DATA_UUID'
 from pathlib import Path
 import sys
 import uuid
@@ -484,14 +484,21 @@ if len(sys.argv) > 6 and sys.argv[6]:
         raise SystemExit('Set XNU_OWNER_ROOT_VOLUME_UUID to the OS volume UUID of the signed policy')
 elif len(sys.argv) > 7 and sys.argv[7] == '1':
     raise SystemExit('The owner boot manifest needs XNU_OWNER_ROOT_VOLUME_UUID (OS profile [root] os_volume_uuid)')
+# macOS's application cryptex (Cryptex1,AppOS, Safari): its verified volume, mounted at /System/Volumes/Preboot/Cryptexes/App
+# (macos-app-cryptex.patch, compiled only with it); from the OS profile ([root] app_volume_uuid), as upstream's.
+if len(sys.argv) > 8 and sys.argv[8]:
+    try:
+        text += '#define XNU_OWNER_APP_VOLUME_UUID "' + str(uuid.UUID(sys.argv[8])).upper() + '"\n'
+    except ValueError:
+        raise SystemExit('Set XNU_OWNER_APP_VOLUME_UUID to the App cryptex volume UUID of the signed policy')
 path.parent.mkdir(parents=True, exist_ok=True)
 if not path.exists() or path.read_text() != text:
     path.write_text(text)
 PY_DATA_UUID
 OWNER_DATA_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.owner-data-mount-mode
-if [ "$(cat "$OWNER_DATA_STAMP" 2>/dev/null || echo 0)" != "$OWNER_DATA_MOUNT:$NATIVE_RAM_BLOCK:$BOARD_LAUNCH_POLICY:${XNU_OWNER_CACHE_VOLUME_UUID:-}:${XNU_OWNER_ROOT_VOLUME_UUID:-}" ]; then
+if [ "$(cat "$OWNER_DATA_STAMP" 2>/dev/null || echo 0)" != "$OWNER_DATA_MOUNT:$NATIVE_RAM_BLOCK:$BOARD_LAUNCH_POLICY:${XNU_OWNER_CACHE_VOLUME_UUID:-}:${XNU_OWNER_ROOT_VOLUME_UUID:-}:${XNU_OWNER_APP_VOLUME_UUID:-}" ]; then
   rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/kern_exec.o"
-  printf '%s\n' "$OWNER_DATA_MOUNT:$NATIVE_RAM_BLOCK:$BOARD_LAUNCH_POLICY:${XNU_OWNER_CACHE_VOLUME_UUID:-}:${XNU_OWNER_ROOT_VOLUME_UUID:-}" > "$OWNER_DATA_STAMP"
+  printf '%s\n' "$OWNER_DATA_MOUNT:$NATIVE_RAM_BLOCK:$BOARD_LAUNCH_POLICY:${XNU_OWNER_CACHE_VOLUME_UUID:-}:${XNU_OWNER_ROOT_VOLUME_UUID:-}:${XNU_OWNER_APP_VOLUME_UUID:-}" > "$OWNER_DATA_STAMP"
 fi
 OWNER_CRYPTEX_FILES=${XNU_OWNER_CRYPTEX_FILES:-0}
 if [ "$OWNER_CRYPTEX_FILES" != 0 ] && [ "$OWNER_CRYPTEX_FILES" != 1 ]; then

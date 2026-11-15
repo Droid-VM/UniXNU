@@ -48,6 +48,10 @@
 "os_image_sha256" = "fbfb1a38af09d65dc86bb9814a13b870d1895e4c435c38fde42e00b52cff21b3"
 "systemos_volume_uuid" = "22A29760-1AB3-4452-B425-721D0DB9626D"
 "systemos_image_sha256" = "5fea3f16f856f3aa1b3f88aa3cedfe75977a36f70a17041d6cf6349ba9a0e4d2"
+# The application cryptex (Cryptex1,AppOS: Safari, 043-70637-690.dmg, a plain raw image), a third verified disk the kernel mounts at
+# /System/Volumes/Preboot/Cryptexes/App (macos-app-cryptex.patch), as upstream's macOS 27.3 profile carries it.
+"app_volume_uuid" = "FD1950F3-1DB0-4079-AAAF-297CBFAFBD33"
+"app_image_sha256" = "af6d606f4a52b5b92d85b8860d98261912d16961de86be47f29f548953b61d55"
 
 ["kernel"]
 
