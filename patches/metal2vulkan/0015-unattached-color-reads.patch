@@ -1,8 +1,61 @@
+diff --git a/crates/metal2vulkan-validation/src/runtime_lane/color_groups.rs b/crates/metal2vulkan-validation/src/runtime_lane/color_groups.rs
+--- a/crates/metal2vulkan-validation/src/runtime_lane/color_groups.rs
++++ b/crates/metal2vulkan-validation/src/runtime_lane/color_groups.rs
+@@ -25,8 +25,9 @@
+ //!   nothing, so on the restricted device it draws in two groups as `cg_five` does, its group
+ //!   ordering nothing. Specialized live, each is the pipeline's limit refusal there (`dfg_branch`
+ //!   reads color 4 from group 0's variant; the others order a read in each group's draw).
+-//!   `dfr_lacks`, a color 1 input beside a pipeline of color 0 alone, is the pipeline's
+-//!   `InvalidDescriptor(ColorAttachment)` dead and live, as plain Metal refuses it both ways
++//!   `dfr_lacks`, a color 1 input beside a pipeline of color 0 alone, is made dead and live, the
++//!   input reading zero (the DroidVM board's rule, `LoweringInputs::unattached_reads`: iPadOS 27's
++//!   QuartzCore makes such pipelines), where plain Metal on macOS refuses it both ways
+ //!   (`metal2vulkan-conformance/probes/dead_ordered_and_unattached_reads.m`).
+ //!
+ //! Metal's answers (a probe on the Apple M3 Max, macOS 27.0.1, of these scenes; the dead read's of
+@@ -51,8 +52,7 @@ use crate::air_library::AirLibrary;
+ use crate::gpu::TEST_DEVICE;
+ use metal2vulkan::device::VkLimit;
+ use metal2vulkan::error::{
+-    Capability, DescriptorError, Error as CompileError, Feature, MetalAnswer, RuntimeDriverDefect,
+-    Unsupported,
++    Capability, Feature, RuntimeDriverDefect, Unsupported,
+ };
+ use metal2vulkan::library::{FunctionConstantValue, FunctionConstantValues};
+ use metal2vulkan::metal::state::{DepthStencilDescriptor, StencilDescriptor};
+@@ -785,22 +785,15 @@ fn dead_scene(lane: &Lane, five: &[usize]) {
+             assert_eq!(live.unwrap_err(), limit, "{fragment} live on {name}");
+         }
+     }
+-    // A color input without an attachment, read or not: Metal's pipeline error.
+-    let unattached = Error::Compile(CompileError::InvalidDescriptor(
+-        DescriptorError::ColorAttachment {
+-            index: 1,
+-            metal: MetalAnswer::NilWithError,
+-        },
+-    ));
++    // A color input without an attachment, read or not: made, reading zero (the board's rule;
++    // Metal's pipeline error on macOS).
+     for reads in [false, true] {
+         let made = dead_pipeline(lane, (&lane.rog, "dfr_lacks"), &[0], reads);
+-        assert_eq!(
+-            made.unwrap_err(),
+-            unattached,
+-            "dfr_lacks ({reads}) on {name}"
+-        );
++        if let Err(e) = made {
++            panic!("dfr_lacks ({reads}) on {name}: {e}");
++        }
+     }
+-    eprintln!("COLOR-GROUPS dfr_lacks on {name}: refused dead and live, as Metal");
++    eprintln!("COLOR-GROUPS dfr_lacks on {name}: made dead and live, the input reading zero");
+ }
+ 
+ /// What the restricted device refuses, and the device as it is draws (the module docs); on a
 diff --git a/crates/metal2vulkan/src/lower/fragment/fetch.rs b/crates/metal2vulkan/src/lower/fragment/fetch.rs
-index 3de21d36..c576d49e 100644
 --- a/crates/metal2vulkan/src/lower/fragment/fetch.rs
 +++ b/crates/metal2vulkan/src/lower/fragment/fetch.rs
-@@ -1434,6 +1434,10 @@ fn colors_read(cx: &SelectCx<'_>, used: &BTreeSet<u32>) -> Result<BTreeSet<u32>,
+@@ -1436,6 +1436,10 @@ pub(super) fn colors_read(cx: &SelectCx<'_>, used: &BTreeSet<u32>) -> Result<BTr
              ..
          } = b.role
          {
@@ -14,10 +67,9 @@ index 3de21d36..c576d49e 100644
                  .map_err(|e| e.at_attachment(Attachment::Color(color)))?;
              out.insert(color);
 diff --git a/crates/metal2vulkan/src/lower/fragment/mod.rs b/crates/metal2vulkan/src/lower/fragment/mod.rs
-index f9a7edbb..bf6fc3a7 100644
 --- a/crates/metal2vulkan/src/lower/fragment/mod.rs
 +++ b/crates/metal2vulkan/src/lower/fragment/mod.rs
-@@ -183,6 +183,9 @@ pub struct FragmentPlan {
+@@ -198,6 +198,9 @@ pub struct FragmentPlan {
      pub helper_queries: bool,
      /// Every used color input (framebuffer fetch), in parameter order.
      pub colors: Vec<ColorInput>,
@@ -27,7 +79,7 @@ index f9a7edbb..bf6fc3a7 100644
      /// The function is in a raster order group: its body runs inside this interlock mode's
      /// critical section, called from the entry [`wrap_entry`] builds.
      pub interlock: Option<ExecMode>,
-@@ -591,6 +594,22 @@ pub fn select_param(cx: &mut SelectCx<'_>, b: &ParamBinding) -> Result<(), Error
+@@ -628,6 +631,22 @@ pub fn select_param(cx: &mut SelectCx<'_>, b: &ParamBinding) -> Result<(), Error
      if let ParamRole::Imageblock(ib) = &b.role {
          return imageblock::select_input(cx, b.param, ib, b.ty.align);
      }
@@ -50,7 +102,7 @@ index f9a7edbb..bf6fc3a7 100644
      let c = color::select_param(cx, b).map_err(|e| match b.role {
          ParamRole::ColorInput {
              index: AbiInt::Const(color),
-@@ -731,6 +750,15 @@ pub fn param_value(
+@@ -786,6 +805,15 @@ pub fn param_value(
          .iter()
          .find(|c| c.param == b.param)
          .copied();
@@ -66,17 +118,99 @@ index f9a7edbb..bf6fc3a7 100644
      match planned {
          Some(c) => color::value(cx, fb, c),
          None => Err(cx.fail(format!("parameter {} has no fragment value", b.param))),
+diff --git a/crates/metal2vulkan/src/lower/stage_io/plan.rs b/crates/metal2vulkan/src/lower/stage_io/plan.rs
+--- a/crates/metal2vulkan/src/lower/stage_io/plan.rs
++++ b/crates/metal2vulkan/src/lower/stage_io/plan.rs
+@@ -1073,8 +1073,8 @@ enum AmplifiedIndex {
+ /// function writes to `color` itself is stored nowhere: plain Metal stores the zero there all the
+ /// same (a Metal probe). A function that declares a color input at `color`, read or not, is no
+ /// pipeline's: plain Metal refuses its pipeline whether or not the body reads the input
+-/// (`pipeline::compile`'s `color_inputs_attached`), so compiled alone under such inputs it is not
+-/// lowered.
++/// (`metal2vulkan-conformance/probes/dead_ordered_and_unattached_reads.m`), so compiled alone
++/// under such inputs it is not lowered.
+ fn zeroed_output(
+     cx: &mut SelectCx<'_>,
+     color: u32,
 diff --git a/crates/metal2vulkan/src/pipeline/compile.rs b/crates/metal2vulkan/src/pipeline/compile.rs
-index 678cb8ac..c8f82b0c 100644
 --- a/crates/metal2vulkan/src/pipeline/compile.rs
 +++ b/crates/metal2vulkan/src/pipeline/compile.rs
-@@ -2012,6 +2012,30 @@ pub(crate) fn unattached_colors_written(
+@@ -36,8 +36,7 @@ use crate::cache::Hash256;
+ use crate::cache::VariantKey;
+ use crate::device::DeviceProfile;
+ use crate::error::{
+-    DescriptorError, DiagName, Error, Feature, InternalError, InternalKind, MetalAnswer,
+-    Unsupported,
++    DescriptorError, DiagName, Error, Feature, InternalError, InternalKind, Unsupported,
+ };
+ use crate::library::function::FunctionSource;
+ use crate::library::{
+@@ -258,45 +257,6 @@ fn grouped_entry(
+     }
+ }
+ 
+-/// Where `inputs` are a render pipeline's fragment stage's, each `[[color(n)]]` input the
+-/// specialized fragment entry `spec` declares has an attachment with a pixel format in the
+-/// pipeline (the pass's attachments, or its color group's `ColorGroup::present`, the pipeline's
+-/// own), whether or not the body reads it: plain Metal refuses the pipeline otherwise, with the
+-/// read dead after specialization as with it live ("Shaders reads from a color attachment whose
+-/// pixel format is MTLPixelFormatInvalid",
+-/// `metal2vulkan-conformance/probes/dead_ordered_and_unattached_reads.m`, an M3 Max under macOS
+-/// 27.0.1). `InvalidDescriptor(ColorAttachment)` at the first index without one. An input its
+-/// constants gate is no parameter of the specialized entry. Checked on the entry before its
+-/// group renumbers it, by both a stage's keys ([`stage_inputs`]) and its compile.
+-fn color_inputs_attached(spec: &air::Entry, inputs: InputsFrom<'_>) -> Result<(), Error> {
+-    let InputsFrom::Fragment(pass, ..) = inputs else {
+-        return Ok(());
+-    };
+-    for b in &spec.ep.params {
+-        let ParamRole::ColorInput {
+-            index: AbiInt::Const(color),
+-            ..
+-        } = b.role
+-        else {
+-            continue;
+-        };
+-        let attached = match pass.color_group {
+-            Some(g) => g.present.contains(&color),
+-            None => pass
+-                .color_attachments
+-                .get(color as usize)
+-                .is_some_and(Option::is_some),
+-        };
+-        if !attached {
+-            return Err(Error::InvalidDescriptor(DescriptorError::ColorAttachment {
+-                index: color,
+-                metal: MetalAnswer::NilWithError,
+-            }));
+-        }
+-    }
+-    Ok(())
+-}
+-
+ /// The lowering input of a `maxCallStackDepth` `depth`: `None` at Metal's default, 1 (or 0).
+ fn call_stack_input(depth: u32) -> Option<u32> {
+     (depth > 1).then_some(depth)
+@@ -609,7 +569,6 @@ pub fn stage_inputs(
+     guarded(|| {
+         let specialized =
+             entries.specialized(fd, inputs.call_stack_depth(), inputs.open_cl_mode(), m)?;
+-        color_inputs_attached(&specialized.spec, inputs)?;
+         // A color group's variant reads its own renumbering of the entry the creation shares.
+         let grouped = match inputs.color_group() {
+             Some(_) => Some(grouped_entry(specialized.spec.clone(), inputs, p)?),
+@@ -2173,6 +2132,35 @@ pub(crate) fn unattached_colors_written(
          .collect()
  }
  
 +/// The colors the specialized fragment entry `spec` reads through a `[[color(n)]]` input of a
 +/// constant index that a render pipeline whose color attachments are `colors` has no attachment
-+/// for (`LoweringInputs::unattached_reads`).
++/// for (`LoweringInputs::unattached_reads`). Such a pipeline is made, each such input reading
++/// zero (the DroidVM board's rule): plain Metal on macOS refuses it, dead or live
++/// (`metal2vulkan-conformance/probes/dead_ordered_and_unattached_reads.m`, an M3 Max under macOS
++/// 27.0.1), but iPadOS 27's QuartzCore makes `path_blit_frag_lph` and `fixed_frag_lph_cph` for
++/// passes without the attachment they read, and its render server aborts when the pipeline is
++/// refused; so no compile, keyed or not, checks a color input for an attachment.
 +pub(crate) fn unattached_colors_read(
 +    spec: &air::Entry,
 +    colors: &[Option<ColorAttachmentDescriptor>],
@@ -100,8 +234,8 @@ index 678cb8ac..c8f82b0c 100644
 +
  /// The framebuffer-fetch state of pass `d` for the specialized fragment entry `spec` on `p`
  /// (`LoweringInputs::framebuffer_fetch`): on a device that orders fetch only through the pixel
- /// interlock, the state of every attachment the entry declares a `[[color(n)]]` input of a constant
-@@ -2287,6 +2311,7 @@ fn lower_inputs(
+ /// interlock, the state of every attachment the entry reads through a `[[color(n)]]` input of a
+@@ -2491,6 +2479,7 @@ fn lower_inputs(
              out.signed_color_attachments = signed_colors_written(spec, d.color_attachments);
              out.unattached_colors =
                  unattached_colors_written(spec, d.color_attachments, d.alpha_to_coverage);
@@ -109,11 +243,18 @@ index 678cb8ac..c8f82b0c 100644
              out.framebuffer_fetch = fetch_inputs(spec, d, variant, p);
              let read = raw_indices_read(spec);
              out.viewport_index_varying = written.viewport && read.viewport;
+@@ -2653,7 +2642,6 @@ fn plan_one(r: &Request<'_>, p: &DeviceProfile, m: &mut Meter) -> Result<Planned
+         spec,
+         before,
+     } = ordered_entry(r, p, m)?;
+-    color_inputs_attached(&spec, r.inputs)?;
+     let spec = grouped_entry(spec, r.inputs, p)?;
+     let inputs = lower_inputs(&spec, r.inputs, p, m)?;
+     // A flat variant runs its grid in threadgroups of its own: only a kernel that does not observe
 diff --git a/crates/metal2vulkan/src/pipeline/compile/key.rs b/crates/metal2vulkan/src/pipeline/compile/key.rs
-index a02631d0..0d00988c 100644
 --- a/crates/metal2vulkan/src/pipeline/compile/key.rs
 +++ b/crates/metal2vulkan/src/pipeline/compile/key.rs
-@@ -369,6 +369,11 @@ pub fn function_key(
+@@ -412,6 +412,11 @@ pub fn function_key(
          h.bytes(b"unattached-colors")
              .bytes(format!("{:?}", inputs.unattached_colors).as_bytes());
      }
@@ -126,10 +267,9 @@ index a02631d0..0d00988c 100644
      match inputs.sample_mask {
          Some(m) if crate::pipeline::private_state::uniform(&m) => {
 diff --git a/crates/metal2vulkan/src/pipeline/lower_inputs.rs b/crates/metal2vulkan/src/pipeline/lower_inputs.rs
-index f499702b..ac25be8e 100644
 --- a/crates/metal2vulkan/src/pipeline/lower_inputs.rs
 +++ b/crates/metal2vulkan/src/pipeline/lower_inputs.rs
-@@ -532,6 +532,15 @@ pub struct LoweringInputs {
+@@ -543,6 +543,15 @@ pub struct LoweringInputs {
      /// (`NeedsInput(ColorWrites)`). Any other function compiles as without it.
      #[cfg_attr(feature = "serde", serde(default))]
      pub unattached_colors: BTreeSet<u32>,
@@ -145,3 +285,89 @@ index f499702b..ac25be8e 100644
      /// The render pipeline's private sample mask, its bits below the pipeline's sample count,
      /// ANDed with its private sample coverage's, by the window pixel's place in its 2x2 quad
      /// (index `(x & 1) | (y & 1) << 1`), which the fragment function applies itself: each return
+diff --git a/crates/metal2vulkan/src/tests/engine_dead_reads.rs b/crates/metal2vulkan/src/tests/engine_dead_reads.rs
+--- a/crates/metal2vulkan/src/tests/engine_dead_reads.rs
++++ b/crates/metal2vulkan/src/tests/engine_dead_reads.rs
+@@ -10,11 +10,13 @@
+ //!   the read dead as with it live. Specialized dead, each compiles on every profile here without
+ //!   an interlock, including a device without one, passing L3; specialized live, each takes the
+ //!   pixel interlock where the device has it, and is refused where it has neither interlock.
+-//! - **A color input without an attachment** is Metal's pipeline error whether or not the body
+-//!   reads it ("Shaders reads from a color attachment whose pixel format is
++//! - **A color input without an attachment** is Metal's pipeline error on macOS whether or not
++//!   the body reads it ("Shaders reads from a color attachment whose pixel format is
+ //!   MTLPixelFormatInvalid", for `dfr_lacks`'s color 1 input with its read dead and live, beside
+-//!   a pipeline of color 0 alone): `InvalidDescriptor(ColorAttachment)` at that index, dead or
+-//!   live. With color 1 in the pipeline, the dead read compiles and reads nothing.
++//!   a pipeline of color 0 alone). The DroidVM board makes the pipeline, the input reading zero
++//!   (`LoweringInputs::unattached_reads`: iPadOS 27's QuartzCore makes such pipelines and its
++//!   render server aborts when one is refused): dead or live, it compiles with no input
++//!   attachment. With color 1 in the pipeline, the dead read compiles and reads nothing.
+ //!
+ //! The misses are counted by kind before a test fails. `llvm-as` assembles the fixtures; a missing
+ //! tool skips visibly. No GPU is used.
+@@ -25,7 +27,7 @@ use crate::budget::Budget;
+ use crate::cache::VariantKey;
+ use crate::device::requirements::VkFeature;
+ use crate::device::{Device, DevicePolicy};
+-use crate::error::{DescriptorError, Error, Feature, MetalAnswer};
++use crate::error::{Error, Feature};
+ use crate::library::{FunctionConstantValue, FunctionConstantValues, Library};
+ use crate::metal::{DataType, PixelFormat};
+ use crate::pipeline::artifact::RenderPipeline;
+@@ -205,13 +207,13 @@ fn a_raster_order_group_on_an_input_dead_after_specialization_takes_no_interlock
+     assert_eq!(checked, cases.len());
+ }
+ 
+-/// A color input without an attachment is Metal's pipeline error whether or not the specialized
+-/// body reads it (the module docs): `dfr_lacks` beside a pipeline of color 0 alone is
+-/// `InvalidDescriptor(ColorAttachment)` at index 1, dead and live, on `lavapipe` and `moltenvk-m3`,
+-/// compiled and keyed (`Device::render_variant_key`, which a runtime's creation asks first). With
+-/// color 1 in the pipeline, the dead read compiles.
++/// A color input without an attachment reads zero, whether or not the specialized body reads it
++/// (the module docs, the DroidVM board's rule): `dfr_lacks` beside a pipeline of color 0 alone
++/// is made, dead and live, on `lavapipe` and `moltenvk-m3`, compiled and keyed
++/// (`Device::render_variant_key`, which a runtime's creation asks first), with no input
++/// attachment and passing L3. With color 1 in the pipeline, the dead read compiles.
+ #[test]
+-fn a_color_input_without_an_attachment_is_refused_dead_or_live() {
++fn a_color_input_without_an_attachment_reads_zero_dead_or_live() {
+     let (Some(vs), Some(fs)) = (fixture("color_groups"), fixture("dfk_dead_rog")) else {
+         return;
+     };
+@@ -230,20 +232,22 @@ fn a_color_input_without_an_attachment_is_refused_dead_or_live() {
+             let keys = dev
+                 .render_variant_key(&d, &VariantKey::new(), &budget, &StageEntries::new())
+                 .map(|_| ());
+-            let compiled = dev.compile_render_pipeline(&d, &budget).map(|_| ());
+-            for (how, made) in [("compiled", compiled), ("keyed", keys)] {
+-                let what = format!("{what}, {how}");
+-                match made {
+-                    Err(Error::InvalidDescriptor(DescriptorError::ColorAttachment {
+-                        index: 1,
+-                        metal: MetalAnswer::NilWithError,
+-                    })) => {}
+-                    Ok(()) => misses.entry("made".into()).or_default().push(what),
+-                    Err(e) => misses
+-                        .entry(format!("refused: {e}"))
+-                        .or_default()
+-                        .push(what),
++            if let Err(e) = keys {
++                misses
++                    .entry(format!("keyed, refused: {e}"))
++                    .or_default()
++                    .push(what.clone());
++            }
++            match dev.compile_render_pipeline(&d, &budget) {
++                Ok(p) => {
++                    assert!(p.graphics.input_attachments.is_empty(), "{what}");
++                    assert!(p.graphics.storage_attachments.is_empty(), "{what}");
++                    validate(&p, &dev, &what);
+                 }
++                Err(e) => misses
++                    .entry(format!("compiled, refused: {e}"))
++                    .or_default()
++                    .push(what),
+             }
+         }
+         let d = specialized(&vs, &fs, "dfr_lacks", &[0, 1], false);

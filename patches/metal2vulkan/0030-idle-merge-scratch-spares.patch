@@ -1,7 +1,33 @@
+diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
+--- a/crates/metal2vulkan-runtime/src/memory.rs
++++ b/crates/metal2vulkan-runtime/src/memory.rs
+@@ -5367,9 +5367,21 @@ impl crate::Device {
+     /// `emptied` is `None`) stays, as [`keep_room`] would make it again at the next creation call;
+     /// [`Device::release_kept_memory`](crate::Device::release_kept_memory) frees every empty
+     /// block of the pools.
++    ///
++    /// The same call drops the shadows' spare merge scratches unused for five times `idle` (at
++    /// least 10 s; all of them for `Duration::ZERO`, `shadow_merge::trim_scratch_spares`). The
++    /// answer counts blocks only.
+     pub fn trim_kept_memory(&self, idle: Duration) -> usize {
+         let shared = self.shared();
+-        lock(&shared.memory).trim_kept(shared.vk(), idle)
++        let blocks = lock(&shared.memory).trim_kept(shared.vk(), idle);
++        // And the shadows' spare merge scratches unused for five times `idle` (at least 10 s), on
++        // memory pressure all (DroidVM).
++        let scratch_idle = match idle.is_zero() {
++            true => Duration::ZERO,
++            false => (idle * 5).max(Duration::from_secs(10)),
++        };
++        crate::shadow_merge::trim_scratch_spares(scratch_idle);
++        blocks
+     }
+ }
+ 
 diff --git a/crates/metal2vulkan-runtime/src/shadow_merge.rs b/crates/metal2vulkan-runtime/src/shadow_merge.rs
 --- a/crates/metal2vulkan-runtime/src/shadow_merge.rs
 +++ b/crates/metal2vulkan-runtime/src/shadow_merge.rs
-@@ -148,7 +148,8 @@
+@@ -164,7 +164,8 @@ use metal2vulkan::bind::{
  };
  use metal2vulkan::vk::{Format, FormatFeatureFlags2, ImageUsageFlags};
  use std::ops::Range;
@@ -11,7 +37,7 @@ diff --git a/crates/metal2vulkan-runtime/src/shadow_merge.rs b/crates/metal2vulk
  
  /// Bytes one workgroup merges: `ShadowMergeModule::WORDS` words per invocation.
  const GROUP_BYTES: u64 = 4 * (ShadowMergeModule::WORDS * ShadowMergeModule::LOCAL_SIZE) as u64;
-@@ -163,28 +164,40 @@
+@@ -179,19 +180,31 @@ const KEPT_SCRATCHES: usize = 2;
  /// The scratch buffers a shadow's merges are done with, kept for its next merges: each comes back
  /// as its merge goes, once the command buffers that recorded it completed (they retain it), so no
  /// command a later merge records overlaps one of an earlier merge in it. At most
@@ -48,8 +74,10 @@ diff --git a/crates/metal2vulkan-runtime/src/shadow_merge.rs b/crates/metal2vulk
 +        Some(spares.swap_remove(at).0)
      }
  
+     /// Let go of every kept buffer: the shadow merges no more (`texture/storage_form.rs`).
+@@ -202,10 +215,10 @@ impl ScratchSpares {
      /// Keep `buffer` for a later merge, the smallest kept going past [`KEPT_SCRATCHES`].
-     fn give(&self, buffer: Buffer) {
+     pub(super) fn give(&self, buffer: Buffer) {
          let mut buffers = lock(&self.0);
 -        buffers.push(buffer);
 +        buffers.push((buffer, Instant::now()));
@@ -60,12 +88,10 @@ diff --git a/crates/metal2vulkan-runtime/src/shadow_merge.rs b/crates/metal2vulk
                  .map(|(at, _)| at)
                  .map(|at| buffers.swap_remove(at)),
              false => None,
-@@ -192,6 +205,34 @@
-         drop(buffers);
-         drop(gone);
+@@ -215,6 +228,34 @@ impl ScratchSpares {
      }
-+}
-+
+ }
+ 
 +/// Drop every shadow's spare scratches kept unused for `idle` or longer (all of them for
 +/// `Duration::ZERO`, the system's memory pressure), with the device's idle trim
 +/// (`Device::trim_kept_memory`): how many went. A shadow merged no more kept its two for as long
@@ -92,23 +118,8 @@ diff --git a/crates/metal2vulkan-runtime/src/shadow_merge.rs b/crates/metal2vulk
 +    let count = gone.len();
 +    drop(gone);
 +    count
- }
- 
++}
++
  /// The buffers a merge's scratch lies in, or its kept image, held until its command buffers
-diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
---- a/crates/metal2vulkan-runtime/src/memory.rs
-+++ b/crates/metal2vulkan-runtime/src/memory.rs
-@@ -2443,6 +2443,13 @@
-             ((idle * 10).max(Duration::from_secs(20)), 8)
-         };
-         shared.spares.trim_command_pools(shared, pool_idle, floor);
-+        // And the shadows' spare merge scratches unused for five times `idle` (at least 10 s), on
-+        // memory pressure all (DroidVM).
-+        let scratch_idle = match idle.is_zero() {
-+            true => Duration::ZERO,
-+            false => (idle * 5).max(Duration::from_secs(10)),
-+        };
-+        crate::shadow_merge::trim_scratch_spares(scratch_idle);
-         blocks
-     }
- }
+ /// completed.
+ enum Held {

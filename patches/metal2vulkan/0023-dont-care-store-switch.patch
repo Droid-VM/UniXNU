@@ -1,7 +1,7 @@
 diff --git a/crates/metal2vulkan-runtime/src/render_target.rs b/crates/metal2vulkan-runtime/src/render_target.rs
 --- a/crates/metal2vulkan-runtime/src/render_target.rs
 +++ b/crates/metal2vulkan-runtime/src/render_target.rs
-@@ -399,9 +399,19 @@
+@@ -442,9 +442,19 @@ pub(super) enum DontCare {
      Stored,
  }
  

@@ -1,18 +1,16 @@
 diff --git a/crates/metal2vulkan/src/cache/mod.rs b/crates/metal2vulkan/src/cache/mod.rs
-index 4c01c9bad..513a507e1 100644
 --- a/crates/metal2vulkan/src/cache/mod.rs
 +++ b/crates/metal2vulkan/src/cache/mod.rs
 @@ -60,7 +60,7 @@ mod tests;
  /// unchanged version, and its bless records the version. Independent of the crate's version and of
  /// [`ARTIFACT_FORMAT_VERSION`]. The commit that bumps it says what changed; this comment keeps no
  /// history.
--pub const SEMANTICS_VERSION: u32 = 1923;
-+pub const SEMANTICS_VERSION: u32 = 1924;
+-pub const SEMANTICS_VERSION: u32 = 2022;
++pub const SEMANTICS_VERSION: u32 = 2023;
  
  /// The byte-layout version of encoded artifacts (`CompiledFunction::to_bytes` and the
  /// [`PipelineArtifact`] encodings). Every encoded artifact carries it, and a decode under another
 diff --git a/crates/metal2vulkan/src/lower/access/dynamic.rs b/crates/metal2vulkan/src/lower/access/dynamic.rs
-index 7b61b38ed..cb6b7ec9f 100644
 --- a/crates/metal2vulkan/src/lower/access/dynamic.rs
 +++ b/crates/metal2vulkan/src/lower/access/dynamic.rs
 @@ -108,7 +108,7 @@ use crate::spirv::ids::{DemoteTy, TypeId, Value as SValue};
@@ -24,7 +22,7 @@ index 7b61b38ed..cb6b7ec9f 100644
  use super::{
      is_ptr_ty, not_lowered, operand, refuse, slot_root, static_roots, Access, AccessPlan,
      BufferReach, IndexForm, SideReach, Target, WideGepTerms,
-@@ -1119,9 +1119,9 @@ fn base_with(
+@@ -1122,9 +1122,9 @@ fn base_with(
  }
  
  /// Load (or store `stored`) `leaf` at `d` bytes (a `u64`; `None` for 0) past `b`: the words at
@@ -37,7 +35,7 @@ index 7b61b38ed..cb6b7ec9f 100644
  pub(super) fn wide_at(
      fb: &mut FunctionBuilder<'_>,
      b: WideBase,
-@@ -1133,26 +1133,16 @@ pub(super) fn wide_at(
+@@ -1136,26 +1136,18 @@ pub(super) fn wide_at(
          Some(d) => fb.binary(BinOp::IAdd, b.at, d)?,
          None => b.at,
      };
@@ -64,36 +62,46 @@ index 7b61b38ed..cb6b7ec9f 100644
 -        None => (base, low, None),
 +        None => (split, None),
      };
--    let mut mem = PsbMem::at(base).with(b.ops);
+-    let mut mem = PsbMem::at(base).with(b.ops).with_units(b.units);
 +    let low = split.low;
-+    let mut mem = PsbMem::indexed(split.page, split.word).with(b.ops);
++    let mut mem = PsbMem::indexed(split.page, split.word)
++        .with(b.ops)
++        .with_units(b.units);
      match stored {
          None => {
              let v = leaf::load(fb, &mut mem, leaf, low)?;
 diff --git a/crates/metal2vulkan/src/lower/access/psb.rs b/crates/metal2vulkan/src/lower/access/psb.rs
-index 4f1a590b1..ad77a6068 100644
 --- a/crates/metal2vulkan/src/lower/access/psb.rs
 +++ b/crates/metal2vulkan/src/lower/access/psb.rs
-@@ -23,6 +23,18 @@
- //!
+@@ -24,6 +24,18 @@
  //! The leaf itself (`memory::leaf`) sees a word memory based at the 4-aligned address below the
  //! access, and the access's byte offset within that word (0 to 3).
-+//!
+ //!
 +//! **Word places.** A word memory reaches its words from one 64-bit address and a 32-bit word
 +//! index ([`PsbMem::indexed`]): the access's offset `o` (a `u64`) splits into its 4 GiB page,
 +//! added to `host` once (`host + (o & !0xFFFF_FFFF)`, the high word's sum alone), and its low
 +//! word `u32(o)`, whose word index `u32(o) >> 2` and the leaf's word numbers add in `u32` and never
-+//! wrap. Each word is then the place `words[index + j]` of that one address: a driver takes the
-+//! address as one base register and the index as an offset in the load itself, where a 64-bit
-+//! device address of every word cost a 64-bit sum per word (a 32-bit add, a carry compare and a
-+//! second add on a 32-bit GPU). Exact while an access's words lie in one 4 GiB page of the
-+//! offset, which holds for every access inside a root of at most 4 GiB (Turnip allocates at most
-+//! 4 GiB − 1): only an access across a page boundary of a larger root could see a driver's 32-bit
-+//! offset of its last words wrap.
++//! wrap. Each word is then the place `words[index + j]` of that one address, and each narrow unit
++//! the place of the unit array there: a driver takes the address as one base register and the
++//! index as an offset in the load itself, where a 64-bit device address of every word cost a
++//! 64-bit sum per word (a 32-bit add, a carry compare and a second add on a 32-bit GPU). Exact
++//! while an access's words lie in one 4 GiB page of the offset, which holds for every access
++//! inside a root of at most 4 GiB (Turnip allocates at most 4 GiB − 1): only an access across a
++//! page boundary of a larger root could see a driver's 32-bit offset of its last words wrap.
++//!
+ //! **Narrow units.** Where the profile has the 8- or 16-bit storage access ([`narrow_units`]), the
+ //! memory also loads and stores 1- and 2-byte units: a `u8` or `u16` place at the unit's device
+ //! address, with the `Aligned` operand of its size, as a descriptor slot's narrow views do. Vulkan's
+@@ -32,7 +44,7 @@
+ //! the access it stays the two word atomics ([`PsbMem`]'s `write_bits`).
  
- use crate::memory::leaf::{WordMem, WordOps};
+ use crate::device::DeviceProfile;
+-use crate::memory::leaf::{Units, WordMem, WordOps};
++use crate::memory::leaf::{k32, Units, WordMem, WordOps};
  use crate::spirv::builder::FunctionBuilder;
-@@ -127,40 +139,79 @@ pub fn prepare(
+ use crate::spirv::error::BResult;
+ use crate::spirv::ids::{TypeId, Value};
+@@ -135,35 +147,65 @@ pub fn prepare(
      let bind = entry_field(fb, table, root, BIND_OFFSET)?;
      let disp = displacement(fb, m, start)?;
      let off = fb.binary(BinOp::IAdd, bind, disp)?;
@@ -173,14 +181,10 @@ index 4f1a590b1..ad77a6068 100644
 +    }
 +}
 +
-+/// A `u32` constant.
-+fn k32(fb: &mut FunctionBuilder<'_>, v: u32) -> BResult<Value> {
-+    let c = fb.u32_const(v)?;
-+    fb.module().const_value(c)
-+}
-+
- /// Words at a 4-aligned device address (a `u64`), loaded and stored with memory operands (a
- /// coherence and `Volatile`).
+ /// The narrow units a device-address memory loads and stores directly on profile `p`: the 1- and
+ /// 2-byte units of [`Units::storage_on`] (the width's storage access and integer type). No `uvec4`
+ /// unit: a device address below an access is only 4-byte aligned.
+@@ -180,6 +222,9 @@ pub fn narrow_units(p: &DeviceProfile) -> Units {
  #[derive(Clone, Copy, Debug)]
  pub struct PsbMem {
      base: Value,
@@ -188,27 +192,67 @@ index 4f1a590b1..ad77a6068 100644
 +    /// `None` for word 0, each word then at a device address of its own.
 +    index: Option<Value>,
      ops: WordOps,
+     units: Units,
  }
- 
-@@ -169,6 +220,17 @@ impl PsbMem {
+@@ -190,11 +235,22 @@ impl PsbMem {
      pub fn at(base: Value) -> PsbMem {
          PsbMem {
              base,
 +            index: None,
-+            ops: WordOps::default(),
+             ops: WordOps::default(),
+             units: Units::NONE,
+         }
+     }
+ 
++    /// The words from word `index` (a `u32`, below 2³⁰ less the words the accesses reach) of the
++    /// 4-aligned device address `base`, each a place of `base`'s word array, with plain accesses
++    /// and no narrow unit.
++    pub fn indexed(base: Value, index: Value) -> PsbMem {
++        PsbMem {
++            index: Some(index),
++            ..PsbMem::at(base)
 +        }
 +    }
 +
-+    /// The words from word `index` (a `u32`, below 2³⁰ less the words the accesses reach) of the
-+    /// 4-aligned device address `base`, each a place of `base`'s word array.
-+    pub fn indexed(base: Value, index: Value) -> PsbMem {
-+        PsbMem {
-+            base,
-+            index: Some(index),
-             ops: WordOps::default(),
-         }
+     /// The same words, loaded and stored with `ops`.
+     pub fn with(self, ops: WordOps) -> PsbMem {
+         PsbMem { ops, ..self }
+@@ -220,6 +276,23 @@ impl PsbMem {
+         bytes: u32,
+         index: Value,
+     ) -> BResult<(Value, TypeId)> {
++        let ty = fb.module().ty(Type::Int {
++            width: if bytes == 1 { 8 } else { 16 },
++            signed: false,
++        })?;
++        if let Some(first) = self.index {
++            // Unit `index` of the memory is unit `first · 4 / bytes + index` of `base`'s units
++            // (module doc, *Word places*).
++            let shift = k32(fb, if bytes == 1 { 2 } else { 1 })?;
++            let first = fb.binary(BinOp::ShiftLeftLogical, first, shift)?;
++            let at = fb.binary(BinOp::IAdd, first, index)?;
++            let array = fb.module().ty(Type::RuntimeArray {
++                elem: ty,
++                stride: Some(bytes),
++            })?;
++            let units = fb.device_place(self.base, array)?;
++            return Ok((fb.access_chain(units, &[at])?, ty));
++        }
+         let u64_ = u64_ty(fb)?;
+         let i = fb.convert(ConvOp::UConvert, index, u64_)?;
+         let d = match bytes {
+@@ -230,10 +303,6 @@ impl PsbMem {
+             }
+         };
+         let addr = fb.binary(BinOp::IAdd, self.base, d)?;
+-        let ty = fb.module().ty(Type::Int {
+-            width: if bytes == 1 { 8 } else { 16 },
+-            signed: false,
+-        })?;
+         Ok((fb.device_place(addr, ty)?, ty))
      }
-@@ -184,7 +246,16 @@ impl PsbMem {
+ 
+@@ -243,7 +312,16 @@ impl PsbMem {
              width: 32,
              signed: false,
          })?;
@@ -226,7 +270,7 @@ index 4f1a590b1..ad77a6068 100644
      }
  
      /// A `PhysicalStorageBuffer` place of a `pointee` at word `word` (a `u32` index) of the
-@@ -203,6 +274,10 @@ impl PsbMem {
+@@ -262,6 +340,10 @@ impl PsbMem {
      /// The device address (a `u64`) of word `word` (a `u32` index) of the memory.
      pub fn word_address(&self, fb: &mut FunctionBuilder<'_>, word: Value) -> BResult<Value> {
          let u64_ = u64_ty(fb)?;

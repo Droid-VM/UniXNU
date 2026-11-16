@@ -95,237 +95,10 @@ for anchor, marker, methods in ADDED_METHODS:
     if frontend.count(anchor) != 1:
         raise SystemExit(f'NativeBridgeMetalFrontend.mm no longer has exactly one {anchor.strip()!r}')
     frontend = frontend.replace(anchor, anchor + methods)
-# - texture layouts (newTextureLayoutWithDescriptor:isHeapOrBufferBacked:) and textures over memory in one (newTextureWithBytesNoCopy:
-#   length:descriptor:deallocator:), which NativeMetal refuses because Apple's layout is not known: DroidVM answers a layout of its own
-#   for the block-compressed formats (ASTC, ETC2/EAC, BC), each level's blocks row after row, each slice's levels one after another.
-#   ImageIO keeps an ASTC image (an ATX file: PosterBoard's wallpaper snapshots) in the device's layout and reads one back only under
-#   the same layout's watermark, and CoreAnimation lays a compressed image's texture memory out in it for the render server, which
-#   makes the texture over that memory; with neither, every wallpaper preview in the gallery was blank. The texture over memory is a
-#   texture of its own, the memory copied in level by level; the memory's deallocator runs when the texture goes. Other formats keep
-#   no layout (and no texture over memory), as before.
-FRONTEND_CLASSES = """// DroidVM's texture layout (newTextureLayoutWithDescriptor:isHeapOrBufferBacked:): a block-compressed format's blocks row after row,
-// each level after the one before, each slice's chain of levels after the slice before. Its watermark names it, so data ImageIO laid
-// out for another GPU's layout is refused rather than read as this one.
-typedef struct {uint64_t words[2];} DVMLayoutWatermark;
-static bool dvmBlockFormat(MTLPixelFormat format, NSUInteger &bytes, NSUInteger &width, NSUInteger &height) {
- switch(format){
-#define DVM_ASTC(W,H) case MTLPixelFormatASTC_##W##x##H##_sRGB: case MTLPixelFormatASTC_##W##x##H##_LDR: case MTLPixelFormatASTC_##W##x##H##_HDR: \\
-  bytes=16;width=W;height=H;return true;
- DVM_ASTC(4,4) DVM_ASTC(5,4) DVM_ASTC(5,5) DVM_ASTC(6,5) DVM_ASTC(6,6) DVM_ASTC(8,5) DVM_ASTC(8,6) DVM_ASTC(8,8) DVM_ASTC(10,5) DVM_ASTC(10,6)
- DVM_ASTC(10,8) DVM_ASTC(10,10) DVM_ASTC(12,10) DVM_ASTC(12,12)
-#undef DVM_ASTC
- case MTLPixelFormatETC2_RGB8: case MTLPixelFormatETC2_RGB8_sRGB: case MTLPixelFormatETC2_RGB8A1: case MTLPixelFormatETC2_RGB8A1_sRGB:
- case MTLPixelFormatEAC_R11Unorm: case MTLPixelFormatEAC_R11Snorm:
- case MTLPixelFormatBC1_RGBA: case MTLPixelFormatBC1_RGBA_sRGB: case MTLPixelFormatBC4_RUnorm: case MTLPixelFormatBC4_RSnorm:
-  bytes=8;width=height=4;return true;
- case MTLPixelFormatEAC_RG11Unorm: case MTLPixelFormatEAC_RG11Snorm: case MTLPixelFormatEAC_RGBA8: case MTLPixelFormatEAC_RGBA8_sRGB:
- case MTLPixelFormatBC2_RGBA: case MTLPixelFormatBC2_RGBA_sRGB: case MTLPixelFormatBC3_RGBA: case MTLPixelFormatBC3_RGBA_sRGB:
- case MTLPixelFormatBC5_RGUnorm: case MTLPixelFormatBC5_RGSnorm: case MTLPixelFormatBC6H_RGBFloat: case MTLPixelFormatBC6H_RGBUfloat:
- case MTLPixelFormatBC7_RGBAUnorm: case MTLPixelFormatBC7_RGBAUnorm_sRGB:
-  bytes=16;width=height=4;return true;
- default:return false;
- }
-}
-@interface DVMLinearTextureLayout : NSObject
-+ (instancetype)layoutWithDescriptor:(MTLTextureDescriptor *)d;
-- (NSUInteger)size;
-- (void)upload:(const uint8_t *)memory into:(id<MTLTexture>)texture;
-@end
-@implementation DVMLinearTextureLayout {
- NSUInteger _block,_bw,_bh,_width,_height,_depth,_levels,_slices,_chain;
-}
-+ (instancetype)layoutWithDescriptor:(MTLTextureDescriptor *)d {
- NSUInteger bytes=0,width=0,height=0;
- if(!d||!dvmBlockFormat(d.pixelFormat,bytes,width,height))return nil;
- DVMLinearTextureLayout *layout=[self new];
- layout->_block=bytes;layout->_bw=width;layout->_bh=height;
- layout->_width=std::max<NSUInteger>(d.width,1);layout->_height=std::max<NSUInteger>(d.height,1);
- layout->_depth=d.textureType==MTLTextureType3D?std::max<NSUInteger>(d.depth,1):1;
- layout->_levels=std::max<NSUInteger>(d.mipmapLevelCount,1);
- const bool cube=d.textureType==MTLTextureTypeCube||d.textureType==MTLTextureTypeCubeArray;
- layout->_slices=std::max<NSUInteger>(d.arrayLength,1)*(cube?6:1);
- for(NSUInteger level=0;level<layout->_levels;level++)layout->_chain+=[layout imageBytes:level]*[layout levelDepth:level];
- static std::atomic<bool> told{false};
- if(!told.exchange(true))NBLOG(@"native-metal: texture layouts are DroidVM's linear ones (block-compressed formats; format %lu first)",(unsigned long)d.pixelFormat);
- return layout;
-}
-- (NSUInteger)levelDepth:(NSUInteger)level {return std::max<NSUInteger>(_depth>>level,1);}
-- (NSUInteger)blocksAcross:(NSUInteger)level {return (std::max<NSUInteger>(_width>>level,1)+_bw-1)/_bw;}
-- (NSUInteger)blocksDown:(NSUInteger)level {return (std::max<NSUInteger>(_height>>level,1)+_bh-1)/_bh;}
-- (NSUInteger)rowBytes:(NSUInteger)level {return [self blocksAcross:level]*_block;}
-- (NSUInteger)imageBytes:(NSUInteger)level {return [self rowBytes:level]*[self blocksDown:level];}
-- (NSUInteger)offsetOfSlice:(NSUInteger)slice level:(NSUInteger)level {
- NSUInteger at=slice*_chain;
- for(NSUInteger l=0;l<level;l++)at+=[self imageBytes:l]*[self levelDepth:l];
- return at;
-}
-- (NSUInteger)size {return _chain*_slices;}
-- (NSUInteger)alignment {return 16384;}
-- (MTLSize)copyGranularity {return MTLSizeMake(_bw,_bh,1);}
-- (DVMLayoutWatermark)watermark {
- static const char mark[16]={'D','r','o','i','d','V','M',' ','l','i','n','e','a','r',' ','1'};
- DVMLayoutWatermark watermark;
- memcpy(&watermark,mark,sizeof watermark);
- return watermark;
-}
-- (void)initializeTextureMemory:(void *)memory {(void)memory;}
-- (void)finalizeTextureMemory:(void *)memory {(void)memory;}
-// The region's blocks between the texture memory and linear bytes (rows of blockBytes, images of rows), clipped to the level.
-- (void)move:(MTLRegion)region slice:(NSUInteger)slice level:(NSUInteger)level memory:(uint8_t *)memory linear:(uint8_t *)linear
-    rowBytes:(NSUInteger)rowBytes imageBytes:(NSUInteger)imageBytes toMemory:(bool)toMemory {
- if(!memory||!linear||slice>=_slices||level>=_levels)return;
- const NSUInteger across=[self blocksAcross:level],down=[self blocksDown:level],depth=[self levelDepth:level];
- const NSUInteger bx=region.origin.x/_bw,by=region.origin.y/_bh;
- if(bx>=across||by>=down||region.origin.z>=depth)return;
- const NSUInteger bw=std::min((region.origin.x+region.size.width+_bw-1)/_bw,across)-bx;
- const NSUInteger bh=std::min((region.origin.y+region.size.height+_bh-1)/_bh,down)-by;
- const NSUInteger bd=std::min<NSUInteger>(region.origin.z+std::max<NSUInteger>(region.size.depth,1),depth)-region.origin.z;
- const NSUInteger row=[self rowBytes:level],image=[self imageBytes:level];
- uint8_t *base=memory+[self offsetOfSlice:slice level:level];
- for(NSUInteger z=0;z<bd;z++)
-  for(NSUInteger y=0;y<bh;y++){
-   uint8_t *texel=base+(region.origin.z+z)*image+(by+y)*row+bx*_block;
-   uint8_t *line=linear+z*imageBytes+y*rowBytes;
-   if(toMemory)memcpy(texel,line,bw*_block);else memcpy(line,texel,bw*_block);
-  }
-}
-- (void)copyFromLinearBytes:(const void *)bytes linearOffset:(NSUInteger)offset linearBytesPerRow:(NSUInteger)rowBytes
-       linearBytesPerImage:(NSUInteger)imageBytes toTextureMemory:(void *)memory textureSlice:(NSUInteger)slice
-              textureLevel:(NSUInteger)level textureRegion:(MTLRegion)region {
- if(!bytes)return;
- [self move:region slice:slice level:level memory:(uint8_t *)memory linear:(uint8_t *)bytes+offset rowBytes:rowBytes imageBytes:imageBytes toMemory:true];
-}
-- (void)copyFromTextureMemory:(const void *)memory textureSlice:(NSUInteger)slice textureLevel:(NSUInteger)level textureRegion:(MTLRegion)region
-                toLinearBytes:(void *)bytes linearOffset:(NSUInteger)offset linearBytesPerRow:(NSUInteger)rowBytes
-          linearBytesPerImage:(NSUInteger)imageBytes {
- if(!bytes)return;
- [self move:region slice:slice level:level memory:(uint8_t *)memory linear:(uint8_t *)bytes+offset rowBytes:rowBytes imageBytes:imageBytes toMemory:false];
-}
-// Texture memory in this layout copied into a texture, every slice's every level.
-- (void)upload:(const uint8_t *)memory into:(id<MTLTexture>)texture {
- for(NSUInteger slice=0;slice<_slices;slice++)
-  for(NSUInteger level=0;level<_levels;level++){
-   const MTLRegion region=MTLRegionMake3D(0,0,0,std::max<NSUInteger>(_width>>level,1),std::max<NSUInteger>(_height>>level,1),[self levelDepth:level]);
-   [texture replaceRegion:region mipmapLevel:level slice:slice withBytes:memory+[self offsetOfSlice:slice level:level]
-              bytesPerRow:[self rowBytes:level] bytesPerImage:[self imageBytes:level]];
-  }
-}
-@end
-// The deallocator of the memory a texture was made over, run when the texture goes.
-@interface DVMMemoryRelease : NSObject
-- (instancetype)initWithBytes:(void *)bytes length:(NSUInteger)length deallocator:(void (^)(void *,NSUInteger))deallocator;
-@end
-@implementation DVMMemoryRelease {
- void *_bytes;NSUInteger _length;void (^_deallocator)(void *,NSUInteger);
-}
-- (instancetype)initWithBytes:(void *)bytes length:(NSUInteger)length deallocator:(void (^)(void *,NSUInteger))deallocator {
- if((self=[super init])){_bytes=bytes;_length=length;_deallocator=[deallocator copy];}
- return self;
-}
-- (void)dealloc {if(_deallocator)_deallocator(_bytes,_length);}
-@end
-static char dvmMemoryReleaseKey;
-
-"""
+# NativeMetal itself has, since the macOS line's GPU branch merged in (2026-11-16), what this list once added: DroidVM's
+# texture layout and textures over memory in it (DVMLinearTextureLayout), the supportsFamily: answer by caller (RenderBox,
+# WebGPU, ANGLE), the render server's surface use counts and the XR10 answer for the poster extensions (macOS: WindowServer).
 FRONTEND_REPLACED = [
-    ('@interface NBHeap : NBObject\n', FRONTEND_CLASSES + '@interface NBHeap : NBObject\n'),
-    ("""// Not made here: a texture over raw memory in Apple's layout, and Apple's texture layout object. Both are refused, with the reason, rather than
-// answered with a guessed shape.
-- (id<MTLTexture>)newTextureWithBytesNoCopy:(void *)bytes length:(NSUInteger)length descriptor:(MTLTextureDescriptor *)d deallocator:(void (^)(void *,NSUInteger))deallocator {
- (void)bytes;(void)length;(void)d;(void)deallocator;
- NBLOG(@"native-metal: newTextureWithBytesNoCopy:length:descriptor:deallocator: is not implemented (Apple's texture layout of raw memory is not known)");
- return nil;
-}
-- (id)newTextureLayoutWithDescriptor:(MTLTextureDescriptor *)d isHeapOrBufferBacked:(BOOL)backed {
- (void)d;(void)backed;
- NBLOG(@"native-metal: newTextureLayoutWithDescriptor:isHeapOrBufferBacked: is not implemented (Apple's layout object is not known)");
- return nil;
-}
-""",
-     """// Apple's texture layout is not known: a block-compressed format's layout and a texture over memory in it are DroidVM's own
-// (DVMLinearTextureLayout); any other format is refused, with the reason, rather than answered with a guessed shape.
-- (id<MTLTexture>)newTextureWithBytesNoCopy:(void *)bytes length:(NSUInteger)length descriptor:(MTLTextureDescriptor *)d deallocator:(void (^)(void *,NSUInteger))deallocator {
- DVMLinearTextureLayout *layout=[DVMLinearTextureLayout layoutWithDescriptor:d];
- if(!layout||!bytes||length<layout.size){
-  NBLOG(@"native-metal: newTextureWithBytesNoCopy:length:descriptor:deallocator: is made only over DroidVM's layout of a block-compressed format (format %lu, %lu bytes)",
-        (unsigned long)d.pixelFormat,(unsigned long)length);
-  return nil;
- }
- MTLTextureDescriptor *shared=[d copy];
- shared.storageMode=MTLStorageModeShared;
- id<MTLTexture> texture=[(id<MTLDevice>)self newTextureWithDescriptor:shared];
- if(!texture)return nil;
- [layout upload:(const uint8_t *)bytes into:texture];
- if(deallocator)objc_setAssociatedObject(texture,&dvmMemoryReleaseKey,[[DVMMemoryRelease alloc] initWithBytes:bytes length:length deallocator:deallocator],
-                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
- return texture;
-}
-- (id)newTextureLayoutWithDescriptor:(MTLTextureDescriptor *)d isHeapOrBufferBacked:(BOOL)backed {
- (void)backed;
- DVMLinearTextureLayout *layout=[DVMLinearTextureLayout layoutWithDescriptor:d];
- if(!layout)NBLOG(@"native-metal: newTextureLayoutWithDescriptor:isHeapOrBufferBacked: has no layout for format %lu (Apple's is not known)",(unsigned long)d.pixelFormat);
- return layout;
-}
-"""),
-    # supportsFamily: (device), asked by RenderBox: on MTLGPUFamilyApple3 and up RenderBox draws an opaque layer (a widget, a poster)
-    # into its own two-plane 4:4:4 format, MTLPixelFormatRGB8_444_2P over an '_RB4' IOSurface. NativeMetal textures such a surface but
-    # renders into none ("render encoder: Unsupported ... MTLPixelFormatRGB8_444_2P"), so the layer stayed whatever the surface held:
-    # the Weather widget showed rows of stray colour. RenderBox learns its tier by asking supportsFamily: from Apple1 up until the
-    # first NO (RB::Device's constructor), so it alone is told Apple2 and draws them in BGRA8. WebKit's WebGPU makes an adapter only for
-    # MTLGPUFamilyApple4 and up (Safari's requestAdapter() answered null), so WebGPU.framework is told Apple4; so is ANGLE
-    # (libANGLE-shared.dylib), which offers ES 3.0, so WebGL 2, only from Apple4 on for a reason this device's tier-2 argument buffers
-    # meet; every other caller keeps the answer.
-    ('static void installAnswers(Class cls) {\n',
-     'static BOOL (*gFamilyAnswer)(id,SEL,NSInteger);\n'
-     'enum FamilyCaller {FamilyCallerOther,FamilyCallerRenderBox,FamilyCallerWebGPU,FamilyCallerANGLE};\n'
-     '// The framework whose code is at a return address, looked up once per address: dladdr searches the image\'s symbol table, and\n'
-     '// QuartzCore\'s pixel-format queries ask supportsFamily: for every surface it makes (a masked corner, a backdrop, a blur\'s mips) and every\n'
-     '// IOSurface it checks -- the render server\'s display thread spent 15% of its running time in that search during page swipes.\n'
-     'static FamilyCaller familyCaller(void *address) {\n'
-     ' static std::mutex lock;\n'
-     ' static std::unordered_map<void *,FamilyCaller> known;\n'
-     ' {std::lock_guard<std::mutex> hold(lock);auto found=known.find(address);if(found!=known.end())return found->second;}\n'
-     ' Dl_info caller;\n'
-     ' FamilyCaller kind=FamilyCallerOther;\n'
-     ' if(dladdr(address,&caller) && caller.dli_fname) {\n'
-     '  if(strstr(caller.dli_fname,"/RenderBox.framework/"))kind=FamilyCallerRenderBox;\n'
-     '  else if(strstr(caller.dli_fname,"/WebGPU.framework/"))kind=FamilyCallerWebGPU;\n'
-     '  else if(strstr(caller.dli_fname,"/libANGLE-shared.dylib"))kind=FamilyCallerANGLE;\n'
-     ' }\n'
-     ' std::lock_guard<std::mutex> hold(lock);\n'
-     ' if(known.size()<4096)known.emplace(address,kind);\n'
-     ' return kind;\n'
-     '}\n'
-     '// WebKit\'s WebGPU (WebGPU.framework, in Safari\'s GPU process) makes an adapter only for a device in MTLGPUFamilyApple4 or later: Apple\'s\n'
-     '// feature set tables list no WebGPU limits for Apple1 to Apple3, so requestAdapter() answered null and every page saw no WebGPU. The rows\n'
-     '// Apple4 adds that this device refuses (gfxprobe families: imageblocks, tile shaders, raster order groups, post-depth coverage) are the\n'
-     '// Apple GPUs\' tile-memory features, which WebGPU has no API for, so WebGPU alone is told Apple4 (the family its tables start at).\n'
-     '// WebKit\'s WebGL (ANGLE\'s Metal renderer, WebCore.framework/Frameworks/libANGLE-shared.dylib) offers ES 3.0, so WebGL 2, only from Apple4\n'
-     '// on (ANGLE 09a869c24593, in iPadOS 27\'s WebKit): ES 3.0 needs 12 vertex uniform blocks, which ANGLE binds through an argument buffer,\n'
-     '// and Apple3\'s tier-1 argument buffers count their entries against the 31 buffers a function takes. This device\'s are tier 2, so ANGLE is\n'
-     '// told Apple4 too. Its other Apple4 checks pick what this device does: non-uniform dispatch, render passes without attachments, render\n'
-     '// targets under 4 bytes a pixel, and raster order groups for pixel local storage, which WebKit does not offer pages.\n'
-     'static BOOL familyForCaller(id self,SEL _cmd,NSInteger family) {\n'
-     ' if(family>=1003 && family<2000) {   // MTLGPUFamilyApple3 to Apple10\n'
-     '  const FamilyCaller kind=familyCaller(__builtin_return_address(0));\n'
-     '  if(kind==FamilyCallerRenderBox)return NO;\n'
-     '  if((kind==FamilyCallerWebGPU || kind==FamilyCallerANGLE) && family==1004)return YES;   // MTLGPUFamilyApple4\n'
-     ' }\n'
-     ' return gFamilyAnswer(self,_cmd,family);\n'
-     '}\n'
-     'static void installAnswers(Class cls) {\n'),
-    ('  case NMB_ANSWER_FLAG_ARG: class_addMethod(cls,sel,(IMP)flagArgAnswer,"B24@0:8Q16");break;\n'
-     '  }\n'
-     ' }\n'
-     '}\n',
-     '  case NMB_ANSWER_FLAG_ARG: class_addMethod(cls,sel,(IMP)flagArgAnswer,"B24@0:8Q16");break;\n'
-     '  }\n'
-     ' }\n'
-     ' if(Method family=class_getInstanceMethod(cls,@selector(supportsFamily:))) {\n'
-     '  gFamilyAnswer=(BOOL (*)(id,SEL,NSInteger))method_getImplementation(family);\n'
-     '  method_setImplementation(family,(IMP)familyForCaller);\n'
-     ' }\n'
-     '}\n'),
     # Refusals said in the log, the first 64 of a process: failWith (a library, a pipeline the runtime refused), a function a library
     # does not give, and a pipeline descriptor refused before the runtime sees it (a missing or foreign function). They only went to the
     # problem counters, so AegirPoster's "pipelineState != nil" assertion (the Astronomy wallpaper) left no reason anywhere.
@@ -343,12 +116,6 @@ FRONTEND_REPLACED = [
      '  return nil;\n'
      ' }\n'),
     # (A refused render pipeline descriptor's line is AdrenoMetal's own since a0f0287b, with the pipeline's L row.)
-    # supportsExtendedXR10Formats (device): given to the wallpaper's poster extensions. NativeMetal withholds it from every process
-    # because the render server picks a 64-bit wide-gamut framebuffer when the device offers XR10, which the display chain cannot
-    # show; but CAMetalLayer asks it too, in the extension's process, before it takes an XR10 pixel format
-    # (layer_private_check_pixel_format), and AegirPoster (the Astronomy wallpaper, ClockKitUI's quad view in BGRA10_XR_sRGB) died on
-    # "CAMetalLayerInvalid: unsupported extended range format". Given to every process but the render server, Settings showed stale
-    # layer contents (a row drew the status bar's time), so only a "...Poster..." process other than PosterBoard gets the answer.
     # IOSurfaces the render server textures are in use (IOSurfaceIncrementUseCount) for as long as the texture lives, as Apple's GPU
     # driver counts a surface while a GPU resource is made of it. An app's Core Animation draws into a backing store in place, or
     # recycles it for another layer, only while it is not in use (IOSurfaceIsInUse); with nothing counted, Settings redrew labels into
@@ -360,15 +127,10 @@ FRONTEND_REPLACED = [
      '// The render server counts the surfaces it textures in use while the textures live (countUse).\n'
      'static const bool gCountsSurfaceUse=nativeIsRenderServer();\n'
      '// A no-copy import keeps its pages'),
-    ('- (void)dealloc {nmb_texture_release(_handle);if(_surface)CFRelease(_surface);}\n',
-     '- (void)dealloc {nmb_texture_release(_handle);if(_surface){if(_counted)IOSurfaceDecrementUseCount(_surface);CFRelease(_surface);}}\n'
-     '- (void)countUse {if(_surface && !_counted && gCountsSurfaceUse){IOSurfaceIncrementUseCount(_surface);_counted=YES;}}\n'),
     (' if(_surface)view.surface=(IOSurfaceRef)CFRetain(_surface);\n',
      ' if(_surface){view.surface=(IOSurfaceRef)CFRetain(_surface);[view countUse];}\n'),
     (' gSurfaceTextures++;texture.surface=(IOSurfaceRef)CFRetain(surface);return (id<MTLTexture>)texture;\n',
      ' gSurfaceTextures++;texture.surface=(IOSurfaceRef)CFRetain(surface);[texture countUse];return (id<MTLTexture>)texture;\n'),
-    ('   if(!strcmp(name,"supportsExtendedXR10Formats"))value=0;\n',
-     '   if(!strcmp(name,"supportsExtendedXR10Formats") && (!strstr(getprogname(),"Poster") || !strcmp(getprogname(),"PosterBoard")))value=0;\n'),
 ]
 for original, replacement in FRONTEND_REPLACED:
     if replacement in frontend:

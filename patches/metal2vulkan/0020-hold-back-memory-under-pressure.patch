@@ -1,79 +1,142 @@
 diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
-index 7826ca3..39ce972 100644
 --- a/crates/metal2vulkan-runtime/src/memory.rs
 +++ b/crates/metal2vulkan-runtime/src/memory.rs
-@@ -1098,6 +1098,12 @@ pub(super) struct Memory {
-     spare: Vec<Spare>,
-     /// The bytes the spare blocks may hold together ([`Memory::bound_spares`]).
+@@ -2192,6 +2192,13 @@ pub(super) struct Memory {
+     /// The most bytes of empty blocks kept against a heap's budget, from the device's GPU address
+     /// space ([`Memory::bound_spares`]).
      spare_limit: u64,
 +    /// While the system reports memory pressure ([`crate::Device::hold_back_memory`]): no room
-+    /// kept ahead of the placements ([`keep_room`]), no empty pooled block and no spare kept --
-+    /// each goes as it empties. Where every block is wired memory the system cannot reclaim (a
-+    /// guest whose GPU imports its pages), a one-time trim at the pressure notification came back
-+    /// with the next frame's room: the notification comes as the level changes, not while it stays.
++    /// kept ahead of the placements ([`keep_room`]), no block made ahead ([`Memory::keep_ahead`]),
++    /// no empty block kept, pooled or dedicated: each goes as it empties. Where every block is
++    /// wired memory the system cannot reclaim (a guest whose GPU imports its pages), a one-time
++    /// trim at the pressure notification came back with the next frame's room: the notification
++    /// comes as the level changes, not while it stays.
 +    held_back: bool,
  }
  
- impl Memory {
-@@ -1135,6 +1141,7 @@ impl Memory {
-             binds_wait: binds_wait(driver),
-             spare: Vec::new(),
+ /// What a making ahead is made through ([`Memory::ahead_with`]).
+@@ -2349,6 +2356,7 @@ impl Memory {
+             next_sweep: Instant::now() + KEPT_SWEEP_EVERY,
+             keeps_none: false,
              spare_limit: u64::MAX,
 +            held_back: false,
-         }
-     }
- 
-@@ -1500,7 +1507,7 @@ impl Memory {
-         }
-         self.age_spare(device, now);
-         match freed {
--            Some((block, true)) if holds == Holds::Images && block.plain() => {
-+            Some((block, true)) if holds == Holds::Images && block.plain() && !self.held_back => {
-                 self.say_block("kept a dedicated block of an image spare", &block);
-                 self.spare.push(Spare {
-                     pool: (holds, type_index),
-@@ -1518,6 +1525,13 @@ impl Memory {
-                 // SAFETY: no resource is placed in the block any more.
-                 unsafe { self.let_go(device, block, cause, after) }
-             }
-+            None if self.held_back => {
-+                for block in self.pool(holds, type_index).take_kept() {
-+                    // SAFETY: nothing is placed in a kept empty block, and no command reads it.
-+                    drop(unsafe { self.let_go(device, block, FreeCause::KeptForRoom, None) });
-+                }
-+                after
-+            }
-             None => after,
-         }
-     }
-@@ -2306,6 +2320,9 @@ fn place(
- pub(super) fn keep_room(memory: &Mutex<Memory>, device: &ash::Device, counts: &Counters) {
-     let (lacking, maker) = {
-         let mut memory = lock(memory);
-+        if memory.held_back {
+             #[cfg(test)]
+             import_hold: None,
+             #[cfg(test)]
+@@ -2924,6 +2932,10 @@ impl Memory {
+     /// [`lacking`](Self::lacking)): one it lacks made after the blocks its thread still makes, or
+     /// on a new thread, once a burst of the device's queue uses ended.
+     fn keep_ahead(&mut self, pool: (Holds, u32), bytes: u64) {
++        // None while the memory is held back ([`Memory::held_back`]).
++        if self.held_back {
 +            return;
 +        }
-         let Ok(kept) = memory.kept(device) else {
-             return;
-         };
-@@ -2340,6 +2357,20 @@ pub(super) fn keep_room(memory: &Mutex<Memory>, device: &ash::Device, counts: &C
+         let held = match self.readying_at(pool) {
+             Some(at) => self.readying[at].held(),
+             None => Vec::new(),
+@@ -3468,11 +3480,16 @@ impl Memory {
+             // SAFETY: nothing is placed in a kept empty block, and no command reads it.
+             drop(unsafe { self.let_go(device, stale, FreeCause::KeptStale, None) });
+         }
+-        // A lost device keeps none ([`keep_none`]).
+-        if self.keeps_none {
++        // A lost device keeps none ([`keep_none`]), nor one whose memory is held back
++        // ([`Memory::held_back`]).
++        if self.keeps_none || self.held_back {
++            let cause = match self.keeps_none {
++                true => FreeCause::Teardown,
++                false => FreeCause::KeptForRoom,
++            };
+             for kept in self.pool(holds, type_index).take_kept() {
+                 // SAFETY: as above.
+-                drop(unsafe { self.let_go(device, kept, FreeCause::Teardown, None) });
++                drop(unsafe { self.let_go(device, kept, cause, None) });
+             }
+         }
+         match freed {
+@@ -3877,6 +3894,31 @@ impl Memory {
+         making
+     }
+ 
++    /// Hold its memory back while `on` ([`Memory::held_back`]). Turning it on frees the blocks made
++    /// ahead whose making ended: how many, and the makings still under way, for the caller to stop
++    /// with the lock released ([`hold_back`]). The kept empty blocks are the caller's to free
++    /// ([`Memory::release_all_kept`]).
++    fn hold_back(&mut self, device: &ash::Device, on: bool) -> (usize, Vec<ready::Readying>) {
++        self.held_back = on;
++        if !on {
++            return (0, Vec::new());
++        }
++        let mut ready = Vec::new();
++        let mut making = Vec::new();
++        for readying in self.readying.drain(..) {
++            match readying.finished() {
++                true => ready.extend(readying.stop()),
++                false => making.push(readying),
++            }
++        }
++        let count = ready.len();
++        for block in ready {
++            // SAFETY: nothing is placed in a block made ahead, and no command reads it.
++            drop(unsafe { self.let_go(device, block, FreeCause::KeptForRoom, None) });
++        }
++        (count, making)
++    }
++
+     /// Free every block, those that wait too: the device is being destroyed, its queues idle,
+     /// and no resource is left. What waited with them, for the caller to let go of with no lock
+     /// held.
+@@ -5003,6 +5045,21 @@ pub(super) fn keep_none(memory: &Mutex<Memory>, device: &ash::Device) {
+     }
+ }
+ 
++/// Hold `memory` back while `on` ([`Memory::hold_back`]): turning it on frees the blocks made
++/// ahead, those still being made stopped, each waited for with the lock released (its making
++/// reads its pages), and freed. How many went.
++pub(super) fn hold_back(memory: &Mutex<Memory>, device: &ash::Device, on: bool) -> usize {
++    let (mut count, making) = lock(memory).hold_back(device, on);
++    for readying in making {
++        for block in readying.stop() {
++            count += 1;
++            // SAFETY: nothing is placed in a block made ahead, and no command reads it.
++            drop(unsafe { lock(memory).let_go(device, block, FreeCause::KeptForRoom, None) });
++        }
++    }
++    count
++}
++
+ /// Keep room for any pooled placement (half a block) in each pool the runtime's encodings and
+ /// commits place their own resources in ([`Memory::kept`]), and start making a block ahead for
+ /// each such pool that grows (`memory/ready.rs`). The device's creation calls, which may wait,
+@@ -5044,6 +5101,10 @@ pub(super) fn keep_room(
+     (functions, quiet): (&Arc<Functions>, &Arc<QueueQuiet>),
+     (copies, own, pages): (impl FnOnce() -> bool, Holds, bool),
+ ) {
++    // None while the memory is held back ([`Memory::held_back`]).
++    if lock(memory).held_back {
++        return;
++    }
+     lock(memory).ahead_with.get_or_insert_with(|| AheadWith {
+         functions: Arc::clone(functions),
+         quiet: Arc::clone(quiet),
+@@ -5207,6 +5268,20 @@ fn take_ready<'a>(
  }
  
  impl crate::Device {
 +    /// Keeps no memory for later placements while `on` ([`Memory::held_back`]): the caller turns
 +    /// it on as the system reports memory pressure and off as it reports the normal level again.
-+    /// Turning it on gives back every spare and kept empty block now: how many blocks went.
++    /// Turning it on gives back every block made ahead and, as
++    /// [`release_kept_memory`](Self::release_kept_memory) does, every kept empty block now: how
++    /// many blocks went.
 +    pub fn hold_back_memory(&self, on: bool) -> usize {
 +        let shared = self.shared();
-+        let mut memory = lock(&shared.memory);
-+        memory.held_back = on;
-+        if on {
-+            memory.release_spare(shared.vk())
-+        } else {
-+            0
++        let ahead = hold_back(&shared.memory, shared.vk(), on);
++        match on {
++            true => ahead + self.release_kept_memory(),
++            false => 0,
 +        }
 +    }
 +
      /// Frees the kept empty pooled blocks that have stayed empty for `idle` or longer, each pool's
      /// last one included, and answers how many went. [`Pool::stale`] keeps a pool's last empty
-     /// block for its next placements however long it stays empty, and runs only as a block of the
+     /// pooled block for its next placements however long it stays empty, even where the room

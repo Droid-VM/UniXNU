@@ -1,80 +1,81 @@
 diff --git a/crates/metal2vulkan-runtime/src/device/mod.rs b/crates/metal2vulkan-runtime/src/device/mod.rs
-index 96352266..afba80c7 100644
 --- a/crates/metal2vulkan-runtime/src/device/mod.rs
 +++ b/crates/metal2vulkan-runtime/src/device/mod.rs
-@@ -1608,6 +1608,7 @@ impl Device {
+@@ -2331,6 +2331,10 @@ impl Device {
          // SAFETY: as above.
          let physical_properties = unsafe { instance.raw.get_physical_device_properties(physical) };
          let limits = physical_properties.limits;
-+        memory.bound_spares(limits.sparse_address_space_size);
-         let upload_alignment = [
-             16,
-             limits.min_storage_buffer_offset_alignment,
++        memory.bound_spares(
++            limits.sparse_address_space_size,
++            properties.description.driver_id,
++        );
+         // Counted from here, past the priming, which freed all it allocated.
+         let allocations =
+             crate::allocations::register(raw.handle(), limits.max_memory_allocation_count);
 diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
-index 0c2d3d65..77b59745 100644
 --- a/crates/metal2vulkan-runtime/src/memory.rs
 +++ b/crates/metal2vulkan-runtime/src/memory.rs
-@@ -1081,6 +1081,8 @@ pub(super) struct Memory {
-     /// The dedicated blocks of images kept for the next dedicated image of their pool
-     /// ([`SPARE_FOR`]).
-     spare: Vec<Spare>,
-+    /// The bytes the spare blocks may hold together ([`Memory::bound_spares`]).
+@@ -2171,6 +2171,9 @@ pub(super) struct Memory {
+     /// The device was lost and its recovery carried its objects on (`device/carry.rs`): it keeps
+     /// no empty block for placements it never makes again ([`keep_none`]).
+     keeps_none: bool,
++    /// The most bytes of empty blocks kept against a heap's budget, from the device's GPU address
++    /// space ([`Memory::bound_spares`]).
 +    spare_limit: u64,
  }
  
- impl Memory {
-@@ -1117,9 +1119,23 @@ impl Memory {
-             log: None,
-             binds_wait: binds_wait(driver),
-             spare: Vec::new(),
+ /// What a making ahead is made through ([`Memory::ahead_with`]).
+@@ -2326,6 +2329,7 @@ impl Memory {
+             ahead: AheadBlocks::default(),
+             next_sweep: Instant::now() + KEPT_SWEEP_EVERY,
+             keeps_none: false,
 +            spare_limit: u64::MAX,
-         }
+             #[cfg(test)]
+             import_hold: None,
+             #[cfg(test)]
+@@ -2356,6 +2360,25 @@ impl Memory {
+         self.zero_images = true;
      }
  
-+    /// Hold the spare blocks to a sixteenth of the device's GPU address space,
-+    /// `address_space` bytes (`sparseAddressSpaceSize`; 0: no bound). Every block of the device
-+    /// takes addresses from that space, the driver's own too: where it is small (a virtio GPU
-+    /// context's 2 GiB slice of the host GPU's), spares left no room for the driver's next
-+    /// allocation, which no spare can be given back for, and the render server lost its device
-+    /// (Turnip's autotune BO, `VK_ERROR_OUT_OF_DEVICE_MEMORY` with no allocation refused).
-+    pub(super) fn bound_spares(&mut self, address_space: u64) {
-+        self.spare_limit = match address_space {
-+            0 => u64::MAX,
-+            bytes => bytes / 16,
++    /// Hold the empty blocks kept against a heap's budget ([`Memory::kept_budget`]: the kept
++    /// dedicated blocks, the spare ones of images among them, and the pooled ones past each pool's
++    /// [`KEPT_EMPTY_BLOCKS`]) to a sixteenth of the device's GPU address space, `address_space`
++    /// bytes (`sparseAddressSpaceSize`; 0: no bound). Every block of the device takes addresses
++    /// from that space, the driver's own too: where it is small (a virtio GPU context's 2 GiB
++    /// slice of the host GPU's), spares left no room for the driver's next allocation, which no
++    /// kept block is given back for ([`make_room`] serves the runtime's own), and the render server
++    /// lost its device (Turnip's autotune BO, `VK_ERROR_OUT_OF_DEVICE_MEMORY` with no allocation
++    /// refused). Turnip's heap is at most that space, whose eighth the heap's budget alone allows.
++    /// On Turnip alone (`driver`), whose `sparseAddressSpaceSize` is the address space every one of
++    /// its buffer objects takes from (Mesa's `tu_device.cc`, `va_size`): lavapipe's 2 GiB, say,
++    /// bounds its sparse resources alone, its memory being the process's own.
++    pub(super) fn bound_spares(&mut self, address_space: u64, driver: Option<DriverId>) {
++        self.spare_limit = match (driver, address_space) {
++            (Some(DriverId::MESA_TURNIP), bytes) if bytes > 0 => bytes / 16,
++            _ => u64::MAX,
 +        };
 +    }
 +
-     /// Log each `VkDeviceMemory` allocated, imported or freed from now on to `log`
-     /// (`memory_log.rs`).
-     pub(super) fn log_to(&mut self, log: Option<MemoryLog>) {
-@@ -1476,6 +1492,7 @@ impl Memory {
-                     block,
-                     since: now,
-                 });
-+                self.trim_spare(device);
-                 after
-             }
-             Some((block, dedicated)) => {
-@@ -1510,6 +1527,22 @@ impl Memory {
-         count
+     /// Share its buffers among `families`: the device's, then its staging queue's (`sharing.rs`).
+     pub(super) fn share_buffers_among(&mut self, families: Vec<u32>) {
+         self.buffer_families = families;
+@@ -2528,15 +2551,16 @@ impl Memory {
      }
  
-+    /// Free the oldest spare blocks until the rest hold no more than the bound
-+    /// ([`Memory::bound_spares`]).
-+    fn trim_spare(&mut self, device: &ash::Device) {
-+        let mut held: u64 = self.spare.iter().map(|spare| spare.block.size).sum();
-+        while held > self.spare_limit {
-+            let oldest = (self.spare.iter().enumerate()).min_by_key(|(_, spare)| spare.since);
-+            let Some((oldest, _)) = oldest else {
-+                break;
-+            };
-+            let spare = self.spare.swap_remove(oldest);
-+            held -= spare.block.size;
-+            // SAFETY: nothing is placed in a spare block, and no command reads it.
-+            drop(unsafe { self.let_go(device, spare.block, FreeCause::KeptStale, None) });
-+        }
-+    }
-+
-     /// Free the spare blocks that stayed spare for [`SPARE_FOR`] at `now`.
-     fn age_spare(&mut self, device: &ash::Device, now: Instant) {
-         let stale: Vec<Spare> = (self.spare)
+     /// The most bytes of empty blocks heap `heap` keeps for reuse ([`Pool::release`],
+-    /// [`kept_budget`]). Its pools' first [`KEPT_EMPTY_BLOCKS`] empty pooled blocks are kept
+-    /// whatever it says, and count against it.
++    /// [`kept_budget`]), within the device's GPU address space ([`Memory::bound_spares`]). Its
++    /// pools' first [`KEPT_EMPTY_BLOCKS`] empty pooled blocks are kept whatever it says, and count
++    /// against it.
+     fn kept_budget(&self, heap: usize) -> u64 {
+         #[cfg(test)]
+         if let Some(budget) = self.kept_budget_stand_in {
+             return budget;
+         }
+         let sizes: Vec<u64> = self.heaps.iter().map(|&(size, _)| size).collect();
+-        kept_budget(&sizes, heap, self.unified)
++        kept_budget(&sizes, heap, self.unified).min(self.spare_limit)
+     }
+ 
+     /// The bytes of the empty blocks kept against heap `heap`'s budget: those of its pools, and

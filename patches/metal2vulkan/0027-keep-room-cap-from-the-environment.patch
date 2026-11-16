@@ -1,61 +1,123 @@
 diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
 --- a/crates/metal2vulkan-runtime/src/memory.rs
 +++ b/crates/metal2vulkan-runtime/src/memory.rs
-@@ -103,6 +103,18 @@
-         .and_then(|mib| mib.checked_mul(1 << 20))
-         .filter(|&bytes| bytes.is_power_of_two() && (FIRST_BLOCK_BYTES..=BLOCK_BYTES).contains(&bytes))
+@@ -258,6 +258,19 @@ fn block_bytes() -> u64 {
          .unwrap_or(BLOCK_BYTES)
-+}
-+
-+/// The most room [`keep_room`] keeps in a pool: half of the pool's next block, or
-+/// `METAL2VULKAN_KEEP_ROOM_MIB` MiB where the process sets fewer. The room is one free range, so
-+/// a pool whose blocks had the bytes only in pieces made another block for it: an iPadOS guest's
-+/// render server held 536 MiB of pooled blocks for 280 MiB placed in them, every block wired guest
-+/// memory. A pooled placement past the room, in an encoding, makes its block then.
+ }
+ 
++/// The most room [`keep_room`] keeps in a pool ([`Memory::room_kept`]): half of the pool's next
++/// block, or `METAL2VULKAN_KEEP_ROOM_MIB` MiB where the process sets fewer. The room is one free
++/// range, so a pool whose blocks had the bytes only in pieces made another block for it: an iPadOS
++/// guest's render server held 536 MiB of pooled blocks for 280 MiB placed in them, every block
++/// wired guest memory. A pooled placement past the room, in an encoding, takes its block then (one
++/// made ahead, `memory/ready.rs`, or its own).
 +fn keep_room_cap() -> u64 {
 +    (std::env::var("METAL2VULKAN_KEEP_ROOM_MIB").ok())
 +        .and_then(|text| text.trim().parse::<u64>().ok())
 +        .and_then(|mib| mib.checked_mul(1 << 20))
 +        .unwrap_or(u64::MAX)
- }
++}
++
+ /// Memory operations below this size are not traced.
+ const TRACE_MIN_BYTES: u64 = 256 << 10;
  
- /// How long a dedicated block of images whose image went stays spare for the next dedicated image
-@@ -1061,6 +1073,8 @@
-     /// The buffers' pools by memory type, then the images' ([`Memory::pool`]).
-     pools: Vec<Pool<Block>>,
-     block_bytes: u64,
+@@ -1363,11 +1376,11 @@ impl<T> Pool<T> {
+         self.blocks.iter().flatten().any(|block| !block.dedicated)
+     }
+ 
+-    /// Whether it holds a pooled block, its blocks of `bytes`, and lacks the room its next block
+-    /// is made ahead below ([`ahead_room`]): near its next block, which is made ahead
++    /// Whether it holds a pooled block and lacks `room`, the room its next block is made ahead
++    /// below ([`Memory::near_room`]): near its next block, which is made ahead
+     /// (`memory/ready.rs`).
+-    fn near_next(&mut self, bytes: u64) -> bool {
+-        self.holds_pooled() && !self.has_room(ahead_room(bytes))
++    fn near_next(&mut self, room: u64) -> bool {
++        self.holds_pooled() && !self.has_room(room)
+     }
+ 
+     /// Every block's payload, emptying the pool.
+@@ -2192,6 +2205,8 @@ pub(super) struct Memory {
+     /// The most bytes of empty blocks kept against a heap's budget, from the device's GPU address
+     /// space ([`Memory::bound_spares`]).
+     spare_limit: u64,
 +    /// The most room [`keep_room`] keeps in a pool ([`keep_room_cap`]).
 +    keep_room_cap: u64,
-     /// Blocks are allocated with `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`: the device enabled
-     /// `bufferDeviceAddress`, so buffers carry device addresses.
-     device_address: bool,
-@@ -1127,6 +1141,7 @@
-                 .collect(),
-             types,
-             block_bytes: block_bytes().min(max_allocation.max(1)),
+     /// While the system reports memory pressure ([`crate::Device::hold_back_memory`]): no room
+     /// kept ahead of the placements ([`keep_room`]), no block made ahead ([`Memory::keep_ahead`]),
+     /// no empty block kept, pooled or dedicated: each goes as it empties. Where every block is
+@@ -2356,6 +2371,7 @@ impl Memory {
+             next_sweep: Instant::now() + KEPT_SWEEP_EVERY,
+             keeps_none: false,
+             spare_limit: u64::MAX,
 +            keep_room_cap: keep_room_cap(),
-             device_address,
-             address_types: None,
-             kept: None,
-@@ -2331,9 +2346,10 @@
-         let sized: Vec<((Holds, u32), u64)> = (kept.into_iter())
-             .map(|pool| (pool, memory.next_block_bytes(pool, 1)))
-             .collect();
-+        let cap = memory.keep_room_cap;
-         let lacking: Vec<((Holds, u32), u64)> = (sized.into_iter())
-             .filter(|&((holds, type_index), bytes)| {
--                !memory.pool(holds, type_index).has_room(bytes / 2)
-+                !memory.pool(holds, type_index).has_room((bytes / 2).min(cap))
-             })
-             .collect();
-         (lacking, memory.maker())
-@@ -2344,7 +2360,8 @@
-             continue;
-         };
-         let mut memory = lock(memory);
--        if memory.pool(pool.0, pool.1).has_room(bytes / 2) {
-+        let cap = memory.keep_room_cap;
-+        if memory.pool(pool.0, pool.1).has_room((bytes / 2).min(cap)) {
-             let what = "made a pooled block and freed it at once, its pool having room";
-             memory.say_block(what, &block);
-             drop(memory);
+             held_back: false,
+             #[cfg(test)]
+             import_hold: None,
+@@ -2895,10 +2911,25 @@ impl Memory {
+     /// near its next block ([`Pool::near_next`]). A pool's first block is no growth: a pool that
+     /// takes one block and stays within it keeps none ahead.
+     fn growing(&mut self, pool: (Holds, u32)) -> bool {
+-        let bytes = self.pooled_bytes(pool);
++        let room = self.near_room(self.pooled_bytes(pool));
+         let pool = self.pool(pool.0, pool.1);
+         let grew = (pool.grew(None)).is_some_and(|at| at.elapsed() < KEPT_EMPTY_FOR);
+-        grew || pool.near_next(bytes)
++        grew || pool.near_next(room)
++    }
++
++    /// The room [`keep_room`] keeps in a pool of blocks of `bytes`: half a block, at most
++    /// [`keep_room_cap`].
++    fn room_kept(&self, bytes: u64) -> u64 {
++        (bytes / 2).min(self.keep_room_cap)
++    }
++
++    /// The longest free range below which a pool of blocks of `bytes` is near its next block
++    /// ([`Pool::near_next`]): [`ahead_room`], a quarter of a block past the room [`keep_room`]
++    /// keeps, less what [`keep_room_cap`] takes off that room. Else a pool whose free bytes lie in
++    /// pieces shorter than three quarters of a block kept a block made ahead for good (its sweep,
++    /// [`Memory::sweep_stale`], waits for that room).
++    fn near_room(&self, bytes: u64) -> u64 {
++        ahead_room(bytes) - (bytes / 2 - self.room_kept(bytes))
+     }
+ 
+     /// The block `pool`, its blocks of `bytes`, lacks of the one it keeps made ahead
+@@ -3520,15 +3551,14 @@ impl Memory {
+             }
+         }
+         // A block made ahead for a pool that stopped growing that long ago, where the pool has
+-        // room for three quarters of a block, so that it is no longer near its next block
+-        // ([`ahead_room`], `memory/ready.rs`).
++        // room for three quarters of a block (less what the cap on its kept room takes off), so
++        // that it is no longer near its next block ([`Memory::near_room`], `memory/ready.rs`).
+         let mut at = 0;
+         while at < self.readying.len() {
+             let (holds, type_index) = self.readying[at].pool();
+             let started = self.readying[at].started();
+-            let bytes = self.pooled_bytes((holds, type_index));
++            let room = self.near_room(self.pooled_bytes((holds, type_index)));
+             let pool = self.pool(holds, type_index);
+-            let room = ahead_room(bytes);
+             let since = pool.grew(None).map_or(started, |grew| grew.max(started));
+             let unused = now.saturating_duration_since(since) >= KEPT_EMPTY_FOR
+                 && pool.has_room(room)
+@@ -5151,7 +5181,8 @@ fn keep_pool_room(
+     (pool, bytes): ((Holds, u32), u64),
+ ) {
+     let mut guard = lock(memory);
+-    if guard.pool(pool.0, pool.1).has_room(bytes / 2) {
++    let room = guard.room_kept(bytes);
++    if guard.pool(pool.0, pool.1).has_room(room) {
+         return;
+     }
+     // The host copies' block made ahead joins its pool at the placement that needs it
+@@ -5225,7 +5256,8 @@ fn ready_ahead(memory: &Mutex<Memory>, device: &ash::Device, copies: impl FnOnce
+         return;
+     };
+     let bytes = memory.pooled_bytes(pool);
+-    if memory.pool(pool.0, pool.1).has_room(bytes / 2) {
++    let room = memory.room_kept(bytes);
++    if memory.pool(pool.0, pool.1).has_room(room) {
+         return;
+     }
+     memory.keep_ahead(pool, bytes);

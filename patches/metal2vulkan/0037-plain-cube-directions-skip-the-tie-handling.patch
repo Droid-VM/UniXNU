@@ -1,18 +1,16 @@
 diff --git a/crates/metal2vulkan/src/cache/mod.rs b/crates/metal2vulkan/src/cache/mod.rs
-index 513a507e1..c8edeb280 100644
 --- a/crates/metal2vulkan/src/cache/mod.rs
 +++ b/crates/metal2vulkan/src/cache/mod.rs
 @@ -60,7 +60,7 @@ mod tests;
  /// unchanged version, and its bless records the version. Independent of the crate's version and of
  /// [`ARTIFACT_FORMAT_VERSION`]. The commit that bumps it says what changed; this comment keeps no
  /// history.
--pub const SEMANTICS_VERSION: u32 = 1924;
-+pub const SEMANTICS_VERSION: u32 = 1925;
+-pub const SEMANTICS_VERSION: u32 = 2023;
++pub const SEMANTICS_VERSION: u32 = 2024;
  
  /// The byte-layout version of encoded artifacts (`CompiledFunction::to_bytes` and the
  /// [`PipelineArtifact`] encodings). Every encoded artifact carries it, and a decode under another
 diff --git a/crates/metal2vulkan/src/lower/sampler/emit.rs b/crates/metal2vulkan/src/lower/sampler/emit.rs
-index a89df9358..3e39ea785 100644
 --- a/crates/metal2vulkan/src/lower/sampler/emit.rs
 +++ b/crates/metal2vulkan/src/lower/sampler/emit.rs
 @@ -921,6 +921,15 @@ pub(super) fn sampled_value(
@@ -31,16 +29,16 @@ index a89df9358..3e39ea785 100644
      let (si, image, live) = sampled_image(cx, fb, s.source)?;
      if let SampleOp::QueryLevel { min } = &s.op {
          let x = query_level(cx, fb, si, *min)?;
-@@ -975,7 +984,7 @@ pub(super) fn sampled_value(
-         }
-         _ => None,
-     };
+@@ -960,7 +969,7 @@ pub(super) fn sampled_value(
+         let x = live_or_zero(fb, live, x)?;
+         return with_word(cx, fb, &s.result, x, None);
+     }
 -    let (mut coord, mut grad) = plane_and_gradients(cx, fb, s, grads)?;
 +    let (mut coord, mut grad) = plane_and_gradients(cx, fb, s, grads, direction)?;
-     // Pixel coordinates: the plane coordinate (and any gradient) over the level-0 size, always
-     // or behind the runtime sampler's word.
-     if let Some(spec) = pixel_coordinates(cx, fb, s)? {
-@@ -1135,20 +1144,33 @@ pub(super) fn plane_coord(
+     // Pixel coordinates: the plane coordinate (or its texel's centre) moved by its offset to the
+     // device's unnormalized sampler; or the plane coordinate (or its texel's centre) and any
+     // gradient over the level-0 size, always or behind the runtime sampler's word.
+@@ -1126,20 +1135,33 @@ pub(super) fn plane_coord(
      cx.operand(fb, s.coord)
  }
  
@@ -82,7 +80,6 @@ index a89df9358..3e39ea785 100644
      let grad = match &s.op {
          SampleOp::Sample {
 diff --git a/crates/metal2vulkan/src/lower/sampler/face.rs b/crates/metal2vulkan/src/lower/sampler/face.rs
-index d8fa019c1..b0a1f015c 100644
 --- a/crates/metal2vulkan/src/lower/sampler/face.rs
 +++ b/crates/metal2vulkan/src/lower/sampler/face.rs
 @@ -58,13 +58,15 @@

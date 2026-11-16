@@ -1,21 +1,23 @@
 diff --git a/crates/metal2vulkan-runtime/src/attachment_stand_in.rs b/crates/metal2vulkan-runtime/src/attachment_stand_in.rs
 --- a/crates/metal2vulkan-runtime/src/attachment_stand_in.rs
 +++ b/crates/metal2vulkan-runtime/src/attachment_stand_in.rs
-@@ -278,6 +278,31 @@
+@@ -290,6 +290,33 @@ impl PooledBacking {
              && self.layers == own.layers
              && self.extent == own.extent
      }
 +
-+    /// Whether it backs `own`, or covers it: of its kind ([`grows_for`](Self::grows_for)) and at
-+    /// least as wide and as high. A pass renders a memoryless color only inside its own extent,
-+    /// the framebuffer's (whose views need only be at least as large, `render_target.rs`), and
-+    /// reads nothing a pass before it left (the [`pooled_backing`] docs): so one image serves an
-+    /// attachment of any extent it holds. DroidVM: Core Animation's memoryless targets come in
-+    /// as many extents as its blurs and backdrops, each kept apart: the iPadOS guest's render
-+    /// server held 19 backings, 254 MiB (the pool's bound), every one wired guest memory.
-+    fn covers(&self, own: &Target) -> bool {
-+        self.backs(own)
-+            || (self.grows_for(own)
++    /// Whether it backs `own`, copied from it where `copies`, or covers it: of its kind
++    /// ([`grows_for`](Self::grows_for)) and at least as wide and as high, for a pass that copies
++    /// nothing into it. A pass renders such a backing only inside its own extent, the
++    /// framebuffer's (whose views need only be at least as large, `render_target.rs`), and reads
++    /// nothing a pass before it left (the [`pooled_backing`] docs): so one image serves an
++    /// attachment of any extent it holds. DroidVM: Core Animation's memoryless targets come in as
++    /// many extents as its blurs and backdrops, each kept apart: the iPadOS guest's render server
++    /// held 19 backings, 254 MiB (the pool's bound), every one wired guest memory.
++    fn covers(&self, own: &Target, copies: bool) -> bool {
++        self.backs(own, copies)
++            || (!copies
++                && self.grows_for(own)
 +                && self.extent[0] >= own.extent[0]
 +                && self.extent[1] >= own.extent[1])
 +    }
@@ -32,14 +34,16 @@ diff --git a/crates/metal2vulkan-runtime/src/attachment_stand_in.rs b/crates/met
 +    }
  }
  
- /// The memoryless color backings one command queue keeps for its passes ([`pooled_backing`]): at
-@@ -292,6 +317,21 @@
+ /// The color backings one command queue keeps for its passes ([`pooled_backing`]): at
+@@ -304,6 +331,24 @@ pub(crate) struct BackingPool {
  }
  
  impl BackingPool {
 +    /// Drop the backings of `own`'s kind ([`PooledBacking::grows_for`]) that the one at `at`
-+    /// covers, but those the pass renders into (`taken`) and it (DroidVM), as [`bound`](Self::bound)
-+    /// drops its own: a command buffer that rendered into one holds it until it completes.
++    /// covers, but those the pass renders into (`taken`), those made for copies (a pass that
++    /// copies into its backing takes one of its own extent alone) and it (DroidVM), as
++    /// [`bound`](Self::bound) drops its own: a command buffer that rendered into one holds it
++    /// until it completes.
 +    fn drop_covered(&mut self, at: usize, own: &Target, taken: &[Texture]) {
 +        let keep = self.kept[at].backing.texture.clone();
 +        let [width, height] = self.kept[at].extent;
@@ -47,6 +51,7 @@ diff --git a/crates/metal2vulkan-runtime/src/attachment_stand_in.rs b/crates/met
 +            k.backing.texture == keep
 +                || taken.contains(&k.backing.texture)
 +                || !k.grows_for(own)
++                || k.copies
 +                || width < k.extent[0]
 +                || height < k.extent[1]
 +        });
@@ -55,13 +60,14 @@ diff --git a/crates/metal2vulkan-runtime/src/attachment_stand_in.rs b/crates/met
      /// Drop the backings taken least recently while the pool keeps more than its bounds, but
      /// the last one, just made.
      fn bound(&mut self) {
-@@ -330,23 +370,47 @@
-     taken: &[Texture],
+@@ -347,23 +392,48 @@ pub(super) fn pooled_backing(
+     copies: bool,
  ) -> Result<Target, Error> {
-     let queue = maker.command_queue();
--    let free = |k: &PooledBacking| k.backs(own) && !taken.contains(&k.backing.texture);
+     let queue = maker.queue_place();
+-    let free = |k: &PooledBacking| k.backs(own, copies) && !taken.contains(&k.backing.texture);
 -    {
-+    let free = |k: &PooledBacking| k.covers(own) && !taken.contains(&k.backing.texture);
++    let free =
++        |k: &PooledBacking| k.covers(own, copies) && !taken.contains(&k.backing.texture);
 +    let grown = {
          let mut pool = lock(queue.memoryless_backings());
          pool.takes += 1;
@@ -88,34 +94,35 @@ diff --git a/crates/metal2vulkan-runtime/src/attachment_stand_in.rs b/crates/met
              return Ok(backing);
          }
 -    }
-+        // One made now is as large as the largest of its kind the pool keeps, so that it covers
-+        // the attachments those cover too.
++        // One made now for a pass that copies nothing into it is as large as the largest of its
++        // kind the pool keeps, so that it covers the attachments those cover too.
 +        let [mut width, mut height] = own.extent;
-+        for kept in pool.kept.iter().filter(|k| k.grows_for(own)) {
++        for kept in (pool.kept.iter()).filter(|k| !copies && k.grows_for(own)) {
 +            width = width.max(kept.extent[0]);
 +            height = height.max(kept.extent[1]);
 +        }
 +        [width, height]
 +    };
      // Made with no lock held; the pool may keep one another thread made meanwhile beside it.
--    let made = stand_in(maker, own, false)?;
+-    let made = stand_in(maker, own, copies)?;
 +    let mut made = match grown == own.extent {
-+        true => stand_in(maker, own, false)?,
++        true => stand_in(maker, own, copies)?,
 +        false => {
 +            let mut larger = own.clone();
 +            larger.extent = grown;
-+            stand_in(maker, &larger, false)?
++            stand_in(maker, &larger, copies)?
 +        }
 +    };
      maker.device().shared().counts.pooled_backing_made();
      let mut pool = lock(queue.memoryless_backings());
      pool.takes += 1;
-@@ -356,12 +420,15 @@
+@@ -373,13 +443,16 @@ pub(super) fn pooled_backing(
          format: own.format,
          samples: own.samples,
          layers: own.layers,
 -        extent: own.extent,
 +        extent: grown,
+         copies,
          bytes: made.texture.placed_bytes().unwrap_or(0),
          taken: takes,
          backing: made.clone(),

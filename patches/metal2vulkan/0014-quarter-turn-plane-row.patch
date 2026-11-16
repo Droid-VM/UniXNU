@@ -1,8 +1,7 @@
 diff --git a/crates/metal2vulkan-runtime/src/buffer_texture.rs b/crates/metal2vulkan-runtime/src/buffer_texture.rs
-index 1499665f..c1fb36bb 100644
 --- a/crates/metal2vulkan-runtime/src/buffer_texture.rs
 +++ b/crates/metal2vulkan-runtime/src/buffer_texture.rs
-@@ -758,7 +758,15 @@ pub(super) fn turned_plane(
+@@ -1191,7 +1191,15 @@ pub(super) fn turned_plane(
      if !measured {
          return Err(Error::NotImplemented(RuntimeGap::RotatedTexture));
      }

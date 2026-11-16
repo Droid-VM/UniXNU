@@ -1,7 +1,7 @@
 diff --git a/crates/metal2vulkan-runtime/src/render_target.rs b/crates/metal2vulkan-runtime/src/render_target.rs
 --- a/crates/metal2vulkan-runtime/src/render_target.rs
 +++ b/crates/metal2vulkan-runtime/src/render_target.rs
-@@ -406,6 +406,30 @@
+@@ -449,6 +449,30 @@ pub(super) enum DontCare {
  static FORCE_STORE: std::sync::LazyLock<bool> =
      std::sync::LazyLock::new(|| std::path::Path::new("/private/var/ngpu/debug/dont-care-store").exists());
  
@@ -32,9 +32,9 @@ diff --git a/crates/metal2vulkan-runtime/src/render_target.rs b/crates/metal2vul
  impl DontCare {
      /// How `device` stores such an attachment.
      pub(super) fn of(device: &Device) -> Self {
-@@ -1239,6 +1263,10 @@
- /// attachment the exact resolve reads after the pass keeps its samples for it, and one whose
- /// texels are copied as its resolve its texels.
+@@ -1316,6 +1340,10 @@ pub(super) fn final_pass(
+ /// reads after the pass (`kept_bytes.rs`). An attachment the exact resolve reads after the pass
+ /// keeps its samples for it, and one whose texels are copied as its resolve its texels.
  fn color_ops(color: &ColorTarget, at: Position, dont_care: DontCare) -> Ops {
 +    let dont_care = dont_care.kept_for(match color.resolve.is_some() {
 +        true => 2,
@@ -43,7 +43,7 @@ diff --git a/crates/metal2vulkan-runtime/src/render_target.rs b/crates/metal2vul
      let exact = color.resolve.as_ref().is_some_and(|r| r.shader.is_some())
          || color.copied_resolve.is_some();
      let unheld = color.memoryless
-@@ -1266,7 +1294,7 @@
+@@ -1343,7 +1371,7 @@ fn depth_stencil_ops(
      at: Position,
      dont_care: DontCare,
  ) -> Ops {

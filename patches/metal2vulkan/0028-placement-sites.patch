@@ -1,36 +1,127 @@
+diff --git a/crates/metal2vulkan-runtime/src/buffer.rs b/crates/metal2vulkan-runtime/src/buffer.rs
+--- a/crates/metal2vulkan-runtime/src/buffer.rs
++++ b/crates/metal2vulkan-runtime/src/buffer.rs
+@@ -2500,6 +2500,7 @@ impl Device {
+     /// address space cannot honour. Where `padding_unobserved` (its maker declares the bytes
+     /// between a texture's rows unobserved, `BufferDescriptor::padding_unobserved`), it lies in
+     /// a plain block wherever the device's own buffers lie ([`NewBufferOf::Unobserved`]).
++    #[track_caller]
+     pub(super) fn buffer_of_length(
+         &self,
+         call: &'static str,
+@@ -2578,6 +2579,7 @@ impl Device {
+     /// A buffer of `length` bytes (above 0), all zero, in memory of `class` with `modes`, at
+     /// `placement` in the address space: a heap's own buffer when `of_heap` (`heap.rs`). Its
+     /// length is the caller's to check.
++    #[track_caller]
+     pub(super) fn zeroed_buffer(
+         &self,
+         call: &'static str,
+@@ -2676,6 +2678,7 @@ impl Device {
+ 
+     /// [`scratch_buffer`](Device::scratch_buffer) of hazard tracking `tracking`: the tracker
+     /// orders its uses as any buffer's of that mode.
++    #[track_caller]
+     pub(super) fn unzeroed_buffer(
+         &self,
+         length: u64,
+@@ -2696,6 +2699,7 @@ impl Device {
+     /// for is paid by the region, for the region's bytes alone. A chunk made in fresh pages reads
+     /// zero unwritten ([`NewBytes::Zero`], `fresh_pages.rs`), so a region of one writes nothing
+     /// past its data: that is what the second half of the answer is for.
++    #[track_caller]
+     pub(super) fn unzeroed_buffer_with(
+         &self,
+         length: u64,
+@@ -2730,6 +2734,7 @@ impl Device {
+     /// of that alignment, and its bytes start that byte's shortfall from the next multiple into
+     /// both, so that the byte lies on that multiple: the buffer takes that many more bytes, is
+     /// never parked nor taken from the parked, and lies in no fresh pages.
++    #[track_caller]
+     fn placed_new_buffer(
+         &self,
+         call: &'static str,
+@@ -2739,6 +2744,7 @@ impl Device {
+         of: NewBufferOf,
+         (placement, aligned): (Place, Option<u64>),
+     ) -> Result<(Buffer, NewBytes), Error> {
++        let _asked = crate::memory::AskedSite::enter();
+         let (of_heap, fresh) = match of {
+             NewBufferOf::Heap => (true, FreshPages::WherePaid),
+             NewBufferOf::Runtime(fresh) => (false, fresh),
+@@ -3332,6 +3338,7 @@ impl Device {
+ 
+     /// Place `raw` (for a buffer of `length` bytes) in memory of `class` and at `at` in the
+     /// address space; released again when either fails.
++    #[track_caller]
+     pub(super) fn place_buffer(
+         &self,
+         raw: vk::Buffer,
+@@ -3344,6 +3351,7 @@ impl Device {
+ 
+     /// [`place_buffer`](Device::place_buffer) in a block that holds `holds`: `Holds::Buffers`, or
+     /// `Holds::FdBuffers` for a buffer made for `FD_BLOCKS_HANDLE` (`memory.rs`).
++    #[track_caller]
+     fn place_buffer_in(
+         &self,
+         raw: vk::Buffer,
+@@ -3358,6 +3366,7 @@ impl Device {
+ 
+     /// [`place_buffer`](Device::place_buffer) for a heap's own buffer: where the heap's textures
+     /// can lie too (`Device::heap_requirements`).
++    #[track_caller]
+     pub(super) fn place_heap_buffer(
+         &self,
+         raw: vk::Buffer,
+@@ -3376,6 +3385,7 @@ impl Device {
+     /// `block_address`, `raw` was made without the device-address usage and its device address
+     /// is its block's (`memory::allocate_addressed`, the placement's `address`); else its own,
+     /// where it has the usage.
++    #[track_caller]
+     fn place_buffer_with(
+         &self,
+         raw: vk::Buffer,
 diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
 --- a/crates/metal2vulkan-runtime/src/memory.rs
 +++ b/crates/metal2vulkan-runtime/src/memory.rs
-@@ -934,6 +934,10 @@
-     /// freed, the source dropped, when their last holder goes.
-     #[cfg(unix)]
-     dma_buf: Option<Arc<DmaBufPages>>,
-+    /// Where the runtime asked for it, for the live bytes by place ([`m2v_placement_sites`]): the caller
-+    /// of its allocation, carried up through the image and buffer helpers marked
+@@ -1842,6 +1842,10 @@ pub(super) struct Placement {
+     /// The device's import of a chunk of a guest RAM the placement lies in (`host_ram.rs`), which
+     /// no block of the placement's holds: kept until the placement goes.
+     ram_chunk: Option<Arc<RamChunk>>,
++    /// Where the runtime asked for it, for the live bytes by place ([`m2v_placement_sites`]): the
++    /// caller of its allocation, carried up through the image and buffer helpers marked
 +    /// `#[track_caller]`. Only a placement in a block of the runtime's has one.
 +    site: Option<&'static std::panic::Location<'static>>,
  }
  
  impl Placement {
-@@ -960,6 +964,7 @@
-             read_only_view: false,
+@@ -1872,6 +1876,7 @@ impl Placement {
              #[cfg(unix)]
              dma_buf: None,
+             ram_chunk: None,
 +            site: None,
          }
      }
  
-@@ -989,7 +994,19 @@
-             own_pages: false,
-             read_only_view: false,
-             dma_buf: Some(pages),
--        }
+@@ -1906,6 +1911,7 @@ impl Placement {
+             #[cfg(unix)]
+             dma_buf,
+             ram_chunk: Some(chunk),
 +            site: None,
-+        }
-+    }
-+
+         }
+     }
+ 
+@@ -1939,9 +1945,22 @@ impl Placement {
+             fresh: false,
+             dma_buf: Some(pages),
+             ram_chunk: None,
++            site: None,
+         }
+     }
+ 
 +    /// The placement, counted as asked for at `site` ([`m2v_placement_sites`]) where it lies in a
-+    /// block of the runtime's.
++    /// block of the runtime's: at the thread's outermost asking place where one is open
++    /// ([`AskedSite`]).
 +    fn asked_at(mut self, site: &'static std::panic::Location<'static>) -> Placement {
 +        let site = ASKED.with(|asked| asked.get()).unwrap_or(site);
 +        if self.block.is_some() {
@@ -38,26 +129,28 @@ diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-run
 +            self.site = Some(site);
 +        }
 +        self
-     }
- 
++    }
++
      /// The index of the memory type the placement's memory is of.
-@@ -1063,6 +1080,7 @@
-             read_only_view: self.read_only_view,
+     pub(super) fn type_index(&self) -> u32 {
+         self.type_index
+@@ -2068,6 +2087,7 @@ impl Placement {
              #[cfg(unix)]
              dma_buf: self.dma_buf.clone(),
+             ram_chunk: self.ram_chunk.clone(),
 +            site: self.site,
          }
      }
  }
-@@ -1463,6 +1481,7 @@
-             read_only_view: payload.view.is_some(),
+@@ -3438,6 +3458,7 @@ impl Memory {
              #[cfg(unix)]
              dma_buf: None,
+             ram_chunk: None,
 +            site: None,
          }
      }
  
-@@ -1892,6 +1911,9 @@
+@@ -3886,6 +3907,9 @@ impl Memory {
          let Some(index) = placement.block else {
              return after;
          };
@@ -67,23 +160,32 @@ diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-run
          self.say_placement("returned", placement, None);
          self.release_range(
              device,
-@@ -2150,12 +2172,14 @@
+@@ -4708,6 +4732,7 @@ unsafe fn import_pointer(
  /// Place memory meeting a buffer's `requirements` of `class` in `memory`: in a pooled block with
  /// room, else in a new block (dedicated when larger than half a block), trying the class's
- /// memory types best first ([`place`]).
+ /// memory types best first, then those it overflows into ([`overflow_candidates`], [`place`]).
 +#[track_caller]
  pub(super) fn allocate(
      memory: &Mutex<Memory>,
      device: &ash::Device,
-     requirements: &vk::MemoryRequirements,
+@@ -4719,6 +4744,7 @@ pub(super) fn allocate(
+ 
+ /// [`allocate`] in a block that holds `holds`: [`Holds::Buffers`], or [`Holds::FdBuffers`] for a
+ /// buffer made for [`FD_BLOCKS_HANDLE`] (`buffer.rs`'s `placed_new_buffer`).
++#[track_caller]
+ pub(super) fn allocate_in(
+     memory: &Mutex<Memory>,
+     device: &ash::Device,
+@@ -4726,6 +4752,7 @@ pub(super) fn allocate_in(
      class: MemoryClass,
+     holds: Holds,
  ) -> Result<Placement, Error> {
 +    let site = std::panic::Location::caller();
      place(
          memory,
          device,
-@@ -2165,15 +2189,18 @@
-         Holds::Buffers,
+@@ -4735,15 +4762,18 @@ pub(super) fn allocate_in(
+         holds,
          Fit::Pooled,
      )
 +    .map(|placement| placement.asked_at(site))
@@ -101,7 +203,7 @@ diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-run
      place(
          memory,
          device,
-@@ -2183,12 +2210,14 @@
+@@ -4753,12 +4783,14 @@ pub(super) fn allocate_image(
          Holds::Images,
          Fit::Pooled,
      )
@@ -116,7 +218,7 @@ diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-run
  pub(super) fn allocate_image_while_queued(
      memory: &Mutex<Memory>,
      device: &ash::Device,
-@@ -2199,6 +2228,7 @@
+@@ -4769,6 +4801,7 @@ pub(super) fn allocate_image_while_queued(
          true => Fit::Apart,
          false => Fit::Pooled,
      };
@@ -124,7 +226,7 @@ diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-run
      place(
          memory,
          device,
-@@ -2208,6 +2238,7 @@
+@@ -4778,6 +4811,7 @@ pub(super) fn allocate_image_while_queued(
          Holds::Images,
          fit,
      )
@@ -132,7 +234,7 @@ diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-run
  }
  
  /// Whether binding memory that queued work uses waits for that work on a device of `driver`:
-@@ -2223,6 +2254,7 @@
+@@ -4793,6 +4827,7 @@ fn binds_wait(driver: Option<DriverId>) -> bool {
  /// (the module docs): in a block of a memory type a buffer of addresses takes, which gets one if
  /// it has none (counted in `counts`), and with the placement's `address`. Without
  /// `bufferDeviceAddress`, as `allocate`.
@@ -140,7 +242,15 @@ diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-run
  pub(super) fn allocate_addressed(
      memory: &Mutex<Memory>,
      device: &ash::Device,
-@@ -2237,6 +2269,7 @@
+@@ -4810,6 +4845,7 @@ pub(super) fn allocate_addressed(
+ }
+ 
+ /// [`allocate_addressed`] in a block that holds `holds` ([`allocate_in`]).
++#[track_caller]
+ pub(super) fn allocate_addressed_in(
+     memory: &Mutex<Memory>,
+     device: &ash::Device,
+@@ -4824,6 +4860,7 @@ pub(super) fn allocate_addressed_in(
          memory_type_bits: requirements.memory_type_bits & types,
          ..*requirements
      };
@@ -148,15 +258,15 @@ diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-run
      place(
          memory,
          device,
-@@ -2246,6 +2279,7 @@
-         Holds::Buffers,
+@@ -4833,6 +4870,7 @@ pub(super) fn allocate_addressed_in(
+         holds,
          Fit::Pooled,
      )
 +    .map(|placement| placement.asked_at(site))
  }
  
- /// [`allocate`], in a block with a buffer of addresses where `addressed` gives the counts of the
-@@ -2445,3 +2479,81 @@
+ /// Memory meeting `buffer`'s `requirements` of `class`, allocated exportable as `exported` says
+@@ -5367,3 +5405,88 @@ impl<T> Pool<T> {
              .collect()
      }
  }
@@ -197,7 +307,8 @@ diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-run
 +
 +/// The live placements in the runtime's blocks by where they were asked for ([`Placement`]'s
 +/// `site`): bytes and count per source line, in every device of the process.
-+static SITES: Mutex<Vec<(&'static std::panic::Location<'static>, i64, i64)>> = Mutex::new(Vec::new());
++static SITES: Mutex<Vec<(&'static std::panic::Location<'static>, i64, i64)>> =
++    Mutex::new(Vec::new());
 +
 +fn sites_add(site: &'static std::panic::Location<'static>, bytes: i64) {
 +    let mut sites = SITES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -228,7 +339,13 @@ diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-run
 +    for (site, bytes, count) in sites.iter().take(32) {
 +        let file = site.file();
 +        let file = file.rfind("src/").map_or(file, |at| &file[at + 4..]);
-+        text.push_str(&format!("site {:.2} {} {}:{}\n", *bytes as f64 / 1048576.0, count, file, site.line()));
++        text.push_str(&format!(
++            "site {:.2} {} {}:{}\n",
++            *bytes as f64 / 1048576.0,
++            count,
++            file,
++            site.line()
++        ));
 +    }
 +    let length = text.len().min(size - 1);
 +    // SAFETY: the caller's `size` bytes at `out`.
@@ -241,8 +358,8 @@ diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-run
 diff --git a/crates/metal2vulkan-runtime/src/texture.rs b/crates/metal2vulkan-runtime/src/texture.rs
 --- a/crates/metal2vulkan-runtime/src/texture.rs
 +++ b/crates/metal2vulkan-runtime/src/texture.rs
-@@ -2045,12 +2045,14 @@
-         })
+@@ -2298,12 +2298,14 @@ impl Device {
+         self.texture_as(call, &descriptor, (id_use, Initial::Zero))
      }
  
 +    #[track_caller]
@@ -250,21 +367,21 @@ diff --git a/crates/metal2vulkan-runtime/src/texture.rs b/crates/metal2vulkan-ru
          &self,
          call: &'static str,
          descriptor: &TextureDescriptor,
-         id_use: IdUse,
+         (id_use, initial): (IdUse, Initial),
      ) -> Result<Texture, Error> {
 +        let _asked = crate::memory::AskedSite::enter();
          let options = descriptor.resource_options;
          let storage = options.storage_mode()?;
          let hazard = options.hazard_tracking_mode()?;
-@@ -2147,6 +2149,7 @@
-     /// [`new_texture_over_buffer`](Self::new_texture_over_buffer) makes it: an aliasing image (one
-     /// in place over host pages), else a shadow (announced once, counted by why over host pages).
-     /// Refused as it is.
+@@ -2424,6 +2426,7 @@ impl Device {
+     /// device's pooled memory before its class's verdict for an image at Metal's pitch there
+     /// (`Device::pooled_pitched_image`), sets `pending` to what it needs to move in place once the
+     /// verdict passes. Refused as it is.
 +    #[track_caller]
      fn storage_over_buffer(
          &self,
          call: &'static str,
-@@ -2154,6 +2157,7 @@
+@@ -2431,6 +2434,7 @@ impl Device {
          descriptor: &TextureDescriptor,
          layout: &TextureLayout,
      ) -> Result<Storage, Error> {
@@ -272,7 +389,7 @@ diff --git a/crates/metal2vulkan-runtime/src/texture.rs b/crates/metal2vulkan-ru
          let facts = self
              .shared()
              .textures
-@@ -2464,11 +2468,13 @@
+@@ -2768,11 +2772,13 @@ impl Device {
      /// image starts in `UNDEFINED`, which the device's next submission leaves for `GENERAL`
      /// (`texture/first_move.rs`): making it waits for no GPU work. Refused as `new_texture`
      /// refuses the image.
@@ -286,7 +403,7 @@ diff --git a/crates/metal2vulkan-runtime/src/texture.rs b/crates/metal2vulkan-ru
          if let Some(texture) = maker.lend(descriptor, &plan) {
              return Ok(texture);
          }
-@@ -2858,6 +2864,7 @@
+@@ -3715,6 +3721,7 @@ impl Device {
      /// The image of `plan` for a texture of `layout` made with `descriptor` (and its hazard
      /// tracking mode `hazard`), checked against the device's limits for it, placed, and in the
      /// `GENERAL` layout.
@@ -294,15 +411,15 @@ diff --git a/crates/metal2vulkan-runtime/src/texture.rs b/crates/metal2vulkan-ru
      fn new_image(
          &self,
          plan: ImagePlan,
-@@ -2877,6 +2884,7 @@
-     /// shape was written and released; those it compresses read a fixed pattern, which the
-     /// runtime does not give yet). The runtime's own images keep [`new_image`](Self::new_image)'s
-     /// start: an image its first command writes in full need not be zeroed first.
+@@ -3743,6 +3750,7 @@ impl Device {
+     /// `Memoryless` one at zero in every texel instead, uncounted. The runtime's own images keep
+     /// [`new_image`](Self::new_image)'s start: an image its first command writes in full need
+     /// not be zeroed first.
 +    #[track_caller]
      fn new_texture_image(
          &self,
          plan: ImagePlan,
-@@ -2908,6 +2916,7 @@
+@@ -3808,6 +3816,7 @@ impl Device {
      /// A `VkImage` of `plan` for a texture of `texture_type`, checked against the device's limits
      /// for it, placed in memory of `class` of its own and bound there, in the `UNDEFINED` layout,
      /// shared as `sharing` says (the device's, or the staging queue's).
@@ -310,7 +427,15 @@ diff --git a/crates/metal2vulkan-runtime/src/texture.rs b/crates/metal2vulkan-ru
      fn placed_image(
          &self,
          plan: &ImagePlan,
-@@ -2977,6 +2986,7 @@
+@@ -3823,6 +3832,7 @@ impl Device {
+     /// allocated zero-initialized, `Memory::zero_image_blocks`): its placement says whether its
+     /// bytes read zero (`Placement::fresh`), where it may move out of that layout keeping them;
+     /// elsewhere it moves out of `UNDEFINED` instead, which any image may, and is zeroed.
++    #[track_caller]
+     fn placed_image_starting(
+         &self,
+         plan: &ImagePlan,
+@@ -3891,6 +3901,7 @@ impl Device {
  
      /// [`placed_image`](Self::placed_image)'s image, or a parked image of the same making
      /// (`recycle.rs`), noted as one the recycler may park as it goes.
@@ -318,7 +443,7 @@ diff --git a/crates/metal2vulkan-runtime/src/texture.rs b/crates/metal2vulkan-ru
      fn recycled_image(
          &self,
          plan: &ImagePlan,
-@@ -3018,6 +3028,7 @@
+@@ -3941,6 +3952,7 @@ impl Device {
      /// `HOST_IMAGE_TRANSFER` at optimal tiling, and the device makes and places the image so (in
      /// host-cached memory of `class` where the device has it; only there where the image would
      /// otherwise copy on the staging queue, `staged`); `None` elsewhere, the image made as before.
@@ -326,7 +451,7 @@ diff --git a/crates/metal2vulkan-runtime/src/texture.rs b/crates/metal2vulkan-ru
      fn host_placed_image(
          &self,
          plan: &ImagePlan,
-@@ -3052,6 +3063,7 @@
+@@ -3977,6 +3989,7 @@ impl Device {
      /// [`new_image`](Self::new_image)'s image, of `identity`, its owner made by `owner` of its
      /// placement and `VkImage` (a heap's unaliased texture and a shadow whose copies leave an
      /// aspect out, `texture/heap.rs`; a view's shadow, `texture/view_shadow.rs`).
@@ -334,7 +459,7 @@ diff --git a/crates/metal2vulkan-runtime/src/texture.rs b/crates/metal2vulkan-ru
      fn new_image_owned(
          &self,
          plan: ImagePlan,
-@@ -3075,6 +3087,7 @@
+@@ -4000,6 +4013,7 @@ impl Device {
      /// any command reads it: a texture's over a buffer (`storage_over_buffer`), and a heap
      /// texture's over the heap's bytes (`texture/heap.rs`, `new_heap_shadow` and
      /// `heap_planes_image`).
@@ -342,7 +467,7 @@ diff --git a/crates/metal2vulkan-runtime/src/texture.rs b/crates/metal2vulkan-ru
      fn new_image_as_it_lies(
          &self,
          plan: ImagePlan,
-@@ -3090,6 +3103,7 @@
+@@ -4015,6 +4029,7 @@ impl Device {
      /// `start` says so, else zeroed: on the host where it takes host copies, else by a clear
      /// where one writes its format ([`clears_to_zero`](Self::clears_to_zero)), else by copies of
      /// the device's zeros. (or moved alone, [`Start::Moved`].)
@@ -350,78 +475,3 @@ diff --git a/crates/metal2vulkan-runtime/src/texture.rs b/crates/metal2vulkan-ru
      fn new_image_starting(
          &self,
          plan: ImagePlan,
-diff --git a/crates/metal2vulkan-runtime/src/buffer.rs b/crates/metal2vulkan-runtime/src/buffer.rs
---- a/crates/metal2vulkan-runtime/src/buffer.rs
-+++ b/crates/metal2vulkan-runtime/src/buffer.rs
-@@ -1871,6 +1871,7 @@
-     /// A buffer of `length` bytes, all zero, with `options`, at `placement` in the address space,
-     /// for `call`, and the memory class it took: refused as [`Device::new_buffer`] refuses it,
-     /// and for a pin the address space cannot honour.
-+    #[track_caller]
-     pub(super) fn buffer_of_length(
-         &self,
-         call: &'static str,
-@@ -1919,6 +1920,7 @@
-     /// A buffer of `length` bytes (above 0), all zero, in memory of `class` with `modes`, at
-     /// `placement` in the address space: a heap's own buffer when `of_heap` (`heap.rs`). Its
-     /// length is the caller's to check.
-+    #[track_caller]
-     pub(super) fn zeroed_buffer(
-         &self,
-         call: &'static str,
-@@ -1950,6 +1952,7 @@
- 
-     /// [`scratch_buffer`](Device::scratch_buffer) of hazard tracking `tracking`: the tracker
-     /// orders its uses as any buffer's of that mode.
-+    #[track_caller]
-     pub(super) fn unzeroed_buffer(
-         &self,
-         length: u64,
-@@ -1970,6 +1973,7 @@
-     /// for is paid by the region, for the region's bytes alone. A chunk made in fresh pages reads
-     /// zero unwritten ([`NewBytes::Zero`], `fresh_pages.rs`), so a region of one writes nothing
-     /// past its data: that is what the second half of the answer is for.
-+    #[track_caller]
-     pub(super) fn unzeroed_buffer_with(
-         &self,
-         length: u64,
-@@ -1995,6 +1999,7 @@
-     /// what they hold: its memory's bytes as placed, or zero where it lies in fresh pages it
-     /// imported (`fresh_pages.rs`). A buffer not of a heap is a parked one of the same making
-     /// where the recycler holds one, and is noted as one it may park as it goes (`recycle.rs`).
-+    #[track_caller]
-     fn placed_new_buffer(
-         &self,
-         call: &'static str,
-@@ -2004,6 +2009,7 @@
-         of_heap: bool,
-         placement: Place,
-     ) -> Result<(Buffer, NewBytes), Error> {
-+        let _asked = crate::memory::AskedSite::enter();
-         if self.is_lost() {
-             return Err(Error::DeviceLost);
-         }
-@@ -2488,6 +2494,7 @@
- 
-     /// Place `raw` (for a buffer of `length` bytes) in memory of `class` and at `at` in the
-     /// address space; released again when either fails.
-+    #[track_caller]
-     pub(super) fn place_buffer(
-         &self,
-         raw: vk::Buffer,
-@@ -2502,6 +2509,7 @@
- 
-     /// [`place_buffer`](Device::place_buffer) for a heap's own buffer: where the heap's textures
-     /// can lie too (`Device::heap_requirements`).
-+    #[track_caller]
-     pub(super) fn place_heap_buffer(
-         &self,
-         raw: vk::Buffer,
-@@ -2519,6 +2527,7 @@
-     /// the buffer's own. Where `block_address`, `raw` was made without the device-address usage
-     /// and its device address is its block's (`memory::allocate_addressed`, the placement's
-     /// `address`); else its own, where it has the usage.
-+    #[track_caller]
-     fn place_buffer_with(
-         &self,
-         raw: vk::Buffer,

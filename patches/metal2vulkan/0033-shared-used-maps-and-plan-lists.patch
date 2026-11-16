@@ -1,17 +1,16 @@
 diff --git a/crates/metal2vulkan-runtime/src/live_bind.rs b/crates/metal2vulkan-runtime/src/live_bind.rs
-index ea81971b0..da00ab3a5 100644
 --- a/crates/metal2vulkan-runtime/src/live_bind.rs
 +++ b/crates/metal2vulkan-runtime/src/live_bind.rs
-@@ -72,7 +72,7 @@
+@@ -92,7 +92,7 @@
  //!   go as the encoder ends ([`SpareLiveBinds::give`]).
  
  use ash::vk;
--use metal2vulkan::bind::{BindShape, BindState, DrawCommands};
-+use metal2vulkan::bind::{BindShape, BindState, DrawCommands, UsedShapes};
- use metal2vulkan::pipeline::PipelineInterface;
+-use metal2vulkan::bind::{BindShape, BindState, DrawCommands, SlotRebinds};
++use metal2vulkan::bind::{BindShape, BindState, DrawCommands, SlotRebinds, UsedShapes};
+ use metal2vulkan::pipeline::{PipelineInterface, SlotRef};
  use std::any::Any;
  use std::collections::btree_map::Entry;
-@@ -257,6 +257,12 @@ impl RecentShapes {
+@@ -327,6 +327,12 @@ impl RecentShapes {
              .cloned()
      }
  
@@ -24,7 +23,7 @@ index ea81971b0..da00ab3a5 100644
      /// Keep `shape`, the state's now, in place of the one kept longest where they are full.
      fn keep(&mut self, shape: &Arc<BindShape>) {
          if let Some(at) = self.0.iter().position(|kept| Arc::ptr_eq(kept, shape)) {
-@@ -450,7 +456,12 @@ impl LiveBind {
+@@ -728,7 +734,12 @@ impl LiveBind {
              }
              None => {
                  counts.draw_shape_made();
@@ -39,7 +38,6 @@ index ea81971b0..da00ab3a5 100644
          };
          self.recent.keep(&shape);
 diff --git a/crates/metal2vulkan-runtime/src/pipeline/memo.rs b/crates/metal2vulkan-runtime/src/pipeline/memo.rs
-index 2d01d433a..7ebf7b66b 100644
 --- a/crates/metal2vulkan-runtime/src/pipeline/memo.rs
 +++ b/crates/metal2vulkan-runtime/src/pipeline/memo.rs
 @@ -175,6 +175,18 @@ impl<K: Clone + Eq + Hash, V> Lru<K, V> {
@@ -62,10 +60,9 @@ index 2d01d433a..7ebf7b66b 100644
      #[cfg(test)]
      pub(crate) fn reordered(&self) -> u64 {
 diff --git a/crates/metal2vulkan-runtime/src/pipeline/mod.rs b/crates/metal2vulkan-runtime/src/pipeline/mod.rs
-index 0f549a8f4..804553093 100644
 --- a/crates/metal2vulkan-runtime/src/pipeline/mod.rs
 +++ b/crates/metal2vulkan-runtime/src/pipeline/mod.rs
-@@ -1669,12 +1669,16 @@ impl Variant {
+@@ -1887,12 +1887,16 @@ impl Variant {
          if let Some(plan) = lock(&self.plans).get(shape) {
              return Ok(Arc::clone(plan));
          }
@@ -89,10 +86,9 @@ index 0f549a8f4..804553093 100644
      }
  
 diff --git a/crates/metal2vulkan-runtime/src/pipeline/render.rs b/crates/metal2vulkan-runtime/src/pipeline/render.rs
-index 641a8a580..04888a9b0 100644
 --- a/crates/metal2vulkan-runtime/src/pipeline/render.rs
 +++ b/crates/metal2vulkan-runtime/src/pipeline/render.rs
-@@ -2690,8 +2690,17 @@ impl RenderVariant {
+@@ -3049,8 +3049,17 @@ impl RenderVariant {
                  plan.specialization = residual;
              }
          }
@@ -112,37 +108,59 @@ index 641a8a580..04888a9b0 100644
      }
  
 diff --git a/crates/metal2vulkan-runtime/src/render.rs b/crates/metal2vulkan-runtime/src/render.rs
-index 6e282f34a..f0eb7a490 100644
 --- a/crates/metal2vulkan-runtime/src/render.rs
 +++ b/crates/metal2vulkan-runtime/src/render.rs
-@@ -6360,7 +6360,9 @@ impl RenderLowering {
+@@ -7137,7 +7137,20 @@ impl RenderLowering {
                      (false, false) => cause,
                  };
                  self.core.device().shared().counts.instance_split(cause);
 -                let previous = std::mem::replace(&mut self.current, *instance);
 +                let mut previous = std::mem::replace(&mut self.current, *instance);
-+                // What it gathered packed: it holds it until the encoder ends.
-+                previous.shadows.close();
++                // What it gathered packed, where no later draw gathers into it: it holds it
++                // until the encoder ends. An instance that continues the one before gathers
++                // into the first it continues ([`gathering`](Self::gathering)), which is closed
++                // as an instance that continues none follows, as are those continuing it.
++                if !self.current.continues {
++                    if previous.continues {
++                        let first = (self.earlier.iter()).rposition(|instance| !instance.continues);
++                        if let Some(first) = first {
++                            self.earlier[first].shadows.close();
++                        }
++                    }
++                    previous.shadows.close();
++                }
                  self.earlier.push(previous);
                  self.barrier_splits += usize::from(self.barrier);
-                 if self.barrier {
+                 self.attached_read_splits += usize::from(cause == Split::AttachedRead);
+diff --git a/crates/metal2vulkan-runtime/src/render/draw_room.rs b/crates/metal2vulkan-runtime/src/render/draw_room.rs
+--- a/crates/metal2vulkan-runtime/src/render/draw_room.rs
++++ b/crates/metal2vulkan-runtime/src/render/draw_room.rs
+@@ -22,7 +22,7 @@ const SPARE_ROOMS: usize = 4;
+ 
+ /// The most buffers' and images' entries a kept room holds room for: a room grown past it by a
+ /// pass that used more goes, so a device keeps no more than a few passes' worth.
+-const ROOM_ENTRIES: usize = 64;
++pub(super) const ROOM_ENTRIES: usize = 64;
+ 
+ /// The room of one render encoder's gathering: its first instance's shadowed textures and bytes
+ /// ([`InstanceShadows`]) and drawn area ([`DrawnArea`]), and its pass's drawn area and fragment
 diff --git a/crates/metal2vulkan-runtime/src/render/shadows.rs b/crates/metal2vulkan-runtime/src/render/shadows.rs
-index 8a21c90c1..b13afdcce 100644
 --- a/crates/metal2vulkan-runtime/src/render/shadows.rs
 +++ b/crates/metal2vulkan-runtime/src/render/shadows.rs
-@@ -97,6 +97,11 @@ pub(super) struct InstanceShadows {
-     /// gathered stays until it is cleared, so a draw that begins with the same gathered those
-     /// already.
-     last_prefix: Option<(u64, usize)>,
+@@ -107,6 +107,12 @@ pub(super) struct InstanceShadows {
+     /// the pass's first instance's, of textures its draws sample whose color it clears, after a
+     /// memory barrier before its first draw (`texture/attached_reads.rs`).
+     clears: Vec<(ResourceKey, vk::ClearColorValue)>,
 +    /// `bytes` of an instance the pass went past ([`close`](Self::close)), in its order: a range
 +    /// per entry, packed, as an instance holds a list of each buffer its draws reach (every
 +    /// resident one) until the encoder ends, and a pass that makes resources resident between its
-+    /// draws splits into many. Unpacked into `bytes` again where a draw gathers into it.
++    /// draws splits into many. Unpacked into `bytes` again where a draw gathers into it; while it
++    /// holds any, `bytes` gathers none.
 +    packed: Vec<((ResourceKey, bool), Range<u64>)>,
  }
  
  /// `range` of the buffer `key` as a use, read or written (`write`), for `shadow.rs`, which reads
-@@ -164,10 +169,13 @@ fn range_use(key: ResourceKey, write: bool, range: UseRange) -> Use<ResourceKey>
+@@ -198,10 +204,13 @@ fn ranges_mut<'a>(
  /// Add `range` to `ranges` (in order, apart): merged with those it meets or touches, and past
  /// [`RANGES_PER_BUFFER`] the two nearest merged.
  fn insert(ranges: &mut Vec<Range<u64>>, mut range: Range<u64>) {
@@ -160,29 +178,50 @@ index 8a21c90c1..b13afdcce 100644
      }
      ranges.retain(|other| {
          let meets = other.start <= range.end && range.start <= other.end;
-@@ -211,8 +219,33 @@ impl InstanceShadows {
+@@ -230,6 +239,7 @@ impl InstanceShadows {
+         (
+             self.shadows.len(),
+             &self.bytes[..self.held],
++            &self.packed,
+             &self.images,
+             &self.last,
+             self.last_prefix,
+@@ -264,8 +274,46 @@ impl InstanceShadows {
          self.add(&[], &[used]);
      }
  
-+    /// The pass went past the instance: its gathered bytes packed, and the uses kept to compare
-+    /// the next draw's with let go of (a draw that gathers into it again walks its uses whole,
-+    /// gathering nothing new where they are gathered: each range only grows).
++    /// The pass went past the instance and no later draw gathers into it (`RenderLowering::
++    /// install`): its gathered bytes packed, one entry a range, and its lists and the uses kept to
++    /// compare the next draw's with let go of (a draw that gathers into it again all the same
++    /// walks its uses whole, gathering nothing new where they are gathered: each range only
++    /// grows). One whose room a device would keep for a later encoder's pass
++    /// ([`DrawRoom`](super::draw_room::DrawRoom), at most `ROOM_ENTRIES`) keeps it as it is: it
++    /// holds few buffers, and its lists' room is what that pass takes.
 +    pub(super) fn close(&mut self) {
-+        self.last = Vec::new();
-+        self.unpack();
-+        let bytes = std::mem::take(&mut self.bytes);
-+        self.packed
-+            .reserve_exact(bytes.values().map(Vec::len).sum());
-+        for (key, ranges) in bytes {
-+            self.packed
-+                .extend(ranges.into_iter().map(|range| (key, range)));
++        if self.room() <= super::draw_room::ROOM_ENTRIES {
++            return;
 +        }
++        self.last = Vec::new();
++        if self.held > 0 {
++            debug_assert!(
++                self.packed.is_empty(),
++                "an instance gathered beside its packed bytes"
++            );
++            let ranges = self.held().iter().map(|(_, ranges)| ranges.len()).sum();
++            self.packed.reserve_exact(ranges);
++            for (key, ranges) in &self.bytes[..self.held] {
++                (self.packed).extend(ranges.iter().map(|range| (*key, range.clone())));
++            }
++        }
++        self.bytes = Vec::new();
++        self.held = 0;
 +    }
 +
-+    /// Its packed bytes ([`close`](Self::close)) back in `bytes`, where a draw gathers into it.
++    /// Its packed bytes ([`close`](Self::close)) back in `bytes`, where a draw gathers into it:
++    /// in their order, so each buffer's list is the one it packed.
 +    fn unpack(&mut self) {
 +        for (key, range) in std::mem::take(&mut self.packed) {
-+            self.bytes.entry(key).or_default().push(range);
++            ranges_mut(&mut self.bytes, &mut self.held, key).push(range);
 +        }
 +    }
 +
@@ -194,30 +233,57 @@ index 8a21c90c1..b13afdcce 100644
          for shadow in shadows {
              shadow::join(&mut self.shadows, shadow);
          }
-@@ -277,11 +310,15 @@ impl InstanceShadows {
-             .into_iter()
-             .filter(|(_, access)| !access.is_empty())
-             .all(|(write, _)| match &used.range {
--                UseRange::Bytes(range) => self.bytes.get(&(used.key, write)).is_some_and(|ranges| {
--                    ranges
--                        .iter()
--                        .any(|held| held.start <= range.start && range.end <= held.end)
--                }),
-+                UseRange::Bytes(range) => {
-+                    let within =
-+                        |held: &Range<u64>| held.start <= range.start && range.end <= held.end;
-+                    let packed = (self.packed.iter())
-+                        .any(|(at, held)| *at == (used.key, write) && within(held));
-+                    packed
-+                        || (self.bytes.get(&(used.key, write)))
-+                            .is_some_and(|ranges| ranges.iter().any(within))
-+                }
-                 image => self
-                     .images
-                     .get(&(used.key, write))
-@@ -296,6 +333,9 @@ impl InstanceShadows {
+@@ -288,7 +336,7 @@ impl InstanceShadows {
+     /// `add` skips every use equal to the last draw's at its place. Whether it took them so: the
+     /// last draw's uses were as many; else it changed nothing, and the caller adds them whole.
+     pub(super) fn add_moved(&mut self, uses: &[Use<ResourceKey>], at: &[usize]) -> bool {
+-        if self.last.len() != uses.len() {
++        if self.last.len() != uses.len() || !self.packed.is_empty() {
+             return false;
+         }
+         for &at in at {
+@@ -370,12 +418,15 @@ impl InstanceShadows {
+                 let key = (used.key, write);
+                 match &used.range {
+                     UseRange::Bytes(range) => {
++                        let within =
++                            |held: &Range<u64>| held.start <= range.start && range.end <= held.end;
+                         let held = self.held();
+-                        held.binary_search_by_key(&key, |&(at, _)| at)
+-                            .is_ok_and(|at| {
+-                                (held[at].1.iter())
+-                                    .any(|held| held.start <= range.start && range.end <= held.end)
+-                            })
++                        let packed =
++                            (self.packed.iter()).any(|(at, held)| *at == key && within(held));
++                        packed
++                            || held
++                                .binary_search_by_key(&key, |&(at, _)| at)
++                                .is_ok_and(|at| held[at].1.iter().any(within))
+                     }
+                     image => (self.images.binary_search_by_key(&key, |&(at, _)| at))
+                         .is_ok_and(|at| span(&self.images[at].1, image) == self.images[at].1),
+@@ -412,6 +463,8 @@ impl InstanceShadows {
+         self.last.clear();
+         self.last_prefix = None;
+         self.clears.clear();
++        // Made only by an instance the pass went past, which no later pass takes again.
++        self.packed = Vec::new();
+     }
+ 
+     /// Make the copy in of each shadow among `clears` a clear to its value
+@@ -432,7 +485,7 @@ impl InstanceShadows {
+     /// How many uses [`uses`](Self::uses) gives.
+     fn uses_len(&self) -> usize {
+         let bytes: usize = self.held().iter().map(|(_, ranges)| ranges.len()).sum();
+-        bytes + self.images.len()
++        bytes + self.packed.len() + self.images.len()
+     }
+ 
+     /// The gathered bytes and images as uses.
+@@ -442,6 +495,9 @@ impl InstanceShadows {
                  .iter()
-                 .map(move |range| bytes_use(key, write, range.clone()))
+                 .map(move |range| bytes_use(*key, *write, range.clone()))
          });
 +        let packed = (self.packed.iter())
 +            .map(|&((key, write), ref range)| bytes_use(key, write, range.clone()));
@@ -225,37 +291,70 @@ index 8a21c90c1..b13afdcce 100644
          let images = self
              .images
              .iter()
-@@ -758,6 +798,25 @@ mod tests {
+@@ -979,6 +1035,50 @@ mod tests {
          }
      }
  
 +    /// An instance the pass went past packs what it gathered and gives the same uses, and one a
-+    /// draw gathers into again unpacks it and merges as before.
++    /// draw gathers into again unpacks it and merges as before; one of few buffers, whose room a
++    /// device would keep for a later pass (`draw_room.rs`), keeps its lists as they are.
 +    #[test]
 +    fn a_closed_instance_gives_what_it_gathered() {
 +        let (a, b) = (ResourceKey::new(), ResourceKey::new());
++        let mut few = InstanceShadows::default();
++        few.add(&[], &[bytes(a, 0..16, false), bytes(b, 8..24, true)]);
++        let before: Vec<_> = few.uses().collect();
++        few.close();
++        assert!(few.packed.is_empty() && few.held().len() == 2 && few.last.len() == 2);
++        assert_eq!(few.uses().collect::<Vec<_>>(), before);
++        // Every resident buffer of an encoder, as a draw of WebKit's reaches them.
++        let resident: Vec<_> = (0..super::super::draw_room::ROOM_ENTRIES + 8)
++            .map(|at| bytes(ResourceKey::new(), 0..64 + at as u64, false))
++            .collect();
 +        let mut gathered = InstanceShadows::default();
++        gathered.add(&[], &resident);
 +        gathered.add(&[], &[bytes(a, 0..16, false), bytes(b, 8..24, true)]);
 +        gathered.add(&[], &[bytes(a, 32..48, false)]);
 +        let before: Vec<_> = gathered.uses().collect();
++        let count = gathered.uses_len();
 +        gathered.close();
-+        assert!(gathered.bytes.is_empty() && gathered.packed.len() == 3 && gathered.last.is_empty());
++        assert!(gathered.held().is_empty() && gathered.bytes.is_empty());
++        assert!(gathered.packed.len() == resident.len() + 3 && gathered.last.is_empty());
 +        let after: Vec<_> = gathered.uses().collect();
 +        assert_eq!(before, after);
++        assert_eq!(gathered.uses_len(), count);
++        #[cfg(debug_assertions)]
++        assert!(before.iter().all(|used| gathered.holds(used)));
++        // Closed again, gathering nothing since: it stays packed.
++        gathered.close();
++        assert_eq!(gathered.packed.len(), resident.len() + 3);
 +        gathered.add(&[], &[bytes(a, 16..32, false)]);
 +        assert!(gathered.packed.is_empty());
-+        assert_eq!(gathered.bytes[&(a, false)], [0..48]);
-+        assert_eq!(gathered.bytes[&(b, true)], [8..24]);
++        assert_eq!(*gathered.ranges((a, false)), [0..48]);
++        assert_eq!(*gathered.ranges((b, true)), [8..24]);
++        assert_eq!(gathered.held().len(), resident.len() + 2);
++        // Cleared, it holds nothing packed either.
++        gathered.close();
++        gathered.clear();
++        assert!(gathered.packed.is_empty() && gathered.uses().count() == 0);
 +    }
 +
      /// An instance keeps each buffer's read bytes and written bytes apart, merged where ranges
      /// meet or touch, so draws over one buffer leave few ranges; uses of images are not bytes and
      /// are left out; past `RANGES_PER_BUFFER` ranges of one buffer, the two nearest merge.
+@@ -1020,7 +1120,7 @@ mod tests {
+         let ranges = bounded.ranges((a, true));
+         assert_eq!(ranges.len(), RANGES_PER_BUFFER);
+         assert!(ranges.contains(&(300..340)), "{ranges:?}");
+-        // Its list took room for every range it keeps and the merge's one at its first, and
++        // Its list took room for every range it keeps and the merge's one at its second, and
+         // never grew.
+         assert_eq!(ranges.capacity(), RANGES_PER_BUFFER + 1);
+     }
 diff --git a/crates/metal2vulkan/src/bind/graphics.rs b/crates/metal2vulkan/src/bind/graphics.rs
-index 65bc882eb..6ef1a992d 100644
 --- a/crates/metal2vulkan/src/bind/graphics.rs
 +++ b/crates/metal2vulkan/src/bind/graphics.rs
-@@ -2528,9 +2528,9 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
+@@ -2563,9 +2563,9 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
      Ok(BindingPlan {
          variant,
          specialization,
@@ -268,10 +367,9 @@ index 65bc882eb..6ef1a992d 100644
          diagnostics,
          compute: None,
 diff --git a/crates/metal2vulkan/src/bind/heap.rs b/crates/metal2vulkan/src/bind/heap.rs
-index 7f746ceac..a8679db06 100644
 --- a/crates/metal2vulkan/src/bind/heap.rs
 +++ b/crates/metal2vulkan/src/bind/heap.rs
-@@ -1416,7 +1416,7 @@ impl<'a> HeapPlanner<'a> {
+@@ -1561,7 +1561,7 @@ impl<'a> HeapPlanner<'a> {
      ) {
          one_layout_per_slot(descriptors);
          self.merge_uses(uses, stages);
@@ -281,10 +379,9 @@ index 7f746ceac..a8679db06 100644
          template.sampler_tables = self.planned_samplers;
          // A shape admitted as a command buffer commits meets the members as the plan checked
 diff --git a/crates/metal2vulkan/src/bind/mod.rs b/crates/metal2vulkan/src/bind/mod.rs
-index 828f8877d..6ff4bd6d3 100644
 --- a/crates/metal2vulkan/src/bind/mod.rs
 +++ b/crates/metal2vulkan/src/bind/mod.rs
-@@ -163,6 +163,7 @@ pub(crate) mod shadow_copy_back;
+@@ -175,6 +175,7 @@ pub(crate) mod shadow_copy_back;
  pub(crate) mod shadow_copy_in;
  pub(crate) mod shadow_merge;
  pub(crate) mod shadow_merge_image;
@@ -292,7 +389,7 @@ index 828f8877d..6ff4bd6d3 100644
  pub(crate) mod state;
  pub(crate) mod status;
  pub(crate) mod table;
-@@ -282,7 +283,7 @@ pub use state::{
+@@ -299,7 +300,7 @@ pub use state::{
      BufferShape, CompensatedViewport, FragmentTests, FunctionTablesShape, HeapPlacement,
      ImageblockSize, ResourceClass, SamplerDescriptor, SamplerShape, StageInRegion, StageShape,
      StageTable, TessellationFactorBuffer, TessellationFactors, TextureFacts, TextureShape,
@@ -301,7 +398,7 @@ index 828f8877d..6ff4bd6d3 100644
      VertexAmplification, ViewMapping,
  };
  // How `BindState::shape` classes a buffer: the crate reads it from `state`, and a consumer takes
-@@ -310,6 +311,7 @@ pub use shadow_merge_image::{
+@@ -327,6 +328,7 @@ pub use shadow_merge_image::{
      shadow_merge_image_module, shadow_merge_kept_image_module, ShadowMergeImageModule,
      ShadowMergeRead,
  };
@@ -310,7 +407,6 @@ index 828f8877d..6ff4bd6d3 100644
      ExecutionStatus, MeshRecordsFault, ReplayFaults, StatusBits, StatusReport, StatusWord,
      TessellationRecordsFault,
 diff --git a/crates/metal2vulkan/src/bind/plan.rs b/crates/metal2vulkan/src/bind/plan.rs
-index a6ab9bd85..936790f4a 100644
 --- a/crates/metal2vulkan/src/bind/plan.rs
 +++ b/crates/metal2vulkan/src/bind/plan.rs
 @@ -17,6 +17,7 @@ use crate::pipeline::artifact::SpecConstant;
@@ -360,9 +456,9 @@ index a6ab9bd85..936790f4a 100644
 +    }
 +
      /// The value this plan's bound resources give `key` where a stage reads it as data
-     /// (`PushField::Specialized`), the value instantiation pushes; `None` for a key no stage reads
-     /// so. A pipeline's key no longer carries such a value, so a runtime reads a stage's notes that
-@@ -443,7 +462,7 @@ pub(crate) struct PlannedVertexBuffer {
+     /// (`PushField::Specialized`), the value instantiation pushes, or where a stage's specialized
+     /// note alone tests it (`SpecKey::BoundSamplerWord`, the bound sampler's word), which nothing
+@@ -458,7 +477,7 @@ pub(crate) struct PlannedVertexBuffer {
  pub(crate) struct ResourceTemplate {
      pub texel_buffers: Vec<PlannedTexel>,
      /// Every heap member, in element order: `heap_members[i]` is element `i + 1`.
@@ -372,10 +468,9 @@ index a6ab9bd85..936790f4a 100644
      pub handle_tables: Vec<crate::bind::heap::PlannedHandleTable>,
      /// The level count the binder pushes for each slot whose level count a function reads
 diff --git a/crates/metal2vulkan/src/bind/plan/compute.rs b/crates/metal2vulkan/src/bind/plan/compute.rs
-index b8fe5442a..171dc8cd7 100644
 --- a/crates/metal2vulkan/src/bind/plan/compute.rs
 +++ b/crates/metal2vulkan/src/bind/plan/compute.rs
-@@ -851,9 +851,9 @@ fn plan(p: &ComputePipeline, device: &Device, shape: &BindShape) -> Result<Bindi
+@@ -869,9 +869,9 @@ fn plan(p: &ComputePipeline, device: &Device, shape: &BindShape) -> Result<Bindi
      Ok(BindingPlan {
          variant,
          specialization,
@@ -389,7 +484,6 @@ index b8fe5442a..171dc8cd7 100644
          graphics: None,
 diff --git a/crates/metal2vulkan/src/bind/shared_list.rs b/crates/metal2vulkan/src/bind/shared_list.rs
 new file mode 100644
-index 000000000..401e9fce0
 --- /dev/null
 +++ b/crates/metal2vulkan/src/bind/shared_list.rs
 @@ -0,0 +1,174 @@
@@ -568,10 +662,9 @@ index 000000000..401e9fce0
 +    }
 +}
 diff --git a/crates/metal2vulkan/src/bind/state.rs b/crates/metal2vulkan/src/bind/state.rs
-index afd519fcf..747836e45 100644
 --- a/crates/metal2vulkan/src/bind/state.rs
 +++ b/crates/metal2vulkan/src/bind/state.rs
-@@ -691,6 +691,22 @@ impl BindState {
+@@ -700,6 +700,22 @@ impl BindState {
      /// left out: they only change per-draw bytes. A stage whose tables are all empty is left out,
      /// so an empty table and an absent one have the same shape.
      pub fn shape(&self) -> BindShape {
@@ -594,7 +687,7 @@ index afd519fcf..747836e45 100644
          let stages = self
              .stages
              .iter()
-@@ -699,7 +715,7 @@ impl BindState {
+@@ -708,7 +724,7 @@ impl BindState {
              .collect();
          BindShape {
              stages,
@@ -603,7 +696,7 @@ index afd519fcf..747836e45 100644
              vertex_amplification: self.vertex_amplification.clone(),
              imageblock_size: self.imageblock_size,
              render_target_array_length: self.render_target_array_length,
-@@ -758,7 +774,7 @@ impl BindState {
+@@ -768,7 +784,7 @@ impl BindState {
              && match (self.used_resources.is_empty(), self.used_in_token_order) {
                  (true, _) => shape.used.is_empty(),
                  (false, true) => self.used_in_order_are(&shape.used),
@@ -612,7 +705,7 @@ index afd519fcf..747836e45 100644
              }
      }
  
-@@ -1601,8 +1617,9 @@ pub fn length_class(length: u64) -> u8 {
+@@ -1654,8 +1670,9 @@ pub fn length_class(length: u64) -> u8 {
  pub struct BindShape {
      pub stages: BTreeMap<Stage, StageShape>,
      /// `BindState.used_resources` by consumer token: what a plan lists in its `uses` for the
@@ -624,7 +717,7 @@ index afd519fcf..747836e45 100644
      /// `BindState.vertex_amplification`: a render plan's views and amplification count.
      #[cfg_attr(feature = "serde", serde(default))]
      pub vertex_amplification: VertexAmplification,
-@@ -1696,6 +1713,17 @@ pub struct BindShape {
+@@ -1753,6 +1770,17 @@ pub struct BindShape {
  }
  
  impl BindShape {
@@ -642,7 +735,7 @@ index afd519fcf..747836e45 100644
      /// The shape a plan of a pipeline whose runtime dependencies are `dependencies` is planned
      /// and keyed by: this shape with each bound texture's level count 1 but at the slots whose
      /// levels the pipeline reads (`RuntimeFact::StorageTextureLevels` and
-@@ -1742,11 +1770,7 @@ impl BindShape {
+@@ -1799,11 +1827,7 @@ impl BindShape {
                  }
              }
          }
@@ -655,7 +748,7 @@ index afd519fcf..747836e45 100644
          Cow::Owned(projected)
      }
  }
-@@ -1913,6 +1937,163 @@ pub struct UsedShape {
+@@ -1970,6 +1994,163 @@ pub struct UsedShape {
      pub stages: metal::RenderStages,
  }
  
@@ -820,10 +913,9 @@ index afd519fcf..747836e45 100644
  /// views depend on them).
  #[non_exhaustive]
 diff --git a/crates/metal2vulkan/src/pipeline/api_tests.rs b/crates/metal2vulkan/src/pipeline/api_tests.rs
-index 6052dc5ed..45546761d 100644
 --- a/crates/metal2vulkan/src/pipeline/api_tests.rs
 +++ b/crates/metal2vulkan/src/pipeline/api_tests.rs
-@@ -1056,7 +1056,7 @@ mod bind_serde_round_trips {
+@@ -1084,7 +1084,7 @@ mod bind_serde_round_trips {
          stages.insert(Stage::Fragment, shape);
          round_trip(&BindShape {
              stages,

@@ -1,5 +1,4 @@
 diff --git a/crates/metal2vulkan-runtime/src/rotated.rs b/crates/metal2vulkan-runtime/src/rotated.rs
-index 71c8137d..125708ee 100644
 --- a/crates/metal2vulkan-runtime/src/rotated.rs
 +++ b/crates/metal2vulkan-runtime/src/rotated.rs
 @@ -52,6 +52,16 @@ use super::Device;
